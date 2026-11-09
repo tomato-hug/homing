@@ -31,3 +31,6 @@ desktop/src-tauri/icons/icon.iconset/
 dist/
 *.dmg
 relay/*.bak-*
+
+# Go 的构建期工具（build/icon 生成托盘图标），不是构建产物
+!/build/
