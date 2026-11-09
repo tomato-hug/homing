@@ -1,0 +1,26 @@
+# OpenClaw — 官方示例清单
+# 会话：~/.openclaw/agents/<agent>/sessions/<uuid>.jsonl（另有 .reset / .deleted 变体，glob 只取主文件）
+# 首行是会话头 {type, version, id, timestamp, cwd}，正文记录按 generic-jsonl 映射。
+id: openclaw
+name: OpenClaw
+icon: openclaw
+
+detect:
+  bin: [openclaw]
+  paths:
+    - ~/.openclaw
+
+sessions:
+  source: jsonl
+  glob: ~/.openclaw/agents/*/sessions/*.jsonl
+  format: custom
+  format_options:
+    session_id: id
+    cwd: cwd
+    time: timestamp
+    role: type
+    text: text
+    user_values: [user, human]
+    assistant_values: [assistant, agent]
+
+push: poll

@@ -1,0 +1,27 @@
+# DeepSeek Harness（dsh）— 官方示例清单
+# 会话是 zstd 压缩的 JSONL：<sessions>/<slug>/session-<id>/session.v4.jsonl.zstd
+# 首行是 session 头 {type:"session", id, createdAt, cwd}；正文记录类型未在空会话样本中出现，
+# 因此用 generic-jsonl + 字段映射，标题回落到首条用户消息。
+id: dsh
+name: DeepSeek Harness
+icon: dsh
+
+detect:
+  bin: [dsh]
+  paths:
+    - ~/.dsh
+
+sessions:
+  source: jsonl
+  glob: ~/.dsh/sessions/*/session-*/session.v4.jsonl.zstd
+  format: custom
+  format_options:
+    session_id: id
+    cwd: cwd
+    time: createdAt
+    role: type
+    text: text
+    user_values: [user, human, prompt]
+    assistant_values: [assistant, agent, response]
+
+push: poll
