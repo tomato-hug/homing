@@ -39,6 +39,9 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: server/package-lock.json
+      - name: Install shared protocol package
+        working-directory: packages/protocol-js
+        run: npm ci
       - run: npm ci
       - run: npm test
 
