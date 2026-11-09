@@ -1,0 +1,20 @@
+{
+  "name": "@homing/server",
+  "version": "0.1.0",
+  "description": "Homing cloud relay",
+  "type": "module",
+  "main": "src/server.mjs",
+  "scripts": {
+    "start": "node index.mjs",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@homing/protocol-js": "file:../packages/protocol-js",
+    "better-sqlite3": "^12.4.1",
+    "libsodium-wrappers-sumo": "0.7.15",
+    "ws": "^8.18.3"
+  }
+}
