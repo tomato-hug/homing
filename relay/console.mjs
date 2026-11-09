@@ -17,9 +17,70 @@ import * as devices from "./platform/devices.mjs";
 import { getPause, setPause, clearPause } from "./platform/pause.mjs";
 import { autostartInfo, setAutostart } from "./platform/autostart.mjs";
 import { describeHome } from "./platform/homes.mjs";
+import * as agentSettings from "./platform/agent-settings.mjs";
+import * as adapters from "./platform/adapters.mjs";
 
 const STARTED_AT = Date.now();
 const MAX_LOG_LINES = 500;
+
+/** 各 agent 会被 Homing 动到的配置文件（只用来在卡片底部写明，不改内容） */
+const HOOK_FILES = {
+  claude: path.join(os.homedir(), ".claude", "settings.json"),
+  workbuddy: path.join(os.homedir(), ".workbuddy", "settings.json"),
+  codex: path.join(os.homedir(), ".codex", "hooks.json"),
+  opencode: null,
+  zcode: null,
+};
+
+/** 内置接入：Homing 自带的五个 agent。版本号由 /api/agents 提供，这里只给静态说明 */
+const BUILTIN_ADAPTERS = [
+  { id: "codex", name: "Codex", push: ["hook", "poll"], reply: "注入新消息", default_signal: "hook" },
+  { id: "claude", name: "Claude Code", push: ["hook"], reply: "注入新消息", default_signal: "hook" },
+  { id: "workbuddy", name: "WorkBuddy", push: ["hook"], reply: "排队回复", default_signal: "hook" },
+  { id: "opencode", name: "OpenCode", push: ["poll"], reply: "不支持", default_signal: "poll" },
+  { id: "zcode", name: "ZCode", push: ["poll"], reply: "不支持", default_signal: "poll" },
+];
+
+/** 社区适配器：这一版只是占位列表，安装入口归 DSH 的 ingest */
+const COMMUNITY_ADAPTERS = [
+  { id: "cursor", name: "Cursor", owner: "community", note: "读 ~/.cursor 的会话库，开发中" },
+  { id: "zed", name: "Zed", owner: "community", note: "读 Zed 的 assistant 记录，开发中" },
+  { id: "aider", name: "Aider", owner: "community", note: "读 .aider.chat.history.md，开发中" },
+  { id: "continue", name: "Continue", owner: "community", note: "读 ~/.continue/sessions，规划中" },
+];
+
+/**
+ * 配置文件里有没有指到 homing 的钩子地址。
+ * 只看不写——判断「这个 agent 到底接没接上」用，端口不写死，换过端口也算。
+ */
+function hookInstalled(id) {
+  const file = HOOK_FILES[id];
+  if (!file) return false;
+  try {
+    return /127\.0\.0\.1:\d+\/hook\//.test(fs.readFileSync(file, "utf8"));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 给控制台的设置合并一份「真实接入状态」：
+ * 用户动过的（updated_at 有值）以存下来的为准，没动过的按配置文件里有没有钩子推。
+ * 否则升级上来的老用户会看到所有 agent 都「未接入」。
+ */
+function agentSettingsPayload() {
+  const all = agentSettings.readAll();
+  const merged = {};
+  for (const [id, item] of Object.entries(all)) {
+    if (item.updated_at) {
+      merged[id] = item;
+      continue;
+    }
+    const installed = hookInstalled(id);
+    merged[id] = { ...item, connected: installed, push_to_phone: installed };
+  }
+  return merged;
+}
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -248,6 +309,44 @@ export function installHooks(agentId) {
   return { ok: false, unsupported: true, message: "这个 agent 走轮询读取，不需要钩子" };
 }
 
+// ---------------------------------------------------------------- 接入清单
+
+/** 内置 / 已安装 / 社区 / 自定义，一次给全，页面自己分组 */
+function adaptersPayload() {
+  const settings = agentSettingsPayload();
+  const custom = adapters.listManifests();
+  const builtin = BUILTIN_ADAPTERS.map((item) => {
+    let home = null;
+    try {
+      home = describeHome(item.id).path;
+    } catch {
+      home = null;
+    }
+    const configFile = HOOK_FILES[item.id];
+    return {
+      ...item,
+      kind: "builtin",
+      home: home ? home.replace(os.homedir(), "~") : null,
+      config_file: configFile ? configFile.replace(os.homedir(), "~") : null,
+      connected: Boolean(settings[item.id]?.connected),
+    };
+  });
+  return {
+    builtin,
+    installed: [
+      ...builtin.filter((item) => item.connected),
+      ...custom.map((item) => ({ ...item, kind: "custom", connected: true })),
+    ],
+    custom,
+    community: COMMUNITY_ADAPTERS,
+    formats: adapters.FORMATS,
+    push_methods: adapters.PUSH_METHODS,
+    root: adapters.ADAPTER_ROOT.replace(os.homedir(), "~"),
+    placeholder: true,
+    note: "自定义接入的清单解析、/api/ingest、脚本适配器加载由 relay 侧接上；这三个接口的形状先按约定占位。",
+  };
+}
+
 // ---------------------------------------------------------------- 主模块
 
 const EMPTY = Symbol("unhandled");
@@ -271,7 +370,16 @@ export function createConsole({ authorize, localToken, isLoopback, isLocalOrLan,
 
   // ------------------------------------------------------------ 静态页面
 
+  const consoleDisabled = process.env.HOMING_NO_CONSOLE === "1";
+
   async function serveConsole(req, res, url) {
+    if (consoleDisabled) {
+      json(res, 404, {
+        error: "这个 homingd 是纯命令行模式（--no-console），没有网页界面",
+        hint: "去掉 --no-console 重启即可使用 /console；接口本身照常工作。",
+      });
+      return;
+    }
     if (!isLoopback(req)) {
       json(res, 403, {
         error: "控制台只对本机开放",
@@ -463,6 +571,7 @@ export function createConsole({ authorize, localToken, isLoopback, isLocalOrLan,
         node: process.versions.node,
         data_dir: platform.dataDir,
         console_dir: consoleDir(),
+        console_enabled: process.env.HOMING_NO_CONSOLE !== "1",
         packaged: platform.isPackaged,
         uptime_s: Math.round((Date.now() - STARTED_AT) / 1000),
         autostart: autostartInfo(),
@@ -535,6 +644,113 @@ export function createConsole({ authorize, localToken, isLoopback, isLocalOrLan,
       const result = installHooks(hookMatch[1]);
       log(`钩子安装 ${hookMatch[1]}：${result.ok ? "完成" : "未完成"}（${result.message || result.error || ""}）`);
       json(res, result.ok ? 200 : result.unsupported ? 400 : 202, result);
+      return;
+    }
+
+    // ---------------------------------------------------------- 接入设置（每个 agent）
+    if (url.pathname === "/api/agents/settings" && req.method === "GET") {
+      if (!requireAuth(req, res)) return;
+      json(res, 200, { settings: agentSettingsPayload(), order: agentSettings.orderedIds() });
+      return;
+    }
+
+    if (url.pathname === "/api/agents/order" && req.method === "PUT") {
+      if (!requireAuth(req, res)) return;
+      const body = await readBody(req).catch(() => ({}));
+      const ids = Array.isArray(body?.order) ? body.order.map(String) : [];
+      json(res, 200, agentSettings.setOrder(ids));
+      return;
+    }
+
+    const settingsMatch = /^\/api\/agents\/([a-z]+)\/settings$/.exec(url.pathname);
+    if (settingsMatch) {
+      if (!requireAuth(req, res)) return;
+      const id = settingsMatch[1];
+      if (req.method === "GET") {
+        json(res, 200, agentSettings.read(id));
+        return;
+      }
+      if (req.method === "PATCH" || req.method === "POST") {
+        const body = await readBody(req).catch(() => ({}));
+        const next = agentSettings.patch(id, body || {});
+        log(`接入设置 ${id}：${JSON.stringify(next)}`);
+        json(res, 200, next);
+        return;
+      }
+      json(res, 405, { error: "Method Not Allowed" });
+      return;
+    }
+
+    const testPushMatch = /^\/api\/agents\/([a-z]+)\/test-push$/.exec(url.pathname);
+    if (testPushMatch && req.method === "POST") {
+      if (!requireAuth(req, res)) return;
+      const id = testPushMatch[1];
+      const settings = agentSettings.read(id);
+      if (!settings.push_to_phone) {
+        json(res, 409, { ok: false, error: "这个 agent 的「推送到手机」是关的，先打开再试" });
+        return;
+      }
+      // 占位：真正推一条测试通知走 relay 的推送管线，等 DSH 那边把 ingest 接上后替换
+      log(`测试推送 ${id}（占位）`);
+      json(res, 200, {
+        ok: true,
+        placeholder: true,
+        agent: id,
+        devices: devices.listDevices().filter((item) => item.online).length,
+        message: "占位：relay 接上推送管线后，这里会真的发一条到手机",
+      });
+      return;
+    }
+
+    const disconnectMatch = /^\/api\/agents\/([a-z]+)\/disconnect$/.exec(url.pathname);
+    if (disconnectMatch && req.method === "POST") {
+      if (!requireAuth(req, res)) return;
+      const id = disconnectMatch[1];
+      const next = agentSettings.patch(id, { connected: false, push_to_phone: false });
+      log(`断开接入 ${id}`);
+      json(res, 200, {
+        ok: true,
+        settings: next,
+        file: HOOK_FILES[id] || null,
+        note: "只切断了 Homing 这边的接入，没有改 agent 的配置文件；要清掉钩子请按上面的路径手工删除（安装时留有 .bak-homing-* 备份）",
+      });
+      return;
+    }
+
+    // ---------------------------------------------------------- 自定义接入（占位，真正解析在 relay）
+    if (url.pathname === "/api/adapters") {
+      if (!requireAuth(req, res)) return;
+      if (req.method === "GET") {
+        json(res, 200, adaptersPayload());
+        return;
+      }
+      if (req.method === "POST") {
+        const body = await readBody(req).catch(() => ({}));
+        const result = adapters.saveManifest(body?.adapter || body || {});
+        log(`保存接入清单：${result.ok ? result.adapter.id : `失败（${(result.errors || []).join("；")}）`}`);
+        json(res, result.ok ? 200 : 400, result.ok ? result : { ...result, error: (result.errors || []).join("；") });
+        return;
+      }
+      json(res, 405, { error: "Method Not Allowed" });
+      return;
+    }
+
+    if (url.pathname === "/api/adapters/test" && req.method === "POST") {
+      if (!requireAuth(req, res)) return;
+      const body = await readBody(req).catch(() => ({}));
+      json(res, 200, adapters.testRead(body || {}));
+      return;
+    }
+
+    const adapterMatch = /^\/api\/adapters\/([a-zA-Z0-9_-]+)$/.exec(url.pathname);
+    if (adapterMatch) {
+      if (!requireAuth(req, res)) return;
+      if (req.method === "DELETE") {
+        const result = adapters.removeManifest(adapterMatch[1]);
+        json(res, result.ok ? 200 : 404, result);
+        return;
+      }
+      json(res, 405, { error: "Method Not Allowed" });
       return;
     }
 
@@ -672,8 +888,13 @@ export function createConsole({ authorize, localToken, isLoopback, isLocalOrLan,
       url.pathname === "/api/setup" ||
       url.pathname === "/api/autostart" ||
       url.pathname === "/api/agent-paths" ||
+      url.pathname === "/api/adapters" ||
+      url.pathname === "/api/adapters/test" ||
+      url.pathname.startsWith("/api/adapters/") ||
+      url.pathname === "/api/agents/settings" ||
+      url.pathname === "/api/agents/order" ||
       url.pathname.startsWith("/api/push/") ||
-      /^\/api\/agents\/[a-z]+\/hooks$/.test(url.pathname)
+      /^\/api\/agents\/[a-z]+\/(hooks|settings|test-push|disconnect)$/.test(url.pathname)
     ) {
       await handleConsoleApi(req, res, url);
       return true;

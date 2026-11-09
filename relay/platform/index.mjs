@@ -9,7 +9,17 @@ import { fileURLToPath } from "node:url";
 
 export const VERSION = "0.7.0";
 export const PRODUCT = "Homing";
-export const PORT = Number(process.env.PORT || 18787);
+// 端口可以在命令行里改（homingd --port 18800），所以是可变绑定，import 方拿到的是实时值
+export let PORT = Number(process.env.PORT || 18787);
+
+export function setPort(value) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+    throw new Error(`端口不合法：${value}`);
+  }
+  PORT = parsed;
+  process.env.PORT = String(parsed);
+}
 export const isWindows = process.platform === "win32";
 export const isMac = process.platform === "darwin";
 export const isLinux = !isWindows && !isMac;
@@ -193,6 +203,7 @@ export function writeRuntimeInfo(info) {
 export { os };
 export default {
   VERSION,
+  setPort,
   PRODUCT,
   PORT,
   isWindows,

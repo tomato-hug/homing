@@ -15,6 +15,48 @@ import { createConsole } from "./console.mjs";
 import { verifyDeviceToken } from "./platform/devices.mjs";
 
 const relayDir = platform.relayDir;
+
+// ---- 命令行参数（纯命令行版 homingd：服务器、不想要界面的人都用这个） ----------
+const argv = process.argv.slice(2);
+function argValue(name) {
+  const index = argv.indexOf(name);
+  if (index >= 0 && argv[index + 1] && !argv[index + 1].startsWith("-")) return argv[index + 1];
+  const inline = argv.find((a) => a.startsWith(`${name}=`));
+  return inline ? inline.slice(name.length + 1) : null;
+}
+
+if (argv.includes("--help") || argv.includes("-h")) {
+  console.log(`homingd ${platform.VERSION} — Homing 本机服务
+
+用法: homingd [选项]
+
+  --port <端口>        监听端口，默认 18787
+  --data-dir <目录>    数据目录，默认 ${
+    process.platform === "darwin" ? "~/Library/Application Support/Homing" : "%APPDATA%\\Homing"
+  }
+  --no-console         不提供 /console 网页界面（只留接口，适合跑在服务器上）
+  --version            显示版本
+  --help               显示这段帮助
+
+配置与环境变量：
+  PORT / HOMING_DATA_DIR 与上面的参数等价；配置文件在 <数据目录>/config.json。
+`);
+  process.exit(0);
+}
+if (argv.includes("--version") || argv.includes("-v")) {
+  console.log(`homingd ${platform.VERSION}`);
+  process.exit(0);
+}
+if (argValue("--port")) {
+  platform.setPort(argValue("--port"));
+}
+if (argValue("--data-dir")) {
+  process.env.HOMING_DATA_DIR = path.resolve(argValue("--data-dir"));
+}
+if (argv.includes("--no-console")) {
+  process.env.HOMING_NO_CONSOLE = "1";
+}
+
 // 数据目录：Mac ~/Library/Application Support/Homing，Windows %APPDATA%\Homing
 // 老的 relay/data 会在启动时搬过来（只复制、不删源），已有 token 与配对不受影响
 platform.migrateLegacyData({ legacyRelayDir: relayDir, log: (m) => console.log(`[platform] ${m}`) });

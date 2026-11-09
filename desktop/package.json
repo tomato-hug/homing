@@ -1,0 +1,19 @@
+{
+  "name": "homing-desktop",
+  "private": true,
+  "version": "0.7.0",
+  "type": "module",
+  "description": "Homing 桌面壳（Tauri 2：托盘 + 本机控制台 + sidecar）",
+  "scripts": {
+    "icons": "node scripts/make-icons.mjs",
+    "dev": "tauri dev",
+    "build": "node scripts/build-sidecar.mjs && tauri build",
+    "build:mac": "node scripts/build-sidecar.mjs && tauri build --target universal-apple-darwin",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.1.0",
+    "esbuild": "^0.28.2",
+    "postject": "^1.0.0-alpha.6"
+  }
+}

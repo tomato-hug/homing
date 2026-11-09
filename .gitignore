@@ -19,3 +19,15 @@ google-services.json
 captures/
 *.apk
 *.aab
+
+# Homing 电脑端（M3）
+console/node_modules/
+console/dist/
+desktop/node_modules/
+desktop/build/
+desktop/src-tauri/binaries/
+desktop/src-tauri/target/
+desktop/src-tauri/icons/icon.iconset/
+dist/
+*.dmg
+relay/*.bak-*

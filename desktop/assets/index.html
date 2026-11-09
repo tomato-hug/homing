@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>Homing</title>
+    <meta name="color-scheme" content="dark" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #0f172a;
+        color: #f8fafc;
+        font: 14px/1.7 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .box {
+        text-align: center;
+        max-width: 440px;
+        padding: 24px;
+      }
+      h1 {
+        font-size: 18px;
+        margin: 0 0 10px;
+      }
+      p {
+        color: #94a3b8;
+        margin: 0 0 8px;
+      }
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: #cbd5e1;
+      }
+      button {
+        margin-top: 16px;
+        height: 40px;
+        padding: 0 16px;
+        border-radius: 10px;
+        border: 1px solid #2dd4bf;
+        background: #2dd4bf;
+        color: #0f172a;
+        font-weight: 600;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="box">
+      <h1>本机服务没有响应</h1>
+      <p>Homing 需要 homingd 在 <code>127.0.0.1:18787</code> 上运行。</p>
+      <p>托盘菜单里退出再重开，或者从命令行执行 <code>homingd</code> 看看报错。</p>
+      <button onclick="fetch('http://127.0.0.1:18787/console/').then(() => location.href = 'http://127.0.0.1:18787/console/').catch(() => location.reload())">重试</button>
+    </div>
+  </body>
+</html>
