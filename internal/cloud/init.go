@@ -33,6 +33,7 @@ func init() {
 			return
 		}
 		mux.Handle("GET /v1/ws", hub)
+		mountPairControl(mux, dataDir, hub)
 
 		// A configured relay address means the user already paired this computer
 		// with a cloud/self-hosted server; keep it connected in the background.
