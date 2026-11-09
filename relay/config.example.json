@@ -1,0 +1,10 @@
+{
+  "token": "REPLACE_WITH_32_CHAR_HEX_TOKEN",
+  "away": {
+    "enabled": false
+  },
+  "proxy": {
+    "enabled": false,
+    "ports": []
+  }
+}
