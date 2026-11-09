@@ -32,6 +32,7 @@
 ```
 go.mod                       module github.com/tomato-hug/homing（谁加依赖谁提交 go.mod/go.sum）
 cmd/homing/                  电脑端入口                                   WorkBuddy
+internal/cli/                子命令注册表（homing pair、homing agents …）   各自注册
 cmd/homing-server/           云中转入口                                   Codex
 internal/agent/              Agent 接口与注册表（已有，改接口先在汇报里说） WorkBuddy
 internal/agent/<id>/         内置 agent：codex claude workbuddy opencode zcode …  WorkBuddy；新 agent 由 DSH 加
@@ -55,6 +56,7 @@ relay/  server/  desktop/    旧 Node / Tauri 版，Go 版对照通过后移到 
 - 内置 agent 在自己包的 `init()` 里 `agent.Register(...)`，再在 `internal/agent/builtin/builtin.go` 加一行 import。
 - 运行时才知道的 agent（清单、脚本）用 `agent.RegisterProvider(...)`。
 - 路由在各自包的 `init()` 里 `api.Register(name, order, func(mux, deps){...})`，用 Go 1.22 的路由写法（`"GET /api/agents"`）。
+- 子命令同理：在自己包的 `init()` 里 `cli.Register(cli.Command{Name: "pair", Summary: "…", Run: …})`（`internal/cli`），`homing help` 会自动列出；`homing pair` 由 internal/cloud 注册，`homing agents test` 由 internal/adapter 注册。
 - `cmd/homing` 已经空导入 `internal/adapter`、`internal/cloud`、`internal/agent/builtin`，DSH 和 Codex 不用改 main.go。
 
 ## 4. Agent 接口

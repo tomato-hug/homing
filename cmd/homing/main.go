@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/tomato-hug/homing/internal/api"
+	"github.com/tomato-hug/homing/internal/cli"
 	"github.com/tomato-hug/homing/internal/platform"
 
 	// Packages that plug themselves in from init().
@@ -46,17 +48,34 @@ func main() {
 	case "version", "--version", "-v":
 		fmt.Println(version)
 	case "help", "--help", "-h":
-		fmt.Print(usage)
+		printUsage(os.Stdout)
 	case "":
-		fmt.Fprint(os.Stderr, "界面版还没完成，先用 `homing serve`。\n\n"+usage)
+		fmt.Fprint(os.Stderr, "界面版还没完成，先用 `homing serve`。\n\n")
+		printUsage(os.Stderr)
 		os.Exit(2)
 	default:
-		fmt.Fprintf(os.Stderr, "不认识的命令 %q\n\n%s", cmd, usage)
-		os.Exit(2)
+		c, ok := cli.Lookup(cmd)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "不认识的命令 %q\n\n", cmd)
+			printUsage(os.Stderr)
+			os.Exit(2)
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		err = c.Run(ctx, args)
+		stop()
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "homing:", err)
 		os.Exit(1)
+	}
+}
+
+// printUsage prints the built-in commands plus everything registered through
+// internal/cli.
+func printUsage(w io.Writer) {
+	fmt.Fprint(w, usage)
+	for _, c := range cli.All() {
+		fmt.Fprintf(w, "  homing %-15s %s\n", c.Name, c.Summary)
 	}
 }
 
