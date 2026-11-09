@@ -1,0 +1,225 @@
+{
+  "canvas": "120x120 viewBox; whole bird group pre-translated by (4,6); draw order body, head(+eye), neck, wing",
+  "tile": {
+    "rx": 27,
+    "fill": "#0F172A"
+  },
+  "layers": {
+    "groups": "bird ⊃ squash ⊃ [body, head ⊃ eye, neck, wing]",
+    "bird": {
+      "pivot": [0, 0],
+      "note": "outermost group: fly-in translate/rotate/scale and flap hover, about bird origin"
+    },
+    "squash": {
+      "pivot": [52, 90],
+      "note": "wraps all layers; landing squash about the feet"
+    },
+    "body": {
+      "d": "M62 48 C56 56 44 60 30 66 L12 74 L31 79 C40 89 58 94 74 88 C92 80 96 60 86 50 C82 44 70 42 62 48 Z",
+      "fill": "#E2E8F0"
+    },
+    "head": {
+      "d": "M66 38 C65 28 77 24 84 29 C86 31 87 34 87 37 L96 41 L88 43 C86 47 80 50 73 50 C68 49 66 44 66 38 Z",
+      "fill": "#E2E8F0",
+      "pivot": [0, 0],
+      "note": "eye is a child of head"
+    },
+    "eye": {
+      "ellipse": {
+        "cx": 78,
+        "cy": 34,
+        "r": 2.4
+      },
+      "fill": "#0F172A",
+      "pivot": [78, 34]
+    },
+    "neck": {
+      "d": "M63 44 C70 50 80 51 86 49 L87 55 C79 57 68 55 61 50 Z",
+      "fill": "#2DD4BF"
+    },
+    "wing": {
+      "d": "M36 71 C50 61 66 61 76 68 C64 80 48 82 36 71 Z",
+      "fill": "#94A3B8",
+      "pivot": [72, 68],
+      "note": "rotate then scale about shoulder; positive deg lifts wing (y-down)"
+    }
+  },
+  "static_full_silhouette": "M96 41 L87 37 C86 28 74 24 68 30 C64 34 64 42 62 48 C56 56 44 60 30 66 L12 74 L31 79 C40 89 58 94 74 88 C92 80 96 60 86 50 C84 47 85 44 88 43 Z",
+  "easing": {
+    "default": "cubic-bezier(.45,0,.55,1) per segment",
+    "arrive_bird": "cubic-bezier(.2,.7,.3,1)",
+    "squash": "ease-out",
+    "eye": "linear"
+  },
+  "states": {
+    "idle": [
+      {
+        "layer": "head",
+        "period_s": 4.8,
+        "delay_s": 0,
+        "loop": true,
+        "keys": [
+          [0, { "tx": 0.0, "ty": 0.0 }],
+          [0.22, { "tx": 3.0, "ty": 1.5 }],
+          [0.45, { "tx": 0.0, "ty": 0.0 }],
+          [0.67, { "tx": 3.0, "ty": 1.5 }],
+          [0.9, { "tx": 0.0, "ty": 0.0 }],
+          [4.8, { "tx": 0.0, "ty": 0.0 }]
+        ]
+      },
+      {
+        "layer": "eye",
+        "period_s": 4.8,
+        "delay_s": 0,
+        "loop": true,
+        "keys": [
+          [0, { "sx": 1.0, "sy": 1.0 }],
+          [3.36, { "sx": 1.0, "sy": 1.0 }],
+          [3.46, { "sx": 1.0, "sy": 0.12 }],
+          [3.58, { "sx": 1.0, "sy": 1.0 }],
+          [4.8, { "sx": 1.0, "sy": 1.0 }]
+        ]
+      },
+      {
+        "layer": "wing",
+        "period_s": 4.8,
+        "delay_s": 0,
+        "loop": true,
+        "keys": [
+          [0, { "rot": 0.0 }],
+          [2.1, { "rot": 0.0 }],
+          [2.3, { "rot": 8.0 }],
+          [2.48, { "rot": -2.0 }],
+          [2.65, { "rot": 0.0 }],
+          [4.8, { "rot": 0.0 }]
+        ]
+      },
+      {
+        "layer": "neck",
+        "period_s": 4.8,
+        "delay_s": 0,
+        "loop": true,
+        "keys": [
+          [0, { "color": "#2DD4BF" }],
+          [2.4, { "color": "#5EEAD4" }],
+          [4.8, { "color": "#2DD4BF" }]
+        ]
+      }
+    ],
+    "flap": [
+      {
+        "layer": "wing",
+        "period_s": 0.56,
+        "delay_s": 0,
+        "loop": true,
+        "keys": [
+          [0, { "rot": 0.0 }],
+          [0.252, { "rot": 60.0, "sx": 1.3, "sy": 1.1 }],
+          [0.42, { "rot": -6.0 }],
+          [0.56, { "rot": 0.0 }]
+        ]
+      },
+      {
+        "layer": "bird",
+        "period_s": 0.56,
+        "delay_s": 0,
+        "loop": true,
+        "keys": [
+          [0, { "tx": 0.0, "ty": 0.0 }],
+          [0.252, { "tx": 0.0, "ty": 1.5 }],
+          [0.42, { "tx": 0.0, "ty": -2.5 }],
+          [0.56, { "tx": 0.0, "ty": 0.0 }]
+        ]
+      },
+      {
+        "layer": "neck",
+        "period_s": 1.12,
+        "delay_s": 0,
+        "loop": true,
+        "keys": [
+          [0, { "color": "#2DD4BF" }],
+          [0.56, { "color": "#5EEAD4" }],
+          [1.12, { "color": "#2DD4BF" }]
+        ]
+      }
+    ],
+    "arrive_then_idle": [
+      {
+        "layer": "bird",
+        "period_s": 1.6,
+        "delay_s": 0,
+        "loop": false,
+        "keys": [
+          [0, { "tx": -70.0, "ty": -58.0, "rot": -10.0, "sx": 0.55, "sy": 0.55, "alpha": 0.0 }],
+          [0.16, { "tx": -58.0, "ty": -48.0, "rot": -9.0, "sx": 0.6, "sy": 0.6, "alpha": 1.0 }],
+          [1.0, { "tx": 0.0, "ty": 0.0, "rot": 0.0, "sx": 1.0, "sy": 1.0, "alpha": 1.0 }],
+          [1.6, { "tx": 0.0, "ty": 0.0, "rot": 0.0, "sx": 1.0, "sy": 1.0, "alpha": 1.0 }]
+        ]
+      },
+      {
+        "layer": "squash",
+        "period_s": 1.6,
+        "delay_s": 0,
+        "loop": false,
+        "keys": [
+          [0, { "sx": 1.0, "sy": 1.0 }],
+          [1.0, { "sx": 1.0, "sy": 1.0 }],
+          [1.1, { "sx": 1.07, "sy": 0.91 }],
+          [1.24, { "sx": 0.98, "sy": 1.03 }],
+          [1.36, { "sx": 1.0, "sy": 1.0 }],
+          [1.6, { "sx": 1.0, "sy": 1.0 }]
+        ]
+      },
+      {
+        "layer": "wing",
+        "period_s": 1.6,
+        "delay_s": 0,
+        "loop": false,
+        "keys": [
+          [0, { "rot": 55.0, "sx": 1.3, "sy": 1.1 }],
+          [0.15, { "rot": -4.0 }],
+          [0.32, { "rot": 60.0, "sx": 1.3, "sy": 1.1 }],
+          [0.48, { "rot": -4.0 }],
+          [0.64, { "rot": 60.0, "sx": 1.3, "sy": 1.1 }],
+          [0.8, { "rot": -4.0 }],
+          [0.94, { "rot": 35.0, "sx": 1.15, "sy": 1.05 }],
+          [1.08, { "rot": 0.0 }],
+          [1.6, { "rot": 0.0 }]
+        ]
+      },
+      {
+        "layer": "head",
+        "period_s": 1.6,
+        "delay_s": 0,
+        "loop": false,
+        "keys": [
+          [0, { "tx": 0.0, "ty": 0.0 }],
+          [1.3, { "tx": 0.0, "ty": 0.0 }],
+          [1.42, { "tx": 3.0, "ty": 1.5 }],
+          [1.56, { "tx": 0.0, "ty": 0.0 }],
+          [1.6, { "tx": 0.0, "ty": 0.0 }]
+        ]
+      },
+      {
+        "then": "idle",
+        "after_s": 1.6
+      }
+    ],
+    "bob_once": [
+      {
+        "layer": "head",
+        "period_s": 0.8,
+        "delay_s": 0,
+        "loop": false,
+        "keys": [
+          [0, { "tx": 0.0, "ty": 0.0 }],
+          [0.2, { "tx": 2.5, "ty": 1.2 }],
+          [0.4, { "tx": 0.0, "ty": 0.0 }],
+          [0.6, { "tx": 2.5, "ty": 1.2 }],
+          [0.8, { "tx": 0.0, "ty": 0.0 }]
+        ]
+      }
+    ],
+    "static": "no animation (reduced motion / ANIMATOR_DURATION_SCALE == 0 / launcher & notification icons)"
+  }
+}
