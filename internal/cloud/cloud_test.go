@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/tomato-hug/homing/internal/api"
 	"github.com/tomato-hug/homing/internal/protocol"
 	"github.com/tomato-hug/homing/internal/server"
 )
@@ -393,6 +394,23 @@ func TestLANHubRejectsBadToken(t *testing.T) {
 	}
 	if len(hub.Pending()) != 0 {
 		t.Fatal("a bad token created a pending pairing")
+	}
+}
+
+func TestInitRegistersLANWebSocket(t *testing.T) {
+	dir := t.TempDir()
+	mux := api.NewMux(&api.Deps{DataDir: dir, Log: testLogger(), Version: "test"})
+	httpServer := httptest.NewServer(mux)
+	t.Cleanup(httpServer.Close)
+	if hub, ok := HubFor(dir); ok {
+		t.Cleanup(hub.Close)
+	} else {
+		t.Fatal("api.NewMux did not create the LAN hub")
+	}
+	wsURL := "ws://" + strings.TrimPrefix(httpServer.URL, "http://") + "/v1/ws"
+	peer := dialPeer(t, wsURL, clientSeed)
+	if peer.nonce == "" {
+		t.Fatal("LAN websocket did not send a challenge")
 	}
 }
 
