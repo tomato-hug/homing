@@ -391,6 +391,8 @@ func (d *Deps) findSummary(ctx context.Context, sessionID string) (Summary, bool
 }
 
 // sourceFor finds which agent a session id belongs to (Node: sessionSourceFor).
+// Node falls back to scanning every agent's full session index, so the limit here is
+// effectively "all" — an old session must not turn into "unknown source".
 func (d *Deps) sourceFor(ctx context.Context, sessionID string) string {
 	if sessionID == "" {
 		return ""
@@ -404,7 +406,7 @@ func (d *Deps) sourceFor(ctx context.Context, sessionID string) string {
 		}
 	}
 	for _, a := range agent.All(ctx) {
-		rows, err := a.ListSessions(ctx, 400)
+		rows, err := a.ListSessions(ctx, 100000)
 		if err != nil {
 			continue
 		}

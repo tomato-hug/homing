@@ -189,6 +189,8 @@ func capabilityFile(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, filepaths.ErrForbidden) {
 			status = http.StatusForbidden
 			message = "禁止访问"
+		} else if errors.Is(err, filepaths.ErrExpired) {
+			message = "链接已失效"
 		}
 		api.WriteJSON(w, status, map[string]any{"error": message})
 		return

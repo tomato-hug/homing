@@ -28,6 +28,7 @@ const (
 var (
 	ErrNotFound  = errors.New("文件不存在")
 	ErrForbidden = errors.New("禁止访问")
+	ErrExpired   = errors.New("链接已失效")
 )
 
 // Attachment is the object embedded in an event. Keep the field names and
@@ -184,7 +185,8 @@ func (m *Manager) Create(root, entry string) (string, error) {
 func (m *Manager) Resolve(token, relative string) (string, error) {
 	cap, ok := m.Lookup(token)
 	if !ok {
-		return "", ErrForbidden
+		// 与 Node 一致：未知或已过期的链接是 404（链接已失效），不是 403。
+		return "", ErrExpired
 	}
 	if relative == "" {
 		relative = cap.Entry
