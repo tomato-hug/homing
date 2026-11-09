@@ -30,14 +30,14 @@ func TestManifestFormatsUseTempData(t *testing.T) {
 		wantSess int
 	}{
 		{
-			name: "claude-code",
-			yaml: "id: demo-claude\nname: Demo Claude\nsessions:\n  source: jsonl\n  glob: " + claudeFile + "\n  format: claude-code\npush: poll\n",
+			name:     "claude-code",
+			yaml:     "id: demo-claude\nname: Demo Claude\nsessions:\n  source: jsonl\n  glob: " + claudeFile + "\n  format: claude-code\npush: poll\n",
 			wantID:   "demo-session-1",
 			wantSess: 1,
 		},
 		{
-			name: "custom",
-			yaml: "id: demo-custom\nsessions:\n  source: jsonl\n  glob: " + customFile + "\n  format: custom\n  format_options:\n    session_id: id\n    cwd: cwd\n    time: createdAt\n    role: type\n    text: text\n    user_values: [user]\npush: poll\n",
+			name:     "custom",
+			yaml:     "id: demo-custom\nsessions:\n  source: jsonl\n  glob: " + customFile + "\n  format: custom\n  format_options:\n    session_id: id\n    cwd: cwd\n    time: createdAt\n    role: type\n    text: text\n    user_values: [user]\npush: poll\n",
 			wantID:   "demo-session-2",
 			wantSess: 1,
 		},

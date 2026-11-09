@@ -35,7 +35,7 @@ func NewManifestAgent(m *Manifest) *ManifestAgent {
 	return &ManifestAgent{m: m}
 }
 
-func (a *ManifestAgent) ID() string   { return a.m.ID }
+func (a *ManifestAgent) ID() string { return a.m.ID }
 func (a *ManifestAgent) Name() string {
 	if a.m.Name != "" {
 		return a.m.Name

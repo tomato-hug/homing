@@ -100,11 +100,11 @@ func expandHome(p string) string {
 }
 
 var validFormats = map[string]bool{
-	"claude-code":    true,
-	"codex":          true,
-	"gemini-cli":     true,
-	"generic-jsonl":  true,
-	"custom":         true,
+	"claude-code":   true,
+	"codex":         true,
+	"gemini-cli":    true,
+	"generic-jsonl": true,
+	"custom":        true,
 }
 
 // Validate reports every problem at once so the user can fix the file in one go.

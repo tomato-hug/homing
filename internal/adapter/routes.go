@@ -22,7 +22,7 @@ import (
 // notify packages are not wired yet, so by default events are only logged; the
 // owner of those packages sets this from their init() or serve setup.
 var (
-	sinkMu  sync.RWMutex
+	sinkMu    sync.RWMutex
 	EventSink func(agent.Event)
 )
 
@@ -45,13 +45,13 @@ func emitEvent(ev agent.Event) {
 // ---- 运行时状态 -----------------------------------------------------------
 
 var (
-	runtimeMu sync.Mutex
-	runtimeAt time.Time
-	manifests []*ManifestAgent
-	manErrs   []ManifestError
-	scripts   []*ScriptAgent
-	scrErrs   []ManifestError
-	ingest    *IngestStore
+	runtimeMu  sync.Mutex
+	runtimeAt  time.Time
+	manifests  []*ManifestAgent
+	manErrs    []ManifestError
+	scripts    []*ScriptAgent
+	scrErrs    []ManifestError
+	ingest     *IngestStore
 	ingestOnce sync.Once
 )
 
