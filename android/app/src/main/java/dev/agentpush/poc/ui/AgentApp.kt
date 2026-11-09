@@ -44,6 +44,7 @@ import androidx.navigation.navArgument
 import dev.agentpush.poc.AgentViewModel
 import dev.agentpush.poc.SessionStatus
 import dev.agentpush.poc.capabilityTokenIn
+import dev.agentpush.poc.ui.screens.AddComputerScreen
 import dev.agentpush.poc.ui.screens.BrowserScreen
 import dev.agentpush.poc.ui.screens.HomingInboxScreen
 import dev.agentpush.poc.ui.screens.HomingSplashScreen
@@ -59,6 +60,7 @@ private const val ROUTE_INBOX = "inbox"
 private const val ROUTE_PROJECTS = "projects"
 private const val ROUTE_ME = "me"
 private const val ROUTE_SETTINGS = "settings"
+private const val ROUTE_ADD_COMPUTER = "add-computer"
 private const val ROUTE_NEW_SESSION = "new-session"
 private const val ROUTE_SESSION = "session/{sessionToken}"
 private const val ROUTE_BROWSER = "browser/{urlToken}/{titleToken}"
@@ -181,6 +183,13 @@ fun AgentApp(
                 MeScreen(
                     viewModel = viewModel,
                     onOpenSettings = { navController.navigate(ROUTE_SETTINGS) },
+                    onAddComputer = { navController.navigate(ROUTE_ADD_COMPUTER) },
+                )
+            }
+            composable(ROUTE_ADD_COMPUTER) {
+                AddComputerScreen(
+                    onBack = { navController.popBackStack() },
+                    onPaired = { navController.popBackStack() },
                 )
             }
             composable(

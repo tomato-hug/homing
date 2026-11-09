@@ -147,7 +147,11 @@ class HomingUiRenderTest {
         installState(sampleState())
         compose.setContent {
             AgentInboxTheme {
-                MeScreen(viewModel = viewModel, onOpenSettings = {})
+                MeScreen(
+                    viewModel = viewModel,
+                    onOpenSettings = {},
+                    onAddComputer = {},
+                )
             }
         }
         compose.onNodeWithText("我的").assertExists()

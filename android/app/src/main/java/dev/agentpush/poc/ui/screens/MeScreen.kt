@@ -20,7 +20,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowForward
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Code
+import androidx.compose.material.icons.outlined.Computer
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
@@ -53,6 +55,8 @@ import dev.agentpush.poc.ConnectionState
 import dev.agentpush.poc.ReminderPreferences
 import dev.agentpush.poc.ReminderSettings
 import dev.agentpush.poc.formatDiagnosticTime
+import dev.agentpush.poc.protocol.PairedComputer
+import dev.agentpush.poc.protocol.PairedComputerStore
 import dev.agentpush.poc.ui.AgentGlyph
 import dev.agentpush.poc.ui.HomingCard
 import dev.agentpush.poc.ui.HomingPigeon
@@ -81,10 +85,13 @@ private val agentEntries = listOf(
 fun MeScreen(
     viewModel: AgentViewModel,
     onOpenSettings: () -> Unit,
+    onAddComputer: () -> Unit,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var reminders by remember { mutableStateOf(ReminderPreferences.load(context)) }
+    val computerStore = remember { PairedComputerStore(context) }
+    var computers by remember { mutableStateOf(computerStore.load()) }
 
     Column(
         modifier = Modifier
@@ -109,6 +116,13 @@ fun MeScreen(
             onAwayChange = viewModel::setAway,
             onReconnect = viewModel::reconnect,
             onOpenSettings = onOpenSettings,
+        )
+        Spacer(Modifier.height(18.dp))
+        SectionTitle("我的电脑")
+        Spacer(Modifier.height(7.dp))
+        CloudComputersCard(
+            computers = computers,
+            onAddComputer = onAddComputer,
         )
         Spacer(Modifier.height(18.dp))
         SectionTitle("Agent")
@@ -172,7 +186,7 @@ private fun MacConnectionCard(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "我的 Mac",
+                        text = "局域网直连 · 我的 Mac",
                         style = MaterialTheme.typography.titleMedium,
                         color = HomingPalette.Text,
                     )
@@ -264,6 +278,130 @@ private fun MacConnectionCard(
                         checkedTrackColor = HomingPalette.Brand,
                     ),
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CloudComputersCard(
+    computers: List<PairedComputer>,
+    onAddComputer: () -> Unit,
+) {
+    HomingCard {
+        Column {
+            if (computers.isEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 13.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        Icons.Outlined.Computer,
+                        contentDescription = null,
+                        tint = HomingPalette.Muted,
+                        modifier = Modifier.size(22.dp),
+                    )
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(start = 10.dp),
+                    ) {
+                        Text(
+                            text = "还没有通过云中转添加电脑",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = HomingPalette.Text,
+                        )
+                        Text(
+                            text = "扫码或在电脑上生成 6 位配对码",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = HomingPalette.Muted,
+                        )
+                    }
+                }
+            } else {
+                computers.forEachIndexed { index, computer ->
+                    if (index > 0) {
+                        HorizontalDivider(
+                            modifier = Modifier.padding(start = 54.dp),
+                            color = HomingPalette.NavBorder,
+                        )
+                    }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 11.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(CircleShape)
+                                .background(HomingPalette.Brand.copy(alpha = 0.13f)),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                Icons.Outlined.Computer,
+                                contentDescription = null,
+                                tint = HomingPalette.Brand,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(start = 10.dp),
+                        ) {
+                            Text(
+                                text = computer.name,
+                                style = MaterialTheme.typography.bodyMedium.copy(
+                                    fontWeight = FontWeight.Medium,
+                                ),
+                                color = HomingPalette.Text,
+                            )
+                            Text(
+                                text = "${serverHostLabel(computer.server)} · " +
+                                    computer.fingerprint.take(16),
+                                modifier = Modifier.padding(top = 2.dp),
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontFamily = HomingMono,
+                                    fontSize = 10.5.sp,
+                                ),
+                                color = HomingPalette.Muted,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        Surface(
+                            color = HomingPalette.Brand.copy(alpha = 0.12f),
+                            shape = RoundedCornerShape(50),
+                        ) {
+                            Text(
+                                text = "已配对",
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = HomingPalette.Brand,
+                            )
+                        }
+                    }
+                }
+            }
+            OutlinedButton(
+                onClick = onAddComputer,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 12.dp)
+                    .height(46.dp),
+                shape = RoundedCornerShape(10.dp),
+            ) {
+                Icon(
+                    Icons.Outlined.Add,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(Modifier.width(6.dp))
+                Text("添加电脑")
             }
         }
     }
