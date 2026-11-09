@@ -12,8 +12,9 @@
 #   scripts/parity.sh 18787 18888     # 自定义端口
 #   HOMING_TOKEN=xxx scripts/parity.sh
 #
-# 只读：脚本只发 GET，不改任一边的状态。PATCH/回复类接口不在这里测
-# （那会写 events.jsonl / session-state.json，得用临时数据目录单独跑）。
+# 只读：脚本只发 GET/HEAD，以及不带 Bearer 的 POST 鉴权探测；不会写任一边的
+# 状态。PATCH/回复类接口不在这里测（那会写 events.jsonl / session-state.json，
+# 得用临时数据目录单独跑）。
 set -u
 
 NODE_PORT="${1:-18787}"
@@ -59,7 +60,7 @@ json.dump(scrub(data), sys.stdout, ensure_ascii=False, indent=1, sort_keys=True)
 PY
 
 fetch() { # port path outfile
-  curl -sS --noproxy '*' -m 30 -H "Authorization: Bearer $HOMING_TOKEN" \
+  curl -sS --noproxy '*' -m 60 -H "Authorization: Bearer $HOMING_TOKEN" \
     "http://127.0.0.1:$1$2" -o "$3" || return 1
   [[ -s "$3" ]] || { echo "空响应：$1$2" >&2; return 1; }
 }
@@ -89,12 +90,9 @@ compare() { # path
 }
 
 
-# items 专用投影：Node 的条目带 tool/files/plan/model 等富字段，Go 的 agent.Item 只有
-# id/role/kind/seq/at/text/error（接口在 internal/agent/agent.go，本轮没改）。
-# 这里把两边投影到共同语义再比，差异就会被看见；富字段的缺口在汇报里说明。
+# items 专用投影：除时间字段（两边采样时刻不同）外逐字段比，富字段缺口直接可见。
 read -r -d '' PROJECT_ITEMS <<'PYPROJ'
 import json, sys
-# 完整条目对照：除时间字段（两边采样时刻不同）外逐字段比。
 raw = json.load(sys.stdin)
 items = raw.get("items") or []
 DROP = {"ts", "at"}
@@ -106,23 +104,6 @@ def scrub(v):
     return v
 print(json.dumps({"source": raw.get("source"), "count": len(items),
                   "items": [scrub(i) for i in items]},
-                 ensure_ascii=False, indent=1, sort_keys=True))
-PYPROJ'
-import json, sys
-raw = json.load(sys.stdin)
-items = raw.get("items") or []
-out = []
-for it in items:
-    # 只比结构与顺序：id / role / kind / seq。
-    # 文本不比，因为 Node 的条目把文字分在 text / command / tool.output_tail 三处，
-    # Go 的 agent.Item 只有一个 text 字段——要完全一致得先扩接口（见汇报）。
-    out.append({
-        "id": it.get("id"),
-        "role": it.get("role"),
-        "kind": it.get("type") or it.get("kind"),
-        "seq": it.get("seq"),
-    })
-print(json.dumps({"source": raw.get("source"), "count": len(out), "items": out},
                  ensure_ascii=False, indent=1, sort_keys=True))
 PYPROJ
 
@@ -249,6 +230,8 @@ echo "数据  : $BASE_DIR"
 echo
 
 fail=0
+item_checks=0
+item_fail=0
 for path in "${PATHS[@]}"; do
   compare "$path" || fail=$((fail + 1))
 done
@@ -269,7 +252,8 @@ for s in (d.get("sessions") or []):
     print(s.get("session_id",""))
 ' "$TMP/ids-$src.json" 2>/dev/null); do
     [ -n "$sid" ] || continue
-    compare_items "$sid" || fail=$((fail + 1))
+    item_checks=$((item_checks + 1))
+    compare_items "$sid" || item_fail=$((item_fail + 1))
   done
 done
 
@@ -292,9 +276,9 @@ echo "SKIP  /api/v1/acp （这是 Node 调 WorkBuddy 桌面的出站 ACP 客户�
 
 
 echo
-if [[ $fail -eq 0 && $status_fail -eq 0 ]]; then
-  echo "全部一致（$(( ${#PATHS[@]} )) 个接口，$status_checks 个状态检查）"
+if [[ $fail -eq 0 && $item_fail -eq 0 && $status_fail -eq 0 ]]; then
+  echo "全部一致（$(( ${#PATHS[@]} )) 个接口，$item_checks 个会话条目，$status_checks 个状态检查）"
 else
-  echo "$fail / ${#PATHS[@]} 个接口有差异；$status_fail / $status_checks 个状态检查有差异"
+  echo "$fail / ${#PATHS[@]} 个接口有差异；$item_fail / $item_checks 个会话条目有差异；$status_fail / $status_checks 个状态检查有差异"
 fi
-exit $(( (fail > 0 || status_fail > 0) ? 1 : 0 ))
+exit $(( (fail > 0 || item_fail > 0 || status_fail > 0) ? 1 : 0 ))
