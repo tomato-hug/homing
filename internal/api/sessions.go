@@ -32,7 +32,7 @@ type Summary struct {
 	Source         string        `json:"source"`
 	Title          string        `json:"title"`
 	TitleSource    string        `json:"title_source"`
-	Workspace      string        `json:"workspace"`
+	Workspace      *string       `json:"workspace"`
 	Project        *string       `json:"project"`
 	Branch         *string       `json:"branch"`
 	Cwd            *string       `json:"cwd"`
@@ -213,7 +213,9 @@ func (d *Deps) summaries(ctx context.Context, limit int, source, status string) 
 		if source != "" && a.ID() != source {
 			continue
 		}
-		rows, err := a.ListSessions(ctx, 200)
+		// Node lists every session an agent can find and truncates at the end;
+		// the cap only protects against a runaway scan.
+		rows, err := a.ListSessions(ctx, 1000)
 		if err != nil {
 			continue
 		}
@@ -295,7 +297,7 @@ func (d *Deps) buildSummary(ctx context.Context, c candidate) (Summary, bool) {
 		Source:         source,
 		Title:          meta.Title,
 		TitleSource:    meta.TitleSource,
-		Workspace:      meta.Workspace,
+		Workspace:      optional(meta.Workspace),
 		Project:        optional(meta.Project),
 		Branch:         optional(meta.Branch),
 		Cwd:            optional(firstNonEmpty(cwd, meta.Cwd)),
@@ -336,14 +338,18 @@ type isEmptyChecker interface {
 
 // isEmptySession prefers the agent's own answer; without one it falls back to
 // "this session has an event or a preview or it is empty".
+//
+// A session the relay has events for is never empty. Node asks the scanner
+// first, which lets a scanner that cannot find the transcript hide a session the
+// phone is actively using; the event count is the cheaper and safer answer.
 func (d *Deps) isEmptySession(ctx context.Context, source, sessionID string, summary Summary) bool {
+	if summary.EventCount > 0 {
+		return false
+	}
 	if a, ok := agent.Get(ctx, source); ok {
 		if checker, ok := a.(isEmptyChecker); ok {
 			return checker.IsEmptySession(sessionID)
 		}
-	}
-	if summary.EventCount > 0 {
-		return false
 	}
 	return summary.LastPreview == nil
 }
@@ -369,7 +375,9 @@ func (d *Deps) findSummary(ctx context.Context, sessionID string) (Summary, bool
 		return d.buildSummary(ctx, candidate{key: source + ":" + sessionID, relay: entry, lastTS: entry.lastTS})
 	}
 	for _, a := range agent.All(ctx) {
-		rows, err := a.ListSessions(ctx, 200)
+		// Node lists every session an agent can find and truncates at the end;
+		// the cap only protects against a runaway scan.
+		rows, err := a.ListSessions(ctx, 1000)
 		if err != nil {
 			continue
 		}

@@ -337,15 +337,20 @@ func Status(lastKind string, pendingInjection bool, lastTs string, nativeState s
 	return "done"
 }
 
-// TempCwd reports whether cwd lives under a system temp directory (a scratch session).
+// TempCwd reports whether cwd lives under a system temp directory (a scratch
+// session). Same prefixes the Node relay accepts: /tmp, /private/tmp, the macOS
+// per-user temp roots, and Windows' AppData\Local\Temp.
 func TempCwd(cwd string) bool {
 	trimmed := strings.TrimSpace(cwd)
 	if trimmed == "" {
 		return false
 	}
-	tmp := strings.TrimSuffix(os.TempDir(), "/")
-	if strings.HasPrefix(trimmed, tmp) {
-		return true
+	p := strings.ReplaceAll(trimmed, `\`, "/")
+	p = strings.TrimRight(p, "/")
+	for _, prefix := range []string{"/tmp", "/private/tmp", "/private/var/folders", "/var/folders"} {
+		if p == prefix || strings.HasPrefix(p, prefix+"/") {
+			return true
+		}
 	}
-	return strings.HasPrefix(trimmed, "/tmp/") || strings.HasPrefix(trimmed, "/private/var/folders/")
+	return strings.Contains(strings.ToLower(p), "/appdata/local/temp")
 }

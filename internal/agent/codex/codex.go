@@ -72,14 +72,14 @@ func (a Agent) Detect(context.Context) agent.Detection {
 // ListSessions walks the last 45 day-folders, newest first, and returns one row
 // per rollout file (session id comes from the session_meta line).
 func (Agent) ListSessions(_ context.Context, limit int) ([]agent.Session, error) {
-	titles := titleIndex()
+	titles, updated := titleIndexFull()
 	type row struct {
 		session agent.Session
 		mtime   time.Time
 	}
 	var rows []row
 	seen := map[string]bool{}
-	for _, file := range rolloutFiles(45) {
+	for _, file := range rolloutFiles(0) {
 		stat, err := os.Stat(file)
 		if err != nil {
 			continue
@@ -122,6 +122,29 @@ func (Agent) ListSessions(_ context.Context, limit int) ([]agent.Session, error)
 				LastPreview: readRolloutMeta(file).lastPreview,
 			},
 			mtime: stat.ModTime(),
+		})
+	}
+	// Threads the index still remembers after their rollout file was pruned. The
+	// Node relay lists these too, so the console keeps showing old conversations.
+	for sessionID, name := range titles {
+		if seen[sessionID] {
+			continue
+		}
+		seen[sessionID] = true
+		ts := updated[sessionID]
+		mtime, err := time.Parse(time.RFC3339Nano, ts)
+		if err != nil {
+			mtime = time.Time{}
+		}
+		rows = append(rows, row{
+			session: agent.Session{
+				SessionID:   sessionID,
+				Source:      id,
+				Title:       name,
+				TitleSource: "agent",
+				LastTS:      ts,
+			},
+			mtime: mtime,
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].mtime.After(rows[j].mtime) })
@@ -188,6 +211,13 @@ func firstNonEmpty(values ...string) string {
 
 // titleIndex maps thread id -> thread_name from session_index.jsonl (last write wins).
 func titleIndex() map[string]string {
+	titles, _ := titleIndexFull()
+	return titles
+}
+
+// titleIndexFull is titleIndex plus each thread's updated_at, which the list
+// uses as last_ts for threads whose rollout file is gone.
+func titleIndexFull() (map[string]string, map[string]string) {
 	out := map[string]string{}
 	updated := map[string]string{}
 	for _, row := range scanlib.ReadJSONLines(filepath.Join(platform.Home(), ".codex", "session_index.jsonl")) {
@@ -203,7 +233,7 @@ func titleIndex() map[string]string {
 		out[sessionID] = name
 		updated[sessionID] = ts
 	}
-	return out
+	return out, updated
 }
 
 // rolloutFiles lists rollout transcripts under the last few day folders.
@@ -267,7 +297,7 @@ func rolloutFiles(limitDays int) []string {
 
 // rolloutPathFor finds the transcript of one thread id.
 func rolloutPathFor(sessionID string) string {
-	for _, file := range rolloutFiles(90) {
+	for _, file := range rolloutFiles(0) {
 		if strings.Contains(filepath.Base(file), sessionID) {
 			return file
 		}

@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/tomato-hug/homing/internal/platform"
 	"github.com/tomato-hug/homing/internal/store"
 )
 
@@ -20,10 +19,8 @@ import (
 // Opening is lazy so tests (and packages that only need one route group) can
 // hand NewMux a Deps with nothing but a DataDir.
 func (d *Deps) store() (*store.Store, bool) {
-	d.storeOnce.Do(func() {
-		d.storeValue, d.storeErr = store.Open(platform.NewPaths(d.DataDir))
-	})
-	return d.storeValue, d.storeErr == nil
+	s, err := d.Store()
+	return s, err == nil
 }
 
 // authorized mirrors the Node relay's hasValidToken: a Bearer token that is

@@ -17,7 +17,7 @@ type InboxSession struct {
 	Title       string  `json:"title"`
 	TitleSource string  `json:"title_source"`
 	Project     *string `json:"project"`
-	Workspace   string  `json:"workspace"`
+	Workspace   *string `json:"workspace"`
 	Branch      *string `json:"branch"`
 	Model       *string `json:"model"`
 }
@@ -88,7 +88,7 @@ func (d *Deps) buildInbox(r *http.Request) Inbox {
 				Title:       meta.Title,
 				TitleSource: meta.TitleSource,
 				Project:     optional(meta.Project),
-				Workspace:   meta.Workspace,
+				Workspace:   optional(meta.Workspace),
 				Branch:      optional(meta.Branch),
 				Model:       optional(meta.Model),
 			},

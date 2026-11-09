@@ -18,6 +18,7 @@ import (
 	"github.com/tomato-hug/homing/internal/api"
 	"github.com/tomato-hug/homing/internal/cli"
 	"github.com/tomato-hug/homing/internal/platform"
+	"github.com/tomato-hug/homing/internal/service"
 
 	// Packages that plug themselves in from init().
 	_ "github.com/tomato-hug/homing/internal/adapter"
@@ -100,6 +101,8 @@ func serve(args []string) error {
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	deps := &api.Deps{Log: log, DataDir: *dataDir, Version: version}
+	// Anything the notifier is still batching goes out before we stop.
+	defer service.Flush(deps)
 	srv := &http.Server{Addr: *addr, Handler: api.NewMux(deps), ReadHeaderTimeout: 10 * time.Second}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
