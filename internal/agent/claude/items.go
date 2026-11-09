@@ -1,10 +1,13 @@
 package claude
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/tomato-hug/homing/internal/agent"
@@ -36,10 +39,12 @@ func ExtractFileItems(file, source string, limit int) []agent.Item {
 
 	for _, row := range rows {
 		for _, it := range extractRow(st, row) {
-			if _, seen := byID[it.ID]; !seen {
+			if prev, seen := byID[it.ID]; seen {
+				it = agent.MergeItem(prev, it) // 与 Node 的按 id 合并一致
+			} else {
 				order = append(order, it.ID)
 			}
-			byID[it.ID] = it // 后写覆盖：与 Node 的 Map.set 一致
+			byID[it.ID] = it
 		}
 	}
 	out := make([]agent.Item, 0, len(order))
@@ -240,10 +245,6 @@ func toolResult(st *itemState, callID, content, status, at, model string) []agen
 	}
 	if hasCode {
 		item.Tool.ExitCode = &code
-		item.ExitCode = &code
-	}
-	if status == "failed" {
-		item.Error = "tool failed"
 	}
 	return []agent.Item{item}
 }
@@ -389,17 +390,18 @@ func toolStatus(value string) string {
 	return "done"
 }
 
+var exitCodePattern = regexp.MustCompile(`(?i)(?:Process exited with code|exit code|Exit code:?)\s*(-?\d+)`)
+
 func extractExitCode(text string) (int, bool) {
-	for _, line := range strings.Split(text, "\n") {
-		l := strings.ToLower(strings.TrimSpace(line))
-		if i := strings.Index(l, "process exited with code"); i >= 0 {
-			var n int
-			if _, err := fmt.Sscanf(strings.TrimSpace(l[i+len("process exited with code"):]), "%d", &n); err == nil {
-				return n, true
-			}
-		}
+	m := exitCodePattern.FindStringSubmatch(text)
+	if m == nil {
+		return 0, false
 	}
-	return 0, false
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 func shortJson(v any, limit int) string {
@@ -409,11 +411,11 @@ func shortJson(v any, limit int) string {
 	if s, ok := v.(string); ok {
 		return clip(s, limit)
 	}
-	raw, err := json.Marshal(v)
-	if err != nil {
+	raw, ok := marshalPlain(v)
+	if !ok {
 		return ""
 	}
-	return clip(string(raw), limit)
+	return clip(raw, limit)
 }
 
 // tailRows reads the last window bytes of a JSONL file and parses whole lines,
@@ -472,11 +474,22 @@ func jsonText(v any) string {
 	case string:
 		return t
 	}
-	raw, err := json.Marshal(v)
-	if err != nil {
+	raw, ok := marshalPlain(v)
+	if !ok {
 		return ""
 	}
-	return string(raw)
+	return raw
+}
+
+// marshalPlain is JSON.stringify: unlike json.Marshal it leaves < > & as they are.
+func marshalPlain(v any) (string, bool) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return "", false
+	}
+	return strings.TrimSuffix(buf.String(), "\n"), true
 }
 
 func clip(s string, n int) string {

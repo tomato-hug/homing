@@ -112,16 +112,24 @@ func (Agent) ListSessions(_ context.Context, limit int) ([]agent.Session, error)
 		if name, ok := titles[sessionID]; ok && name != "" {
 			title, titleSource = name, "agent"
 		}
+		// Node 的规则：会话在 session_index 里有 updated_at 就用它，否则才用文件 mtime。
+		lastTS, sortTime := scanlib.ISO(stat.ModTime()), stat.ModTime()
+		if ts := updated[sessionID]; ts != "" {
+			lastTS = ts
+			if parsed, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+				sortTime = parsed
+			}
+		}
 		rows = append(rows, row{
 			session: agent.Session{
 				SessionID:   sessionID,
 				Source:      id,
 				Title:       title,
 				TitleSource: titleSource,
-				LastTS:      scanlib.ISO(stat.ModTime()),
+				LastTS:      lastTS,
 				LastPreview: readRolloutMeta(file).lastPreview,
 			},
-			mtime: stat.ModTime(),
+			mtime: sortTime,
 		})
 	}
 	// Threads the index still remembers after their rollout file was pruned. The
@@ -331,24 +339,6 @@ func readRolloutMeta(file string) rolloutMeta {
 				}
 			}
 		}
-		if payload["type"] == "token_count" {
-			if info, ok := payload["info"].(map[string]any); ok {
-				usage, _ := info["last_token_usage"].(map[string]any)
-				if usage == nil {
-					usage, _ = info["total_token_usage"].(map[string]any)
-				}
-				if usage != nil {
-					used := number(usage["total_tokens"])
-					if used == 0 {
-						used = number(usage["input_tokens"]) + number(usage["cached_input_tokens"]) + number(usage["output_tokens"])
-					}
-					if used > 0 {
-						m.contextUsed = used
-						m.contextLimit = number(info["model_context_window"])
-					}
-				}
-			}
-		}
 		if payload["type"] == "message" && (payload["role"] == "user" || payload["role"] == "assistant") {
 			if strings.TrimSpace(scanlib.NormalizeContent(payload["content"])) != "" {
 				m.hasConversation = true
@@ -395,6 +385,25 @@ func readRolloutMeta(file string) rolloutMeta {
 		if settings, ok := payload["thread_settings"].(map[string]any); ok {
 			if v, ok := settings["model"].(string); ok && v != "" {
 				m.model = v
+			}
+		}
+		// 与 Node 一致：上下文用量只在尾部窗口里取最后一条 token_count。
+		if payload["type"] == "token_count" {
+			if info, ok := payload["info"].(map[string]any); ok {
+				usage, _ := info["last_token_usage"].(map[string]any)
+				if usage == nil {
+					usage, _ = info["total_token_usage"].(map[string]any)
+				}
+				if usage != nil {
+					used := number(usage["total_tokens"])
+					if used == 0 {
+						used = number(usage["input_tokens"]) + number(usage["cached_input_tokens"]) + number(usage["output_tokens"])
+					}
+					if used > 0 {
+						m.contextUsed = used
+						m.contextLimit = number(info["model_context_window"])
+					}
+				}
 			}
 		}
 		if payload["type"] == "message" && payload["role"] == "assistant" {

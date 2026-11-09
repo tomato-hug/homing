@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/tomato-hug/homing/internal/agent"
@@ -28,10 +29,12 @@ func (Agent) ReadItems(_ context.Context, sessionID string, limit int) ([]agent.
 
 	for _, row := range rows {
 		for _, it := range st.row(row) {
-			if _, seen := byID[it.ID]; !seen {
+			if prev, seen := byID[it.ID]; seen {
+				it = agent.MergeItem(prev, it) // 与 Node 的按 id 合并一致
+			} else {
 				order = append(order, it.ID)
 			}
-			byID[it.ID] = it // 后写覆盖：与 Node 的 Map.set 一致
+			byID[it.ID] = it
 		}
 	}
 	out := make([]agent.Item, 0, len(order))
@@ -93,6 +96,12 @@ func (s *codexItems) row(row map[string]any) []agent.Item {
 		if text == "" {
 			return nil
 		}
+		// Codex writes its injected context as role=developer. The phone only
+		// lists the conversation, so skip those rows entirely (the Node relay
+		// shows them as user messages; docs/parity.md keeps this difference).
+		if str(payload["role"]) == "developer" {
+			return nil
+		}
 		role := "user"
 		if str(payload["role"]) == "assistant" {
 			role = "assistant"
@@ -124,7 +133,7 @@ func (s *codexItems) row(row map[string]any) []agent.Item {
 
 	case "function_call":
 		callID := str(payload["call_id"])
-		id := fmt.Sprintf("codex-tool-%s", callID)
+		id := toolItemID(callID)
 		s.calls[callID] = id
 		name := firstOf(str(payload["name"]), "shell")
 		command := codexCommand(str(payload["arguments"]))
@@ -141,15 +150,27 @@ func (s *codexItems) row(row map[string]any) []agent.Item {
 
 	case "function_call_output":
 		callID := str(payload["call_id"])
-		return s.toolResult(callID, str(payload["output"]), at, model)
+		return s.toolResult(callID, str(payload["output"]), at, model, "shell")
 
 	case "custom_tool_call":
 		callID := str(payload["call_id"])
-		id := fmt.Sprintf("codex-tool-%s", callID)
+		id := toolItemID(callID)
 		s.calls[callID] = id
 		name := firstOf(str(payload["name"]), "tool")
+		input := str(payload["input"])
 
-		if plan := parsePlanInput(str(payload["input"])); len(plan) > 0 {
+		if name == "apply_patch" {
+			files := parsePatchFiles(input)
+			s.byCall[callID] = &codexCall{id: id, kind: "file_change", name: name, files: files}
+			summary := "apply_patch"
+			return []agent.Item{{
+				TS: at, ID: id, Seq: s.seq, Type: "file_change", Role: "assistant",
+				Files: files, Model: model,
+				Tool: &agent.ItemTool{Name: name, InputSummary: &summary, Status: "running"},
+			}}
+		}
+		if name == "update_plan" {
+			plan := parsePlanInput(input)
 			s.byCall[callID] = &codexCall{id: id, kind: "plan", name: name, plan: plan}
 			summary := "update_plan"
 			return []agent.Item{{
@@ -158,26 +179,29 @@ func (s *codexItems) row(row map[string]any) []agent.Item {
 				Tool: &agent.ItemTool{Name: name, InputSummary: &summary, Status: "running"},
 			}}
 		}
-		input := clip(str(payload["input"]), 300)
+		summary := clip(input, 300)
 		s.byCall[callID] = &codexCall{id: id, kind: "tool_call", name: name}
 		return []agent.Item{{
 			TS: at, ID: id, Seq: s.seq, Type: "tool_call", Role: "assistant",
 			Model: model,
-			Tool:  &agent.ItemTool{Name: name, InputSummary: &input, Status: "running"},
+			Tool:  &agent.ItemTool{Name: name, InputSummary: &summary, Status: "running"},
 		}}
 
 	case "custom_tool_call_output":
 		callID := str(payload["call_id"])
-		return s.toolResult(callID, str(payload["output"]), at, model)
+		return s.toolResult(callID, str(payload["output"]), at, model, "tool")
 	}
 	return nil
 }
 
-func (s *codexItems) toolResult(callID, output, at, model string) []agent.Item {
+// toolResult builds the result half of a tool call. fallbackName is what Node
+// shows when the call itself was not seen: "shell" for function_call_output,
+// "tool" for custom_tool_call_output.
+func (s *codexItems) toolResult(callID, output, at, model, fallbackName string) []agent.Item {
 	known := s.byCall[callID]
-	id := fmt.Sprintf("codex-tool-%s", callID)
+	id := toolItemID(callID)
 	kind := "tool_call"
-	name := "tool"
+	name := fallbackName
 	var files []agent.ItemFile
 	var plan []agent.ItemPlan
 	if known != nil {
@@ -207,10 +231,19 @@ func (s *codexItems) toolResult(callID, output, at, model string) []agent.Item {
 		item.ExitCode = &code
 		if code != 0 {
 			item.Tool.Status = "failed"
-			item.Error = fmt.Sprintf("exit_code=%d", code)
 		}
 	}
 	return []agent.Item{item}
+}
+
+// toolItemID is the item id of a tool call. A row without call_id gets
+// "codex-tool-undefined", which is what Node's template string produces, so the
+// phone sees the same id from both servers.
+func toolItemID(callID string) string {
+	if callID == "" {
+		callID = "undefined"
+	}
+	return "codex-tool-" + callID
 }
 
 // codexCommand pulls cmd out of the JSON arguments, falling back to raw text.
@@ -267,6 +300,7 @@ func parsePlanInput(input string) []agent.ItemPlan {
 }
 
 var patchHeader = regexp.MustCompile(`(?m)^\*\*\* (Add|Update|Delete) File: (.+)$`)
+var patchEnd = regexp.MustCompile(`(?m)^\*\*\* End Patch.*$`)
 
 // parsePatchFiles mirrors the Node helper for `*** Begin Patch` style diffs.
 func parsePatchFiles(patch string) []agent.ItemFile {
@@ -281,7 +315,7 @@ func parsePatchFiles(patch string) []agent.ItemFile {
 		if i+1 < len(matches) {
 			end = matches[i+1][0]
 		}
-		section := patch[start:end]
+		section := patchEnd.ReplaceAllString(patch[start:end], "")
 		pathStart, pathEnd := m[4], m[5]
 		out = append(out, agent.ItemFile{
 			Path:    strings.TrimSpace(patch[pathStart:pathEnd]),
@@ -344,8 +378,18 @@ func rolloutTail(file string, window int64) []map[string]any {
 }
 
 func codexNoise(text string) bool {
-	return strings.HasPrefix(strings.TrimSpace(text), "<") ||
-		strings.HasPrefix(strings.TrimSpace(text), "# AGENTS.md")
+	t := strings.TrimSpace(text)
+	for _, prefix := range []string{
+		"<skills_instructions>", "<environment_context>", "# AGENTS.md instructions",
+		"<user_instructions>", "<permissions", "<INSTRUCTIONS", "<environment",
+		"<tools>", "<multi_agent_mode>", "<system-reminder", "<command-name",
+		"<command-message", "<local-command",
+	} {
+		if strings.HasPrefix(t, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func contentText(v any) string {
@@ -368,17 +412,18 @@ func contentText(v any) string {
 	return ""
 }
 
+var exitCodePattern = regexp.MustCompile(`(?i)(?:Process exited with code|exit code|Exit code:?)\s*(-?\d+)`)
+
 func exitCodeOf(text string) (int, bool) {
-	for _, line := range strings.Split(text, "\n") {
-		l := strings.ToLower(strings.TrimSpace(line))
-		if i := strings.Index(l, "process exited with code"); i >= 0 {
-			var n int
-			if _, err := fmt.Sscanf(strings.TrimSpace(l[i+len("process exited with code"):]), "%d", &n); err == nil {
-				return n, true
-			}
-		}
+	m := exitCodePattern.FindStringSubmatch(text)
+	if m == nil {
+		return 0, false
 	}
-	return 0, false
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 func clip(s string, n int) string {

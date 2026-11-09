@@ -29,7 +29,15 @@ const (
 const MetaTTL = time.Minute
 
 // ISO formats a time the way Node's Date#toISOString does (UTC, milliseconds).
-func ISO(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z") }
+//
+// Node takes a file's mtimeMs as a float64 (seconds*1e3 + nanoseconds/1e6) and
+// then drops the fraction. At today's epoch a float64 only resolves ~0.0002 ms,
+// so an mtime of …805.9999 ms comes out as …806. Doing the same arithmetic here
+// keeps last_ts identical on both servers.
+func ISO(t time.Time) string {
+	ms := int64(float64(t.Unix())*1e3 + float64(t.Nanosecond())/1e6)
+	return time.UnixMilli(ms).UTC().Format("2006-01-02T15:04:05.000Z")
+}
 
 // Transcripts remembers which file the last hook pointed at: for Claude Code it
 // is the most reliable answer to "where is this session written".
