@@ -38,6 +38,8 @@ internal/agent/              Agent 接口与注册表（已有，改接口先在
 internal/agent/<id>/         内置 agent：codex claude workbuddy opencode zcode …  WorkBuddy；新 agent 由 DSH 加
 internal/agent/builtin/      一行一个 import，汇总内置 agent              谁加 agent 谁加一行
 internal/api/                本机 HTTP：/api/*、SSE、/console              WorkBuddy
+internal/files/              附件、能力链接与 /f 文件解析                   G1 兼容层
+internal/relayapi/           hooks、上传、会话操作、设备与下载兼容路由      G1 兼容层
 internal/store/              已读/置顶/静音/归档、已配对设备、令牌          WorkBuddy
 internal/notify/             P0/P1/P2 分级、30 秒合并、暂停推送              WorkBuddy
 internal/platform/           数据目录、各 agent 路径、WSL、开机自启          WorkBuddy
@@ -84,6 +86,40 @@ SQLite 一律用 `modernc.org/sqlite`（纯 Go，不需要 cgo）。
 2. `scripts/parity.sh`：同时请求 18787（Node）和 18788（Go）的 `/api/agents`、`/api/sessions`、`/api/sessions?source=…`、`/api/inbox`、`/api/projects`，用 jq 去掉时间类字段后逐字段比较；PATCH 只在 Go 一侧的临时数据目录上测。
 3. 回复注入只在 /tmp 下新建的 Codex 测试线程里测，不碰用户真实会话。
 4. 全部一致后再换：停 LaunchAgent dev.agentpush.relay → 装 homing 的开机启动 → 端口改回 18787。这一步要先问用户。
+
+### 对照记录（2026-11-09）
+
+环境：Node 版继续由 LaunchAgent `dev.agentpush.relay` 跑在 `127.0.0.1:18787`；Go 版由当前工作树构建，跑在 `127.0.0.1:18788`，两边读同一个数据目录。只做只读请求，没有向真实会话写入。
+
+命令：`scripts/parity.sh 18787 18788`。
+
+顶层 12 个接口：
+
+| 接口 | 结果 | 说明 |
+|---|---|---|
+| `GET /api/projects` | OK | |
+| `GET /api/inbox` | OK | |
+| `GET /api/away` | OK | 新增只读对照 |
+| `GET /api/devices` | OK | 新增只读对照 |
+| `GET /api/sessions?source=workbuddy&limit=20` | OK | |
+| `GET /api/replies` | OK | |
+| `GET /api/events?since=0` | OK | |
+| `GET /api/agents` | DIFF | Go 的模型元数据还缺 `provider`、`is_default`、`efforts` 等规范化字段；OpenCode 的模型清单与 Node 不同 |
+| `GET /api/sessions?limit=50` | DIFF | Go 发现 48 个会话，Node 40 个；Go 的扫描范围更大 |
+| `GET /api/sessions?source=codex&limit=20` | DIFF | 同上，Go 多发现 Codex 会话 |
+| `GET /api/sessions?source=claude&limit=20` | DIFF | 同上，Go 多发现 Claude 会话 |
+| `GET /api/sessions?limit=10&include_empty=1` | DIFF | 同上，空会话过滤范围不同 |
+
+会话条目抽样 5 个：完整字段对照下 5 个 DIFF（条目数量和顺序一致）。差异集中在 `tool` 对象内容、顶层 `command` 字段缺失、`file_change`/`tool_call` 归类，以及个别 `error` 字段；这些属于 DSH 正在补的 `agent.Item` 富字段映射，本轮没有改 `internal/agent`。
+
+新增兼容接口的 11 项状态检查全部一致：
+
+- `GET /hook/{claude,workbuddy,codex,generic}` 两边都是 405；正常的 POST 写事件由 `internal/relayapi` 的临时数据测试覆盖，不在真实数据上跑。
+- 未带 Bearer 的 `/api/upload`、`/api/sessions/new`、`/api/approvals/<id>`、`/api/sessions/<id>/stop` 两边都是 401。
+- `GET /p/1/` 两边都是 404；`HEAD /apk` 两边都是 200 且 `Content-Type` 为 `application/vnd.android.package-archive`。
+- `/f/...` 取当前第一条带附件的旧事件，两边都返回 404（文件已不在），状态与 `Content-Type` 一致；真实附件的 200、目录穿越防护和 Range 由 `internal/files` 测试覆盖。
+
+未对照：`/api/v1/acp` 不是 Homing 的入站路由，而是 Node 调 WorkBuddy 桌面 ACP 的出站客户端；手机和控制台都不会请求它。Go 版在 `/api/sessions/new` 内部完成同类出站 ACP 调用，因此不新增这个路由。
 
 ## 7. 界面（G4）
 
