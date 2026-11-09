@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/tomato-hug/homing/internal/agent"
+	filepaths "github.com/tomato-hug/homing/internal/files"
 	"github.com/tomato-hug/homing/internal/store"
 )
 
@@ -210,6 +211,11 @@ func (d *Deps) handleReply(w http.ResponseWriter, r *http.Request) {
 	if len(model) > 80 {
 		model = model[:80]
 	}
+	files := filepaths.NormalizeFiles(stringsFrom(body["files"]))
+	effort := strings.TrimSpace(stringOr(body["effort"], ""))
+	if len(effort) > 32 {
+		effort = effort[:32]
+	}
 
 	reply, err := s.AppendReply(store.Reply{
 		EventID:   eventIDOf(event),
@@ -218,6 +224,8 @@ func (d *Deps) handleReply(w http.ResponseWriter, r *http.Request) {
 		Cwd:       cwd,
 		Text:      text,
 		Model:     model,
+		Effort:    effort,
+		Files:     files,
 		Status:    "queued",
 	})
 	if err != nil {
@@ -227,10 +235,19 @@ func (d *Deps) handleReply(w http.ResponseWriter, r *http.Request) {
 		s.MarkRead([]int64{event.ID})
 	}
 
-	status, note := d.deliverReply(r, source, sessionID, text, model)
-	s.SetReplyStatus(reply.ID, status, note)
+	deliveryText := filepaths.DeliveryText(text, files)
+
+	status, note, handled := interceptReply(r, reply, event, deliveryText)
+	if !handled {
+		status, note = d.deliverReply(r, source, sessionID, deliveryText, model)
+	}
+	if note == "" {
+		note = statusMessage(status)
+	}
+	updated, _ := s.UpdateReplyStatus(reply.ID, status, note)
+	PublishReplyStatus(updated)
 	WriteJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "reply_id": reply.ID, "status": status, "message": note, "files": []any{},
+		"ok": true, "reply_id": reply.ID, "status": status, "message": note, "files": files,
 	})
 }
 
@@ -313,6 +330,23 @@ func (d *Deps) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	ch, unsubscribe := subscribe()
 	defer unsubscribe()
+	namedCh, unsubscribeNamed := subscribeNamed()
+	defer unsubscribeNamed()
+
+	writeNamed := func(message namedMessage) bool {
+		if sessionFilter != "" && message.sessionID != "" && message.sessionID != sessionFilter {
+			return true
+		}
+		payload, err := json.Marshal(message.data)
+		if err != nil {
+			return true
+		}
+		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", message.name, payload); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
 
 	ping := time.NewTicker(25 * time.Second)
 	defer ping.Stop()
@@ -325,6 +359,13 @@ func (d *Deps) handleStream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if !write(event) {
+				return
+			}
+		case message, open := <-namedCh:
+			if !open {
+				return
+			}
+			if !writeNamed(message) {
 				return
 			}
 		case <-ping.C:

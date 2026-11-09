@@ -24,6 +24,7 @@ import (
 	_ "github.com/tomato-hug/homing/internal/adapter"
 	_ "github.com/tomato-hug/homing/internal/agent/builtin"
 	_ "github.com/tomato-hug/homing/internal/cloud"
+	_ "github.com/tomato-hug/homing/internal/relayapi"
 )
 
 var version = "dev" // set with -ldflags "-X main.version=..."
