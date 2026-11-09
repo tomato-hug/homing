@@ -43,8 +43,8 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	fcmKey := os.Getenv("FCM_SERVER_KEY")
-	srv.SetWaker(server.NewPushDispatcher(srv.DB(), log, fcmKey))
+	fcmCredentials := os.Getenv("HOMING_FCM_CREDENTIALS")
+	srv.SetWaker(server.NewPushDispatcher(srv.DB(), log, fcmCredentials))
 
 	listener, err := srv.Start()
 	if err != nil {
@@ -54,8 +54,8 @@ func run(args []string) error {
 	fmt.Printf("homing-server %s listening on %s\n", version, listener.Addr())
 	fmt.Printf("websocket: ws://%s/v1/ws\n", listener.Addr())
 	fmt.Printf("database: %s\n", *dbPath)
-	if fcmKey == "" {
-		fmt.Println("push: FCM_SERVER_KEY 未设置，离线唤醒只会记录跳过")
+	if fcmCredentials == "" {
+		fmt.Println("push: HOMING_FCM_CREDENTIALS 未设置，离线唤醒只会记录跳过")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

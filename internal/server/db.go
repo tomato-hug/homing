@@ -324,6 +324,16 @@ func (d *DB) SavePushToken(ctx context.Context, deviceID, provider, token string
 	return nil
 }
 
+// DeletePushToken removes a token the push provider reported as unregistered.
+func (d *DB) DeletePushToken(ctx context.Context, deviceID, provider string) error {
+	_, err := d.sql.ExecContext(ctx,
+		`DELETE FROM push_tokens WHERE device_id = ? AND provider = ?`, deviceID, provider)
+	if err != nil {
+		return fmt.Errorf("server: delete push token: %w", err)
+	}
+	return nil
+}
+
 type PushToken struct {
 	Provider string
 	Token    string
