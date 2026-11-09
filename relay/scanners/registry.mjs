@@ -22,11 +22,15 @@ export const scanners = new Map();
 for (const mod of MODULES) {
   const def = mod.default || mod;
   if (!def?.id) continue;
-  scanners.set(def.id, {
-    ...def,
-    iconSvg: ICONS[def.icon] || ICONS.generic,
-    module: mod,
-  });
+  // 保留 getter（pushSignal / capabilities 随 serve 状态变化），不能用展开
+  const entry = {};
+  for (const key of Reflect.ownKeys(def)) {
+    const d = Object.getOwnPropertyDescriptor(def, key);
+    if (d) Object.defineProperty(entry, key, d);
+  }
+  Object.defineProperty(entry, "iconSvg", { value: ICONS[def.icon] || ICONS.generic, enumerable: true });
+  Object.defineProperty(entry, "module", { value: mod, enumerable: false });
+  scanners.set(def.id, entry);
 }
 
 export function get(id) {

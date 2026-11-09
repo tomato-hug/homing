@@ -157,6 +157,9 @@ OpenCode / ZCode 读取的表：`session_v2`（id/title/directory/model/time_upd
 | `PATCH /api/sessions/<测试 id>` | 写入 `session-state.json` 成功，读回一致；测试条目已删除 |
 | `launchctl kickstart -k dev.agentpush.relay` | 新 PID 监听 18787，`/health` 正常 |
 | 8787 (ResetWatch) | 未触碰，进程仍在 |
+| scanner 单元验证（v2.1） | `opencode`: installed / signal=poll / reply=false / models=4；`zcode`: missing，`detail` 写明查过 12 个路径 |
+| `pushSignal` / `capabilities` 是 getter | 无 serve 时报 `poll` 与 `reply=false`；起 serve 后自动变 `http_events` 与 `reply=true`（registry 用 `defineProperty` 保留 getter，不能用对象展开） |
+| 重启后 `/api/agents` | codex/claude/workbuddy/opencode = connected，zcode = missing |
 
 自测只用了 `/tmp` 下的临时会话与一条显式命名的测试 session id（`test-homing-v2-probe`），没有向任何真实 Claude / Codex / WorkBuddy / OpenCode 会话写入内容。
 
@@ -164,9 +167,137 @@ OpenCode / ZCode 读取的表：`session_v2`（id/title/directory/model/time_upd
 
 ## 6. 尚未完成
 
-1. **条目解析与回复注入仍留在 server.mjs**：`extractItems` / `readRecentItems` / `sessionFilePath` / `injectClaudeReply` / `injectCodexReply` 尚未搬进对应 scanner；目前 scanner 只管 `meta` / `listSessions` / `readItems`（仅 opencode、zcode 实现了 `readItems`）。
-2. **OpenCode 的 `reply` 未实现**（`capabilities.reply=false`）；ZCode 按约定不做。
-3. **OpenCode 的 `opencode serve` HTTP 事件未接**：目前是 60 秒轮询；`push_signal` 已标 `poll`。
-4. **opencode / zcode 的 `models` 为空**：`/api/agents` 里这两家的模型列表还没接。
-5. **inbox 的 waiting 未跟踪「已处理」**：只按「最新一条事件 + read/muted/archived」判定，历史遗留的 permission 事件会一直算 waiting，直到用 PATCH 置 `read`。
-6. **workbuddy 复用 claude 解析器**已接（`claudeScanner.fileMeta`），但仅用于钩子记录路径的场景，主路径仍读 `workbuddySnapshot()`。
+1. **条目解析与回复注入仍部分留在 server.mjs**：`extractItems` / `readRecentItems` / `sessionFilePath` / `injectClaudeReply` / `injectCodexReply` 未搬进 scanner。scanner 已接管 `meta` / `listSessions` / `readItems`（opencode、zcode 有 `readItems`）与 `detect`，注入链路仍在 server。
+2. **OpenCode 的 reply 只在 `opencode serve` 运行时可用**（见 §7）。没有 serve 时 `capabilities.reply=false`，注入返回明确的错误而不是静默失败。
+3. **opencode / zcode 的 models 还没接到 `/api/agents`**：scanner 已实现 `models()`（见 §9 的接入指引），但 `listAgents()` 里对注册表新增的 agent 仍写死 `models: []`。这一处需要改 `relay/server.mjs` 一行，本次按约定没有动它。
+4. **inbox 的 waiting 未跟踪「已处理」**：只按「最新一条事件 + read/muted/archived」判定，历史遗留的 permission 事件会一直算 waiting，直到用 PATCH 置 `read`。
+5. **ZCode 无法端到端验证**：这台 Mac 上没有安装（证据见 §8），`listSessions` / `models` 只按同族格式实现，没有真实样本可核对。
+
+---
+
+## 7. OpenCode 回复注入与事件流（逆向结论）
+
+依据：官方文档 <https://docs.opencode.ai/docs/server/> 与 <https://docs.opencode.ai/docs/sdk/>（2026-11 版），以及本机 `~/.config/opencode/service.json` 的存在（说明这台机器上 `opencode serve` 曾经跑过）。
+
+### 7.1 服务形态
+
+| 项 | 值 |
+|---|---|
+| 启动 | `opencode serve [--port <n>] [--hostname <h>] [--cors <origin>]` |
+| 默认监听 | `127.0.0.1:4096` |
+| 鉴权 | `OPENCODE_SERVER_PASSWORD` → **HTTP Basic**，用户名默认 `opencode`（`OPENCODE_SERVER_USERNAME` 可改） |
+| 规格 | `GET /doc` 提供 OpenAPI 3.1 |
+| TUI 自带服务 | 跑 `opencode` 时 TUI 会起一个**随机端口**的服务；只有 `opencode serve` 才是固定 4096 |
+
+本机的 `~/.config/opencode/service.json` 里有一个 `password` 字段——relay 的 scanner 读它作为 Basic 密码，因此不需要用户再配一遍。
+
+### 7.2 往指定会话发消息
+
+| 方式 | 端点 | 特点 |
+|---|---|---|
+| **异步（采用）** | `POST /session/:id/prompt_async` | body 同下，返回 `204`，不等待模型 |
+| 同步 | `POST /session/:id/message` | 会一直等到模型回复完成，可能几分钟 |
+| 无回复注入 | 同上 + `body.noReply: true` | 只加上下文，不触发 AI 回复 |
+
+请求体（SDK 示例确认）：
+
+```jsonc
+{ "parts": [{ "type": "text", "text": "要发的话" }],
+  "model": { "providerID": "deepseek", "modelID": "deepseek-chat" },   // 可选
+  "noReply": false }
+```
+
+`parts` 的形状由 SDK 文档的 `session.prompt({ body: { parts: [{ type: "text", text: "Hello!" }] } })` 直接给出，不是推测。
+
+**relay 的选择**：走 `prompt_async`。理由是同一条消息如果用 `/message`，HTTP 连接会挂到模型跑完；手机端的投递语义是「放进会话」，不需要等回复。
+
+### 7.3 事件流
+
+| 端点 | 说明 |
+|---|---|
+| `GET /event` | SSE，首事件 `server.connected`，之后是总线事件 |
+| `GET /global/event` | 全局事件流（含跨项目） |
+| `GET /session/status` | 所有会话的状态快照（可轮询） |
+
+scanner 的做法（`relay/scanners/opencode.mjs`）：
+
+1. 每 30 秒探测一次 `GET /global/health`（800ms 超时，带 Basic）。
+2. 探测到就在后台订阅 `GET /event`，把事件里带 `sessionID` 的、类型命中 `permission` / `idle|completed|finish` / `error` 的，转成 relay 的通用钩子事件 `POST /hook/generic`（该端点只接受回环来源，不需要 token）。
+3. 探测不到就断开订阅，`pushSignal` 退回 `poll`。
+
+**未经真实 serve 验证的部分**：事件类型名（`message.part.updated` / `session.idle` / `permission.updated` 之类）来自 opencode 事件总线的命名习惯，本机没有 serve 在跑，无法实测。因此 scanner 用的是**模式匹配**（`/permission/i`、`/idle|completed|finish|done/i`），而不是写死某个类型名——匹配不到就丢弃，不会误推。这一点在真正跑起 serve 后应当复核一次。
+
+### 7.4 为什么不写数据库
+
+`session_pending` 与 `session_inbox` 两张表看起来像「待投递队列」（`type` / `payload` / `delivery` / `enqueued_seq`），但：
+
+- 本机实测两张表都是 **0 行**，没有样本可以确定 `delivery` 的取值语义；
+- 写库会破坏「只读」约定，而且 opencode 自己正在用这个库（WAL 模式下外部写入有风险）。
+
+所以 reply 只走 HTTP，不碰库。
+
+---
+
+## 8. ZCode 检测结论：这台 Mac 上没装
+
+### 8.1 证据（2026-11-09 逐个查过）
+
+| 检查项 | 结果 |
+|---|---|
+| `~/.zcode` / `~/.zcode/cli/db/db.sqlite` | 不存在 |
+| `~/Library/Application Support/ZCode`、`~/Library/Application Support/zcode` | 不存在 |
+| `~/Library/Preferences/*zcode*` | 无 |
+| `~/.vscode/extensions` 里含 zcode / z-ai / zhipu | 无 |
+| `brew list --cask` 里含 zcode / z-ai | 无 |
+| `mdfind -name ZCode` | 只命中本仓库的 `relay/scanners/zcode.mjs` 与一个无关的测试文件 |
+| `find ~ -maxdepth 4 -type d -name ".zcode"` | 无 |
+| PATH 里 `zcode` / `z-ai` | 无 |
+
+**结论**：`missing` 是正确状态，不是检测逻辑的 bug。
+
+### 8.2 检测逻辑仍然改强了
+
+原来的实现只认 `~/.zcode/cli/db/db.sqlite` 一个路径。现在 `candidates()` 覆盖 12 个候选：
+
+```
+$ZCODE_HOME/{cli/db,db}/db.sqlite · $ZCODE_HOME/db.sqlite · $ZCODE_HOME/cli/db/zcode.db
+~/.zcode/…（同上四种）
+~/Library/Application Support/ZCode/…（同上四种）
+~/Library/Application Support/zcode/…（同上四种）
+```
+
+`detect()` 现在会返回 `{ installed, version, detail, db, checked }`，`detail` 直接写明「查过 N 个路径」，这样界面上再显示 missing 时，能一眼看出是「没装」还是「装了但路径没对上」。
+
+按 magpie 的 `internal/sessions/zcode.go` 记录：ZCode 的库在 `~/.zcode/cli/db/db.sqlite`，表结构与 OpenCode 相同（另有 `title_source` 列）；Windows 上即便 app 数据在别处，库仍在 `USERPROFILE` 下。装好之后本 scanner 不需要改代码。
+
+---
+
+## 9. models：scanner 已就绪，接线还差一行
+
+### 9.1 scanner 侧现状
+
+| agent | 来源 | 本机结果 |
+|---|---|---|
+| `opencode` | 有 serve → `GET /config/providers`；否则 `~/.config/opencode/opencode.json` 的 `provider` + `opencode.db` 的 `kv['models-dev:catalog']` | **4 个**（deepseek 系列），默认 `deepseek/deepseek-chat` |
+| `zcode` | 同族格式：`$ZCODE_HOME` / `~/.zcode` / `~/.config/zcode` 下的 config + 库里的目录缓存 | **0 个**（未安装） |
+
+调用方式：`(await scanner.models())` → `{ models: [{ id, provider, model }], defaultModel, source }`。
+
+### 9.2 接到 `/api/agents` 需要的一行
+
+`relay/server.mjs` 的 `probeAgents()` 里，把 models 一并探测并缓存：
+
+```js
+// probeAgents() 内，与 detect() 并列
+const m = typeof sc.models === "function" ? await sc.models() : { models: [], defaultModel: null };
+agentProbe.set(id, { installed: ..., version: ..., models: m.models, default_model: m.defaultModel });
+```
+
+然后在 `listAgents()` 里补注册表 agent 的那段，把 `models: []` 换成：
+
+```js
+models: (probe.models || []).map((m) => modelEntry(m.id, m.provider, m.id === probe.default_model, [])),
+default_model: probe.default_model || null,
+```
+
+本次没有改 `relay/server.mjs`（该文件当时已有其他会话未提交的改动），所以 `/api/agents` 里这两家仍是 `models: []`。
