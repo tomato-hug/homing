@@ -92,11 +92,9 @@ func (d *Deps) handleAgents(w http.ResponseWriter, r *http.Request) {
 			Available:   det.Installed,
 			Capabilities: map[string]bool{
 				"reply":        caps.Reply,
-				"sessions":     caps.Sessions,
-				"models":       caps.Models,
-				"new_session":  false, // 新建会话还没搬到 Go
-				"switch_model": caps.Reply && caps.Models,
-				"effort":       false,
+				"new_session":  newSessionFor(a.ID(), det.Installed),
+				"switch_model": switchModelFor(a.ID()),
+				"effort":       a.ID() == "codex",
 				"stop":         canReply,
 				"approve":      false, // 授权挂起还没搬到 Go
 				"live":         a.PushSignal() != agent.PushPoll,
@@ -146,4 +144,25 @@ func (d *Deps) handleAgents(w http.ResponseWriter, r *http.Request) {
 		agents = append(agents, info)
 	}
 	WriteJSON(w, http.StatusOK, map[string]any{"agents": agents, "generated_at": nowISO()})
+}
+
+// newSessionFor / switchModelFor 对 Node 中继的 capability 位：
+// relay/server.mjs 的 listAgents() 里每家是写死的（codex/claude 看 bin 是否可用，
+// workbuddy 恒为 true；switch_model 只有 codex/claude 有，effort 只有 codex 有）。
+func newSessionFor(id string, installed bool) bool {
+	switch id {
+	case "codex", "claude":
+		return installed
+	case "workbuddy":
+		return true
+	}
+	return false
+}
+
+func switchModelFor(id string) bool {
+	switch id {
+	case "codex", "claude":
+		return true
+	}
+	return false
 }
