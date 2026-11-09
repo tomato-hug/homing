@@ -1,0 +1,17 @@
+{
+  "name": "@homing/protocol-js",
+  "version": "0.1.0",
+  "description": "Homing v1 shared protocol primitives",
+  "type": "module",
+  "main": "src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./vectors": "./test-vectors.json"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "libsodium-wrappers-sumo": "0.7.15"
+  }
+}

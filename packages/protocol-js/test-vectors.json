@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "note": "Synthetic test vectors. Seeds are demo phrases, not secrets.",
+  "host": {
+    "seed": "homing-test-host-seed-0000000001",
+    "publicKeyHex": "6cb7f1b9fdacd984bd7538ca121e6c5aad933e231749e847e3e1c13e0ba174a8",
+    "curvePublicKeyHex": "b786f31eff458676f2bb665bb1a02fd4f342e104dcde8e625db123f9461d727e",
+    "deviceId": "5wcgc6ckkj7acunjdi63cwcexu",
+    "fingerprint": "b0d347bcd133c277"
+  },
+  "client": {
+    "seed": "homing-test-client-seed-00000001",
+    "publicKeyHex": "96fb32af459cd8ec7c1be0841107c466f5679faf19c760a44fc46459ca8df253",
+    "curvePublicKeyHex": "3bf6fb7296ffa6c4b94b6b5adcfd577242290f482877ae0476b562fe7050795c",
+    "deviceId": "bbxufqjg4yotnbiderrmj3kd3q",
+    "fingerprint": "4832c560f66cbfd4"
+  },
+  "hello": {
+    "nonce": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "ts": "2026-01-01T00:00:00.000Z",
+    "signatureHex": "b581d43e817c9f468a626ef5c393d869b27d4d27d35fcc42f94c878827d8cb3ee75a6f5b05206ac8dc594728d3e05d15be90ce4e738fa50901010ce8e953810e"
+  },
+  "sas": {
+    "hostPublicKeyHex": "6cb7f1b9fdacd984bd7538ca121e6c5aad933e231749e847e3e1c13e0ba174a8",
+    "clientPublicKeyHex": "96fb32af459cd8ec7c1be0841107c466f5679faf19c760a44fc46459ca8df253",
+    "words": [
+      "掌",
+      "践",
+      "橡",
+      "议"
+    ]
+  },
+  "envelope": {
+    "payload": {
+      "type": "event",
+      "name": "message",
+      "data": {
+        "session_id": "demo-session-01",
+        "text": "示例消息：你好，Homing。"
+      }
+    },
+    "v": 1,
+    "t": "msg",
+    "id": "01J00000000000000000000000",
+    "from": "5wcgc6ckkj7acunjdi63cwcexu",
+    "to": "bbxufqjg4yotnbiderrmj3kd3q",
+    "ts": "2026-01-01T00:00:01.000Z",
+    "nonce": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcY",
+    "ct": "00m+N9VJ3QCWlNRzfpQH0Aw4sCpJ9cb/4FSH9BXezLb4ZUuQ9VKlpv3Q3dcfIFONgl5/R80IXUo4xiiv3jXoTLq+/HnxInbMtsH6JDD11srXr+3PBFnqJ/yAeBlqqqaaFAbO3u4QVLbsoBC3eifGTOZYYIpI+sndRV8x9MwmZST6MF0V"
+  }
+}
