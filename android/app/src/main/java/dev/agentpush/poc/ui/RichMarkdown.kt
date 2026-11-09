@@ -1,0 +1,302 @@
+package dev.agentpush.poc.ui
+
+import android.webkit.WebChromeClient
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Code
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.UriHandler
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import com.mikepenz.markdown.coil3.Coil3ImageTransformerImpl
+import com.mikepenz.markdown.compose.Markdown
+import com.mikepenz.markdown.compose.components.markdownComponents
+import com.mikepenz.markdown.compose.elements.MarkdownCodeFence
+import com.mikepenz.markdown.m3.markdownColor
+import com.mikepenz.markdown.m3.markdownTypography
+import dev.agentpush.poc.AgentApi
+import dev.agentpush.poc.AppSettings
+import dev.agentpush.poc.Attachment
+import dev.agentpush.poc.ui.theme.HomingMono
+import java.net.URLDecoder
+
+@Composable
+fun RichMarkdown(
+    source: String,
+    modifier: Modifier = Modifier,
+    onCopyCode: (String) -> Unit,
+    onOpenUrl: (String) -> Unit,
+) {
+    val currentUriHandler = LocalUriHandler.current
+    val linkHandler = remember(currentUriHandler) {
+        object : UriHandler {
+            override fun openUri(uri: String) {
+                if (uri.startsWith("http://") || uri.startsWith("https://")) {
+                    onOpenUrl(uri)
+                } else {
+                    runCatching { currentUriHandler.openUri(uri) }
+                }
+            }
+        }
+    }
+    var previewHtml by remember { mutableStateOf<String?>(null) }
+    val renderLimit = 80_000
+    val truncated = source.length > renderLimit
+    val renderedSource = remember(source) {
+        if (source.length > renderLimit) source.take(renderLimit) else source
+    }
+
+    SelectionContainer {
+        Column(modifier = modifier.fillMaxWidth()) {
+            CompositionLocalProvider(LocalUriHandler provides linkHandler) {
+                Markdown(
+                    content = renderedSource,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = markdownColor(),
+                    typography = markdownTypography(),
+                    imageTransformer = Coil3ImageTransformerImpl,
+                    components = markdownComponents(
+                        codeFence = { model ->
+                            MarkdownCodeFence(
+                                content = model.content,
+                                node = model.node,
+                                style = model.typography.code,
+                            ) { code, language, style ->
+                                RichCodeBlock(
+                                    code = code,
+                                    language = language,
+                                    style = style,
+                                    onCopy = { onCopyCode(code) },
+                                    onPreview = if (looksLikeHtml(code, language)) {
+                                        { previewHtml = code }
+                                    } else {
+                                        null
+                                    },
+                                )
+                            }
+                        },
+                    ),
+                )
+            }
+            if (truncated) {
+                Text(
+                    text = "内容过长，仅渲染前 ${renderLimit / 1000} 千字符。",
+                    modifier = Modifier.padding(top = 8.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+
+    previewHtml?.let { html ->
+        HtmlPreviewDialog(html = html, onDismiss = { previewHtml = null })
+    }
+}
+
+@Composable
+private fun RichCodeBlock(
+    code: String,
+    language: String?,
+    style: androidx.compose.ui.text.TextStyle,
+    onCopy: () -> Unit,
+    onPreview: (() -> Unit)?,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+                RoundedCornerShape(10.dp),
+            ),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .padding(start = 12.dp, end = 2.dp, top = 3.dp, bottom = 3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = Icons.Outlined.Code,
+                contentDescription = null,
+                modifier = Modifier.size(14.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = language?.ifBlank { "代码" } ?: "代码",
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = 6.dp),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (onPreview != null) {
+                IconButton(onClick = onPreview, modifier = Modifier.size(34.dp)) {
+                    Icon(
+                        imageVector = Icons.Outlined.PlayArrow,
+                        contentDescription = "预览 HTML",
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            }
+            IconButton(onClick = onCopy, modifier = Modifier.size(34.dp)) {
+                Icon(
+                    imageVector = Icons.Outlined.ContentCopy,
+                    contentDescription = "复制代码",
+                    modifier = Modifier.size(17.dp),
+                )
+            }
+        }
+        Text(
+            text = code,
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(12.dp),
+            style = style.copy(
+                fontFamily = HomingMono,
+                fontSize = 13.sp,
+                lineHeight = 20.sp,
+            ),
+            softWrap = false,
+        )
+    }
+}
+
+private fun looksLikeHtml(code: String, language: String?): Boolean {
+    val lang = language?.lowercase().orEmpty()
+    if (lang in setOf("html", "htm", "xhtml", "svg")) return true
+    val trimmed = code.trimStart().lowercase()
+    return trimmed.startsWith("<!doctype html") ||
+        trimmed.startsWith("<html") ||
+        (trimmed.startsWith("<") && trimmed.contains("</") && trimmed.contains(">"))
+}
+
+fun rewriteMarkdownImageUrls(
+    source: String,
+    attachments: List<Attachment>,
+    settings: AppSettings,
+): String {
+    val images = attachments.filter { it.isImage }
+    if (images.isEmpty() || !source.contains("![")) return source
+    return Regex("!\\[([^\\]]*)]\\(([^)\\s]+)(?:\\s+\"[^\"]*\")?\\)")
+        .replace(source) { match ->
+            val rawUrl = match.groupValues[2].trim('<', '>')
+            val decoded = runCatching {
+                URLDecoder.decode(rawUrl, Charsets.UTF_8.name())
+            }.getOrDefault(rawUrl)
+            val image = images.firstOrNull { attachment ->
+                decoded == attachment.name || decoded.endsWith("/${attachment.name}")
+            }
+            if (image != null) {
+                "![${match.groupValues[1]}](${AgentApi.attachmentUrl(settings, image)})"
+            } else {
+                match.value
+            }
+        }
+}
+
+@Composable
+private fun HtmlPreviewDialog(html: String, onDismiss: () -> Unit) {
+    var progress by remember { mutableIntStateOf(0) }
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false,
+        ),
+    ) {
+        Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "HTML 预览",
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Outlined.Close, contentDescription = "关闭")
+                    }
+                }
+                if (progress in 1..99) {
+                    LinearProgressIndicator(
+                        progress = { progress / 100f },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                AndroidView(
+                    modifier = Modifier.fillMaxSize(),
+                    factory = { context ->
+                        WebView(context).apply {
+                            setBackgroundColor(0xFFFFFFFF.toInt())
+                            settings.javaScriptEnabled = true
+                            settings.domStorageEnabled = true
+                            settings.allowFileAccess = false
+                            settings.allowContentAccess = false
+                            webChromeClient = object : WebChromeClient() {
+                                override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                                    progress = newProgress
+                                }
+                            }
+                            webViewClient = WebViewClient()
+                            loadDataWithBaseURL(
+                                "https://agent-inbox.local/",
+                                html,
+                                "text/html",
+                                "UTF-8",
+                                null,
+                            )
+                        }
+                    },
+                )
+            }
+        }
+    }
+}

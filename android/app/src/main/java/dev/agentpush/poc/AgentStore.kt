@@ -1,0 +1,1080 @@
+package dev.agentpush.poc
+
+import android.content.Context
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import org.json.JSONObject
+import java.time.Instant
+import java.util.concurrent.atomic.AtomicLong
+
+class AgentStore private constructor(context: Context) {
+    private val applicationContext = context.applicationContext
+    private val diagnosticsPreferences = applicationContext.getSharedPreferences(
+        DIAGNOSTICS_PREFS,
+        Context.MODE_PRIVATE,
+    )
+    private val sessionFlagsStore = SessionFlagsStore(applicationContext)
+    private val _state = MutableStateFlow(
+        AgentUiState(
+            settings = AppSettings.load(applicationContext),
+            connectionDiagnostics = loadDiagnostics(),
+            localSessionFlags = sessionFlagsStore.load(),
+        ),
+    )
+    private val nextLocalReplyId = AtomicLong(0L)
+    private var inboxRefreshJob: Job? = null
+    private val backgroundScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + CrashReporter.coroutineExceptionHandler,
+    )
+
+    val state: StateFlow<AgentUiState> = _state.asStateFlow()
+
+    suspend fun refreshAll() {
+        _state.update { it.copy(isRefreshing = true, error = null) }
+        val settings = _state.value.settings
+        try {
+            val bundle = coroutineScope {
+                val events = async { AgentApi.fetchEvents(settings) }
+                val sessions = async {
+                    runCatching { AgentApi.fetchSessions(settings) }.fold(
+                        onSuccess = { SessionFetch(it, true, null) },
+                        onFailure = { error -> SessionFetch(emptyList(), false, error) },
+                    )
+                }
+                val projects = async {
+                    runCatching { AgentApi.fetchProjects(settings) }.getOrDefault(emptyList())
+                }
+                val away = async {
+                    runCatching { AgentApi.getAway(settings) }.getOrDefault(_state.value.away)
+                }
+                val agents = async {
+                    runCatching { AgentApi.fetchAgentDirectory(settings) }
+                        .getOrDefault(_state.value.agentDirectory)
+                }
+                val inbox = async {
+                    runCatching { AgentApi.fetchInbox(settings) }
+                        .getOrDefault(InboxFeed(available = false))
+                }
+                RefreshBundle(
+                    events = events.await(),
+                    sessions = sessions.await(),
+                    projects = projects.await(),
+                    away = away.await(),
+                    agentDirectory = agents.await(),
+                    inbox = inbox.await(),
+                )
+            }
+            mergeEvents(bundle.events)
+            mergeSessionMeta(
+                sessions = (bundle.sessions.items + bundle.inbox.sessions)
+                    .distinctBy { it.sessionId },
+                apiAvailable = bundle.sessions.apiAvailable || bundle.inbox.available,
+                error = bundle.sessions.error,
+            )
+            _state.update {
+                it.copy(
+                    projects = bundle.projects,
+                    away = bundle.away,
+                    agentDirectory = bundle.agentDirectory,
+                    isRefreshing = false,
+                    error = null,
+                    lastUpdatedAt = System.currentTimeMillis(),
+                    inbox = bundle.inbox.takeIf { inbox -> inbox.available },
+                )
+            }
+            backgroundScope.launch { hydrateMissingTranscripts() }
+        } catch (error: Exception) {
+            _state.update {
+                it.copy(
+                    isRefreshing = false,
+                    error = friendlyError(error),
+                )
+            }
+            throw error
+        }
+    }
+
+    suspend fun refreshReplies(sessionId: String) {
+        val replies = AgentApi.fetchReplies(_state.value.settings, sessionId)
+        mergeReplies(replies)
+    }
+
+    suspend fun refreshTranscript(sessionId: String, force: Boolean = false) {
+        if (!force && _state.value.transcriptCache.containsKey(sessionId)) {
+            return
+        }
+        val transcript = AgentApi.fetchTranscript(_state.value.settings, sessionId)
+        _state.update {
+            it.copy(transcriptCache = it.transcriptCache + (sessionId to transcript))
+        }
+    }
+
+    suspend fun refreshSessionDetails(sessionId: String, force: Boolean = false) {
+        if (sessionId.isBlank()) return
+        val existing = _state.value.sessionItems[sessionId]
+        if (!force && existing != null && System.currentTimeMillis() - existing.loadedAt < 1_500L) {
+            return
+        }
+        val settings = _state.value.settings
+        val detail = runCatching { AgentApi.fetchSession(settings, sessionId) }.getOrNull()
+        if (detail != null) {
+            _state.update { current ->
+                current.copy(
+                    sessionMeta = current.sessionMeta + (
+                        sessionId to mergeMeta(current.sessionMeta[sessionId], detail)
+                        ),
+                )
+            }
+        }
+        val result = runCatching { AgentApi.fetchSessionItems(settings, sessionId) }
+            .getOrElse { error ->
+                SessionItemsResult(
+                    available = false,
+                    reason = friendlyError(error),
+                )
+            }
+        _state.update { current ->
+            val previous = current.sessionItems[sessionId]
+            val turnState = if (result.turns.isNotEmpty()) {
+                SessionItemsState.fromTurns(result.turns)
+            } else {
+                null
+            }
+            val next = if (result.available) {
+                SessionItemsState(
+                    items = normalizeSessionItems(result.items),
+                    turns = result.turns,
+                    reason = result.reason,
+                    available = true,
+                    loadedAt = System.currentTimeMillis(),
+                    running = turnState?.running ?: previous?.running ?: false,
+                    runningSince = turnState?.runningSince
+                        ?.takeIf { it.isNotBlank() }
+                        ?: previous?.runningSince.orEmpty(),
+                )
+            } else {
+                (previous ?: SessionItemsState()).copy(
+                    available = false,
+                    reason = result.reason ?: previous?.reason,
+                    loadedAt = System.currentTimeMillis(),
+                )
+            }
+            current.copy(sessionItems = current.sessionItems + (sessionId to next))
+        }
+        if (!result.available || result.items.isEmpty()) {
+            runCatching { refreshTranscript(sessionId, force = force) }
+        }
+    }
+
+    fun applyItem(json: JSONObject) {
+        val sessionId = json.stringOrBlank("session_id")
+        if (sessionId.isBlank()) return
+        val itemJson = json.optJSONObject("item")
+        val item = if (itemJson != null) {
+            SessionItem.fromJson(itemJson, fallbackId = "item-${System.nanoTime()}")
+        } else {
+            SessionItem.fromJson(json, fallbackId = "item-${System.nanoTime()}")
+        } ?: return
+        _state.update { current ->
+            val previous = current.sessionItems[sessionId]
+                ?: SessionItemsState(running = true)
+            current.copy(
+                sessionItems = current.sessionItems + (
+                    sessionId to appendSessionItem(previous, item)
+                    ),
+            )
+        }
+        scheduleInboxRefresh(delayMillis = 500L)
+    }
+
+    fun applyTurn(json: JSONObject) {
+        val sessionId = json.stringOrBlank("session_id")
+        if (sessionId.isBlank()) return
+        val state = json.stringOrBlank("state").lowercase()
+        if (state.isBlank()) return
+        val turn = SessionTurn(
+            state = state,
+            ts = json.stringOrBlank("ts"),
+        )
+        _state.update { current ->
+            val previous = current.sessionItems[sessionId]
+                ?: SessionItemsState(running = true)
+            current.copy(
+                sessionItems = current.sessionItems + (
+                    sessionId to applyTurnToItems(previous, turn)
+                    ),
+                sessionMeta = current.sessionMeta.mapValues { (key, meta) ->
+                    if (key != sessionId) {
+                        meta
+                    } else {
+                        when (state) {
+                            "started", "running" -> meta.copy(
+                                status = "running",
+                                running = true,
+                                runningSince = turn.ts.ifBlank { meta.runningSince },
+                            )
+                            "failed" -> meta.copy(
+                                status = "error",
+                                running = false,
+                                runningSince = "",
+                            )
+                            "finished", "complete", "completed" -> meta.copy(
+                                status = "done",
+                                running = false,
+                                runningSince = "",
+                            )
+                            else -> meta
+                        }
+                    }
+                },
+            )
+        }
+        scheduleInboxRefresh(delayMillis = 350L)
+    }
+
+    suspend fun refreshProjects() {
+        val projects = AgentApi.fetchProjects(_state.value.settings)
+        _state.update { it.copy(projects = projects) }
+    }
+
+    fun mergeCreatedSession(sessionId: String, source: String, cwd: String) {
+        val meta = SessionMeta(
+            sessionId = sessionId,
+            source = source,
+            title = projectFromCwd(cwd),
+            titleSource = "project",
+            project = projectFromCwd(cwd),
+            workspace = workspaceFromCwd(cwd),
+            cwd = cwd,
+            status = "running",
+            lastTs = Instant.now().toString(),
+            unread = 0,
+        )
+        _state.update {
+            it.copy(
+                sessionMeta = it.sessionMeta + (sessionId to meta),
+                transcriptCache = it.transcriptCache + (sessionId to TranscriptPage()),
+            )
+        }
+    }
+
+    suspend fun refreshAway() {
+        runCatching {
+            val away = AgentApi.getAway(_state.value.settings)
+            _state.update { it.copy(away = away) }
+        }
+    }
+
+    fun ingestEvent(event: AgentEvent): Boolean {
+        var isNew = false
+        _state.update { current ->
+            val existing = current.events[event.id]
+            isNew = existing == null
+            val merged = if (existing != null) {
+                event.copy(read = existing.read || event.read)
+            } else {
+                event
+            }
+            val eventMeta = event.sessionMeta
+            val minimalMeta = if (event.sessionId.isBlank()) {
+                null
+            } else {
+                SessionMeta(
+                    sessionId = event.sessionId,
+                    source = event.source,
+                    title = event.title,
+                    titleSource = "event",
+                    project = event.project,
+                    workspace = workspaceFromCwd(event.cwd),
+                    cwd = event.cwd,
+                    status = SessionStatus.fromKind(event.kind)?.wire.orEmpty(),
+                    lastTs = event.ts,
+                    lastPreview = event.shortSummary(120),
+                    unread = 0,
+                )
+            }
+            val mergedMeta = when {
+                eventMeta != null -> mergeMeta(
+                    current.sessionMeta[event.sessionId],
+                    eventMeta.copy(
+                        sessionId = event.sessionId,
+                        source = event.source.ifBlank { eventMeta.source },
+                        cwd = eventMeta.cwd.ifBlank { event.cwd },
+                        project = eventMeta.project.ifBlank { event.project },
+                        workspace = eventMeta.workspace.ifBlank {
+                            workspaceFromCwd(event.cwd)
+                        },
+                    ),
+                )
+                current.sessionMeta[event.sessionId] == null &&
+                    !current.sessionApiAvailable -> minimalMeta
+                else -> null
+            }
+            current.copy(
+                events = current.events + (event.id to merged),
+                sessionMeta = if (mergedMeta != null && event.sessionId.isNotBlank()) {
+                    current.sessionMeta + (event.sessionId to mergedMeta)
+                } else {
+                    current.sessionMeta
+                },
+            )
+        }
+        event.sessionMeta?.let { meta ->
+            cacheRemoteFlags(listOf(meta))?.let { flags ->
+                _state.update { it.copy(localSessionFlags = flags) }
+            }
+        }
+        if (isNew && event.sessionId.isNotBlank()) {
+            clearReadForNewContent(event.sessionId, event.ts)
+            scheduleInboxRefresh()
+            backgroundScope.launch {
+                runCatching { refreshTranscript(event.sessionId) }
+            }
+        }
+        return isNew
+    }
+
+    fun applySessionUpdate(json: JSONObject) {
+        val sessionId = json.stringOrBlank("session_id").ifBlank { json.stringOrBlank("id") }
+        if (sessionId.isBlank()) return
+        val incoming = SessionMeta.fromJson(json, fallbackSessionId = sessionId)
+        val remoteFlags = cacheRemoteFlags(listOf(incoming))
+        val running = if (json.has("running") && !json.isNull("running")) {
+            json.optBoolean("running", false)
+        } else {
+            null
+        }
+        _state.update { current ->
+            val items = current.sessionItems[sessionId]
+            current.copy(
+                sessionMeta = current.sessionMeta + (
+                    sessionId to mergeMeta(current.sessionMeta[sessionId], incoming)
+                    ),
+                localSessionFlags = remoteFlags ?: current.localSessionFlags,
+                sessionApiAvailable = true,
+                sessionItems = if (items != null && running != null) {
+                    current.sessionItems + (
+                        sessionId to items.copy(
+                            running = running,
+                            runningSince = if (running) {
+                                incoming.runningSince.ifBlank { items.runningSince }
+                            } else {
+                                ""
+                            },
+                        )
+                        )
+                } else {
+                    current.sessionItems
+                },
+            )
+        }
+        scheduleInboxRefresh(delayMillis = 300L)
+    }
+
+    fun applyReplyStatus(json: JSONObject) {
+        val replyId = json.optLong("reply_id", 0L)
+        val eventId = json.optLong("event_id", 0L)
+        val sessionId = json.stringOrBlank("session_id")
+        val status = ReplyStatus.fromWire(json.stringOrBlank("status"))
+        val message = json.stringOrBlank("message").takeIf { it.isNotBlank() }
+        _state.update { current ->
+            val byId = if (replyId > 0) current.replies[replyId] else null
+            val target = byId ?: current.replies.values
+                .filter {
+                    if (replyId > 0) {
+                        it.isLocal
+                    } else {
+                        true
+                    }
+                }
+                .filter {
+                    (eventId == 0L || it.eventId == eventId) &&
+                        (sessionId.isBlank() || it.sessionId == sessionId)
+                }
+                .maxByOrNull { it.ts }
+                ?: return@update current
+            current.copy(
+                replies = current.replies + (
+                    target.id to target.copy(
+                        status = status,
+                        message = message,
+                        isLocal = false,
+                    )
+                    ),
+            )
+        }
+    }
+
+    suspend fun testConnection(baseUrl: String, token: String): String {
+        val settings = AppSettings(
+            baseUrl = AppSettings.normalizeBaseUrl(baseUrl),
+            token = token.trim(),
+        )
+        return AgentApi.probe(settings)
+    }
+
+    fun saveSettings(baseUrl: String, token: String): AppSettings {
+        val saved = AppSettings.save(applicationContext, baseUrl, token)
+        _state.update { it.copy(settings = saved) }
+        return saved
+    }
+
+    fun setConnectionState(connection: ConnectionState) {
+        _state.update { it.copy(connection = connection) }
+    }
+
+    suspend fun setSessionPinned(sessionId: String, pinned: Boolean) {
+        val flags = sessionFlagsStore.update(sessionId) { it.copy(pinned = pinned) }
+        _state.update { current ->
+            current.copy(
+                localSessionFlags = flags,
+                sessionMeta = current.sessionMeta.mapValues { (key, meta) ->
+                    if (key == sessionId) meta.copy(pinned = pinned) else meta
+                },
+            )
+        }
+        persistSessionFlags(sessionId, mapOf("pinned" to pinned))
+    }
+
+    suspend fun setSessionMuted(sessionId: String, muted: Boolean) {
+        val flags = sessionFlagsStore.update(sessionId) { it.copy(muted = muted) }
+        _state.update { current ->
+            current.copy(
+                localSessionFlags = flags,
+                sessionMeta = current.sessionMeta.mapValues { (key, meta) ->
+                    if (key == sessionId) meta.copy(muted = muted) else meta
+                },
+                inbox = if (muted) current.inbox?.withoutWaiting(sessionId) else current.inbox,
+            )
+        }
+        persistSessionFlags(sessionId, mapOf("muted" to muted))
+    }
+
+    suspend fun setSessionArchived(sessionId: String, archived: Boolean) {
+        val flags = sessionFlagsStore.update(sessionId) { it.copy(archived = archived) }
+        _state.update { current ->
+            current.copy(
+                localSessionFlags = flags,
+                sessionMeta = current.sessionMeta.mapValues { (key, meta) ->
+                    if (key == sessionId) meta.copy(archived = archived) else meta
+                },
+                inbox = if (archived) {
+                    current.inbox?.withoutSession(sessionId)
+                } else {
+                    current.inbox
+                },
+            )
+        }
+        persistSessionFlags(sessionId, mapOf("archived" to archived))
+    }
+
+    private suspend fun persistSessionFlags(
+        sessionId: String,
+        fields: Map<String, Boolean>,
+    ) {
+        if (sessionId.isBlank() || fields.isEmpty()) return
+        val updated = runCatching {
+            AgentApi.patchSession(_state.value.settings, sessionId, fields)
+        }.getOrNull() ?: return
+        mergeSessionMeta(
+            sessions = listOf(updated),
+            apiAvailable = true,
+            error = null,
+        )
+        scheduleInboxRefresh(delayMillis = 200L)
+    }
+
+    private fun applySessionFlags(flags: Map<String, LocalSessionFlags>) {
+        _state.update { it.copy(localSessionFlags = flags) }
+    }
+
+    fun markConnecting() {
+        _state.update { current ->
+            if (current.connection == ConnectionState.CONNECTED) {
+                current
+            } else {
+                current.copy(connection = ConnectionState.RECONNECTING)
+            }
+        }
+    }
+
+    fun onConnectionEstablished() {
+        val now = System.currentTimeMillis()
+        val diagnostics = _state.value.connectionDiagnostics.copy(lastConnectedAt = now)
+        persistDiagnostics(diagnostics)
+        _state.update { current ->
+            current.copy(
+                connection = ConnectionState.CONNECTED,
+                connectionDiagnostics = diagnostics,
+            )
+        }
+    }
+
+    fun onConnectionLost(reason: String) {
+        val now = System.currentTimeMillis()
+        val diagnostics = _state.value.connectionDiagnostics.copy(
+            lastDisconnectedAt = now,
+            lastDisconnectReason = reason,
+        )
+        persistDiagnostics(diagnostics)
+        _state.update { current ->
+            current.copy(
+                connection = ConnectionState.RECONNECTING,
+                connectionDiagnostics = diagnostics,
+            )
+        }
+    }
+
+    fun markSessionReadLocally(sessionId: String) {
+        val flags = sessionFlagsStore.update(sessionId) {
+            it.copy(read = true, readAt = System.currentTimeMillis())
+        }
+        _state.update { current ->
+            val ids = current.events.values
+                .filter { it.sessionKey == sessionId && !it.read }
+                .map { it.id }
+                .toSet()
+            if (ids.isEmpty()) {
+                current.copy(
+                    localSessionFlags = flags,
+                    sessionMeta = current.sessionMeta.mapValues { (key, meta) ->
+                        if (key == sessionId) {
+                            meta.copy(read = true, unread = 0)
+                        } else {
+                            meta
+                        }
+                    },
+                    inbox = current.inbox?.withSessionRead(sessionId),
+                )
+            } else {
+                current.copy(
+                    localSessionFlags = flags,
+                    events = current.events.mapValues { (id, event) ->
+                        if (id in ids) event.copy(read = true) else event
+                    },
+                    sessionMeta = current.sessionMeta.mapValues { (key, meta) ->
+                        if (key == sessionId) {
+                            meta.copy(read = true, unread = 0)
+                        } else {
+                            meta
+                        }
+                    },
+                    inbox = current.inbox?.withSessionRead(sessionId),
+                )
+            }
+        }
+    }
+
+    suspend fun markSessionRead(sessionId: String) {
+        val events = _state.value.events.values
+            .filter { it.sessionKey == sessionId && !it.read }
+        val ids = events.map { it.id }
+        markSessionReadLocally(sessionId)
+        val patched = patchSessionReadRemote(sessionId)
+        if (!patched && ids.isNotEmpty()) {
+            runCatching {
+                AgentApi.markRead(_state.value.settings, ids)
+            }
+        }
+    }
+
+    suspend fun markAllRead() {
+        val ids = _state.value.events.values
+            .filterNot { it.read }
+            .map { it.id }
+        val sessionIds = _state.value.sessions().map { it.sessionId }
+        val flags = sessionFlagsStore.updateMany(sessionIds) {
+            it.copy(read = true, readAt = System.currentTimeMillis())
+        }
+        _state.update { current ->
+            current.copy(
+                localSessionFlags = flags,
+                events = current.events.mapValues { (_, event) -> event.copy(read = true) },
+                sessionMeta = current.sessionMeta.mapValues { (_, meta) ->
+                    meta.copy(read = true, unread = 0)
+                },
+                inbox = current.inbox?.let { feed ->
+                    sessionIds.fold(feed) { next, sessionId ->
+                        next.withSessionRead(sessionId)
+                    }
+                },
+            )
+        }
+        var patchAvailable = sessionIds.isNotEmpty()
+        for (sessionId in sessionIds) {
+            if (!patchSessionReadRemote(sessionId)) {
+                patchAvailable = false
+            }
+        }
+        if (!patchAvailable && ids.isNotEmpty()) {
+            runCatching { AgentApi.markRead(_state.value.settings, ids) }
+        }
+    }
+
+    suspend fun markEventsRead(ids: Collection<Long>, sessionId: String? = null) {
+        if (ids.isEmpty()) {
+            return
+        }
+        _state.update { current ->
+            current.copy(
+                events = current.events.mapValues { (id, event) ->
+                    if (id in ids) event.copy(read = true) else event
+                },
+                sessionMeta = current.sessionMeta.mapValues { (key, meta) ->
+                    if (sessionId == null || key == sessionId) {
+                        meta.copy(read = true, unread = 0)
+                    } else {
+                        meta
+                    }
+                },
+                inbox = sessionId?.let { current.inbox?.withSessionRead(it) } ?: current.inbox,
+            )
+        }
+        if (sessionId != null) {
+            markSessionReadLocally(sessionId)
+        }
+        val patched = sessionId != null && patchSessionReadRemote(sessionId)
+        if (!patched) {
+            AgentApi.markRead(_state.value.settings, ids)
+        }
+    }
+
+    private suspend fun patchSessionReadRemote(sessionId: String): Boolean {
+        val updated = runCatching {
+            AgentApi.patchSession(
+                _state.value.settings,
+                sessionId,
+                mapOf("read" to true),
+            )
+        }.getOrNull() ?: return false
+        mergeSessionMeta(
+            sessions = listOf(updated),
+            apiAvailable = true,
+            error = null,
+        )
+        return true
+    }
+
+    suspend fun sendReply(
+        sessionId: String,
+        eventId: Long?,
+        source: String,
+        text: String,
+        files: List<String> = emptyList(),
+        model: String? = null,
+        effort: String? = null,
+    ): AgentReply {
+        val localId = nextLocalReplyId.decrementAndGet()
+        val optimistic = AgentReply(
+            id = localId,
+            eventId = eventId ?: 0L,
+            sessionId = sessionId,
+            text = text,
+            ts = Instant.now().toString(),
+            status = ReplyStatus.QUEUED,
+            isLocal = true,
+            files = files,
+            model = model.orEmpty(),
+            effort = effort.orEmpty(),
+        )
+        _state.update { current ->
+            current.copy(
+                replies = current.replies + (localId to optimistic),
+                events = current.events.mapValues { (_, event) ->
+                    if (event.id == eventId) event.copy(read = true) else event
+                },
+            )
+        }
+
+        return try {
+            val receipt = AgentApi.reply(
+                _state.value.settings,
+                eventId,
+                sessionId,
+                source,
+                text,
+                files,
+                model,
+                effort,
+            )
+            val serverReply = AgentReply(
+                id = receipt.replyId.takeIf { it > 0 } ?: localId,
+                eventId = eventId ?: 0L,
+                sessionId = sessionId,
+                text = text,
+                ts = optimistic.ts,
+                status = receipt.status,
+                message = receipt.message,
+                isLocal = receipt.replyId <= 0,
+                files = files,
+                model = model.orEmpty(),
+                effort = effort.orEmpty(),
+            )
+            _state.update { current ->
+                current.copy(
+                    replies = current.replies
+                        .minus(localId)
+                        .plus(serverReply.id to serverReply),
+                )
+            }
+            if (serverReply.status != ReplyStatus.FAILED) {
+                markSessionReadLocally(sessionId)
+                patchSessionReadRemote(sessionId)
+            }
+            serverReply
+        } catch (error: Exception) {
+            val failed = optimistic.copy(
+                status = ReplyStatus.FAILED,
+                message = friendlyError(error),
+            )
+            _state.update { current ->
+                current.copy(replies = current.replies + (localId to failed))
+            }
+            failed
+        }
+    }
+
+    suspend fun retryReply(reply: AgentReply): AgentReply {
+        _state.update { current ->
+            current.copy(
+                replies = current.replies + (
+                    reply.id to reply.copy(
+                        status = ReplyStatus.QUEUED,
+                        message = null,
+                    )
+                    ),
+            )
+        }
+        return try {
+            val receipt = AgentApi.reply(
+                _state.value.settings,
+                reply.eventId,
+                reply.sessionId,
+                session(reply.sessionId)?.brand?.wire.orEmpty(),
+                reply.text,
+                reply.files,
+                reply.model.takeIf { it.isNotBlank() },
+                reply.effort.takeIf { it.isNotBlank() },
+            )
+            val retried = reply.copy(
+                id = receipt.replyId.takeIf { it > 0 } ?: reply.id,
+                status = receipt.status,
+                message = receipt.message,
+                ts = Instant.now().toString(),
+                isLocal = receipt.replyId <= 0,
+            )
+            _state.update { current ->
+                current.copy(
+                    replies = current.replies
+                        .minus(reply.id)
+                        .plus(retried.id to retried),
+                )
+            }
+            if (retried.status != ReplyStatus.FAILED) {
+                markSessionReadLocally(reply.sessionId)
+                patchSessionReadRemote(reply.sessionId)
+            }
+            retried
+        } catch (error: Exception) {
+            val failed = reply.copy(
+                status = ReplyStatus.FAILED,
+                message = friendlyError(error),
+            )
+            _state.update { current ->
+                current.copy(replies = current.replies + (reply.id to failed))
+            }
+            failed
+        }
+    }
+
+    suspend fun setAway(enabled: Boolean): Boolean {
+        val previous = _state.value.away
+        _state.update { it.copy(away = enabled) }
+        return try {
+            val actual = AgentApi.setAway(_state.value.settings, enabled)
+            _state.update { it.copy(away = actual) }
+            actual
+        } catch (error: Exception) {
+            _state.update { it.copy(away = previous) }
+            throw error
+        }
+    }
+
+    suspend fun stopSession(sessionId: String): CommandResult {
+        return AgentApi.stopSession(_state.value.settings, sessionId)
+    }
+
+    suspend fun decideApproval(
+        eventId: Long,
+        decision: String,
+        sessionId: String? = null,
+    ): CommandResult {
+        val result = AgentApi.decideApproval(_state.value.settings, eventId, decision)
+        if (result.ok) {
+            val targetSession = sessionId
+                ?.takeIf { it.isNotBlank() }
+                ?: _state.value.events[eventId]?.sessionKey
+            if (!targetSession.isNullOrBlank()) {
+                markSessionReadLocally(targetSession)
+                patchSessionReadRemote(targetSession)
+            }
+        }
+        return result
+    }
+
+    fun session(sessionId: String): SessionSummary? = _state.value.session(sessionId)
+
+    internal fun replaceStateForTest(state: AgentUiState) {
+        _state.value = state
+    }
+
+    private fun mergeEvents(events: List<AgentEvent>) {
+        val fresh = mutableListOf<AgentEvent>()
+        _state.update { current ->
+            val merged = current.events.toMutableMap()
+            for (event in events) {
+                val existing = merged[event.id]
+                if (existing == null) {
+                    fresh += event
+                }
+                merged[event.id] = if (existing != null) {
+                    event.copy(read = existing.read || event.read)
+                } else {
+                    event
+                }
+            }
+            current.copy(events = merged)
+        }
+        for (event in fresh) {
+            if (event.sessionId.isNotBlank()) {
+                clearReadForNewContent(event.sessionId, event.ts)
+            }
+        }
+    }
+
+    private fun clearReadForNewContent(sessionId: String, ts: String) {
+        val flags = _state.value.localSessionFlags[sessionId] ?: return
+        if (!flags.read) return
+        val eventMillis = runCatching { Instant.parse(ts).toEpochMilli() }
+            .getOrDefault(Long.MAX_VALUE)
+        if (eventMillis <= flags.readAt) return
+        val updated = sessionFlagsStore.update(sessionId) { it.copy(read = false) }
+        _state.update { current ->
+            current.copy(
+                localSessionFlags = updated,
+                sessionMeta = current.sessionMeta.mapValues { (key, meta) ->
+                    if (key == sessionId) {
+                        meta.copy(
+                            read = false,
+                            unread = meta.unread.coerceAtLeast(1),
+                        )
+                    } else {
+                        meta
+                    }
+                },
+            )
+        }
+    }
+
+    private fun mergeReplies(replies: List<AgentReply>) {
+        _state.update { current ->
+            val merged = current.replies.toMutableMap()
+            for (reply in replies) {
+                if (reply.id > 0) {
+                    merged[reply.id] = reply
+                }
+            }
+            current.copy(replies = merged)
+        }
+    }
+
+    private fun mergeSessionMeta(
+        sessions: List<SessionMeta>,
+        apiAvailable: Boolean,
+        error: Throwable?,
+    ) {
+        val remoteFlags = cacheRemoteFlags(sessions)
+        _state.update { current ->
+            val merged = current.sessionMeta.toMutableMap()
+            for (session in sessions) {
+                merged[session.sessionId] = mergeMeta(
+                    merged[session.sessionId],
+                    session,
+                )
+            }
+            current.copy(
+                sessionMeta = merged,
+                localSessionFlags = remoteFlags ?: current.localSessionFlags,
+                sessionApiAvailable = if (error == null) {
+                    apiAvailable
+                } else {
+                    current.sessionApiAvailable && apiAvailable
+                },
+            )
+        }
+    }
+
+    private fun cacheRemoteFlags(
+        sessions: List<SessionMeta>,
+    ): Map<String, LocalSessionFlags>? {
+        val remote = sessions
+            .filter {
+                it.sessionId.isNotBlank() &&
+                    (
+                        it.read != null ||
+                            it.pinned != null ||
+                            it.muted != null ||
+                            it.archived != null
+                        )
+            }
+            .associateBy { it.sessionId }
+        if (remote.isEmpty()) return null
+        val now = System.currentTimeMillis()
+        var updated = sessionFlagsStore.load()
+        for ((sessionId, incoming) in remote) {
+            updated = sessionFlagsStore.update(sessionId) { local ->
+                val remoteRead = incoming.read
+                local.copy(
+                    read = remoteRead ?: local.read,
+                    pinned = incoming.pinned ?: local.pinned,
+                    muted = incoming.muted ?: local.muted,
+                    archived = incoming.archived ?: local.archived,
+                    readAt = when {
+                        remoteRead == true && !local.read -> now
+                        remoteRead == false -> 0L
+                        else -> local.readAt
+                    },
+                )
+            }
+        }
+        return updated
+    }
+
+    private fun scheduleInboxRefresh(delayMillis: Long = 600L) {
+        inboxRefreshJob?.cancel()
+        inboxRefreshJob = backgroundScope.launch {
+            delay(delayMillis)
+            val settings = _state.value.settings
+            val inbox = runCatching { AgentApi.fetchInbox(settings) }.getOrNull()
+                ?.takeIf { it.available }
+                ?: return@launch
+            mergeSessionMeta(
+                sessions = inbox.sessions,
+                apiAvailable = true,
+                error = null,
+            )
+            _state.update { it.copy(inbox = inbox) }
+        }
+    }
+
+    private suspend fun hydrateMissingTranscripts() {
+        val state = _state.value
+        val candidates = state.sessions()
+            .filter {
+                !state.transcriptCache.containsKey(it.sessionId) &&
+                    (it.hasRealEvent || it.titleSource !in setOf("custom", "agent"))
+            }
+            .take(12)
+        for (session in candidates) {
+            runCatching { refreshTranscript(session.sessionId) }
+        }
+    }
+
+    private fun friendlyError(error: Throwable): String {
+        return error.message?.take(240) ?: error.javaClass.simpleName
+    }
+
+    private fun loadDiagnostics(): ConnectionDiagnostics {
+        return ConnectionDiagnostics(
+            lastConnectedAt = diagnosticsPreferences
+                .getLong(KEY_LAST_CONNECTED_AT, -1L)
+                .takeIf { it > 0 },
+            lastDisconnectedAt = diagnosticsPreferences
+                .getLong(KEY_LAST_DISCONNECTED_AT, -1L)
+                .takeIf { it > 0 },
+            lastDisconnectReason = diagnosticsPreferences
+                .getString(KEY_LAST_DISCONNECT_REASON, null)
+                ?.takeIf { it.isNotBlank() },
+        )
+    }
+
+    private fun persistDiagnostics(diagnostics: ConnectionDiagnostics) {
+        diagnosticsPreferences.edit()
+            .putLong(KEY_LAST_CONNECTED_AT, diagnostics.lastConnectedAt ?: -1L)
+            .putLong(KEY_LAST_DISCONNECTED_AT, diagnostics.lastDisconnectedAt ?: -1L)
+            .putString(KEY_LAST_DISCONNECT_REASON, diagnostics.lastDisconnectReason)
+            .apply()
+    }
+
+    companion object {
+        private const val DIAGNOSTICS_PREFS = "agent_push_connection"
+        private const val KEY_LAST_CONNECTED_AT = "last_connected_at"
+        private const val KEY_LAST_DISCONNECTED_AT = "last_disconnected_at"
+        private const val KEY_LAST_DISCONNECT_REASON = "last_disconnect_reason"
+
+        @Volatile
+        private var instance: AgentStore? = null
+
+        fun get(context: Context): AgentStore {
+            return instance ?: synchronized(this) {
+                instance ?: AgentStore(context).also { instance = it }
+            }
+        }
+    }
+}
+
+private data class RefreshBundle(
+    val events: List<AgentEvent>,
+    val sessions: SessionFetch,
+    val projects: List<ProjectInfo>,
+    val away: Boolean,
+    val agentDirectory: AgentDirectory,
+    val inbox: InboxFeed,
+)
+
+private data class SessionFetch(
+    val items: List<SessionMeta>,
+    val apiAvailable: Boolean,
+    val error: Throwable?,
+)
+
+private fun mergeMeta(existing: SessionMeta?, incoming: SessionMeta): SessionMeta {
+    if (existing == null) return incoming
+    return existing.copy(
+        source = incoming.source.ifBlank { existing.source },
+        title = incoming.title.ifBlank { existing.title },
+        titleSource = incoming.titleSource.ifBlank { existing.titleSource },
+        workspace = incoming.workspace.ifBlank { existing.workspace },
+        project = incoming.project.ifBlank { existing.project },
+        branch = incoming.branch.ifBlank { existing.branch },
+        cwd = incoming.cwd.ifBlank { existing.cwd },
+        model = incoming.model.ifBlank { existing.model },
+        status = incoming.status.ifBlank { existing.status },
+        unread = incoming.unread.takeIf { it >= 0 } ?: existing.unread,
+        lastTs = incoming.lastTs.ifBlank { existing.lastTs },
+        lastPreview = incoming.lastPreview.ifBlank { existing.lastPreview },
+        eventCount = maxOf(existing.eventCount, incoming.eventCount),
+        requestId = incoming.requestId.ifBlank { existing.requestId },
+        effort = incoming.effort.ifBlank { existing.effort },
+        permissionMode = incoming.permissionMode.ifBlank { existing.permissionMode },
+        contextUsage = incoming.contextUsage ?: existing.contextUsage,
+        running = incoming.running ?: existing.running,
+        runningSince = incoming.runningSince.ifBlank { existing.runningSince },
+        read = incoming.read ?: existing.read,
+        pinned = incoming.pinned ?: existing.pinned,
+        muted = incoming.muted ?: existing.muted,
+        archived = incoming.archived ?: existing.archived,
+        isTemp = incoming.isTemp ?: existing.isTemp,
+        isEmpty = incoming.isEmpty ?: existing.isEmpty,
+    )
+}

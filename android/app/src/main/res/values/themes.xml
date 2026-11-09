@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.AgentPush" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowBackground">@color/app_window_background</item>
+        <item name="android:colorAccent">#2DD4BF</item>
+        <item name="android:statusBarColor">#0F172A</item>
+        <item name="android:navigationBarColor">#0B1222</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>
