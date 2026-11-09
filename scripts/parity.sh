@@ -96,11 +96,25 @@ import json, sys
 raw = json.load(sys.stdin)
 items = raw.get("items") or []
 DROP = {"ts", "at"}
-def scrub(v):
+def unwrap(v):
+    # 有意的差异：WorkBuddy 的工具结果是 {"type":"text","text":"…"} 对象。Node 把它整个
+    # 序列化成字符串塞进 output_tail，Go 版直接取 text（手机上更好读）。对照时两边都
+    # 还原成正文再比；超过 800 字被截断的 Node 输出不是合法 JSON，仍会显示为差异。
+    if isinstance(v, str) and v.startswith('{"type":"text","text":'):
+        try:
+            d = json.loads(v)
+            if isinstance(d, dict) and d.get("type") == "text" and isinstance(d.get("text"), str):
+                return d["text"]
+        except Exception:
+            pass
+    return v
+def scrub(v, key=None):
     if isinstance(v, dict):
-        return {k: scrub(x) for k, x in v.items() if k not in DROP}
+        return {k: scrub(x, k) for k, x in v.items() if k not in DROP}
     if isinstance(v, list):
         return [scrub(x) for x in v]
+    if key == "output_tail":
+        return unwrap(v)
     return v
 print(json.dumps({"source": raw.get("source"), "count": len(items),
                   "items": [scrub(i) for i in items]},
