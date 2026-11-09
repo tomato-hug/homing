@@ -1,5 +1,9 @@
 # Homing 电脑端（M3）
 
+> **这是过渡版（Node + Tauri），后续以 docs/go-architecture.md 为准。**
+> 电脑端与云中转改走 Go（一个程序同时是托盘/窗口、`homing serve` 和命令行），界面与控制台页面保留，
+> Node 中继与 Tauri 壳只在本文件描述的过渡期里维护。
+
 > 桌面壳 + 本机控制台 + 跨平台打包。手机端（`android/`）由 Codex 负责，中继 v2 的会话采集与推送由 DSH 负责，
 > 本文只描述电脑端这一层：`console/`、`desktop/`，以及 `relay/` 里新增的平台层与两处挂载点。
 
