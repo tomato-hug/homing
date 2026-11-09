@@ -29,6 +29,14 @@ const (
 // ErrUnsupported is returned by optional capabilities an agent does not have.
 var ErrUnsupported = errors.New("agent: unsupported")
 
+// ErrQueued means the agent was busy with a previous injection and the message
+// was queued behind it. The reply is accepted, so this is not a failure.
+var ErrQueued = errors.New("agent: queued")
+
+// ErrHeld means the session looks busy inside its own desktop app; the message
+// waits for the next stop hook instead of being injected right now.
+var ErrHeld = errors.New("agent: held")
+
 // Detection is the result of looking for an agent on this machine.
 type Detection struct {
 	Installed bool    `json:"installed"`
@@ -54,16 +62,23 @@ type Session struct {
 	NativeState string `json:"native_state"`
 	Cwd         string `json:"cwd,omitempty"`
 	Model       string `json:"model,omitempty"`
+	LastPreview string `json:"last_preview,omitempty"`
 }
 
-// Meta is the extra detail the API asks for when it renders one session.
+// Meta is the extra detail the API asks for when it renders one session. The
+// empty string means "unknown"; the API turns it into a JSON null.
 type Meta struct {
-	Cwd         string `json:"cwd,omitempty"`
-	NativeTitle string `json:"native_title,omitempty"`
-	TitleSource string `json:"title_source,omitempty"`
-	FirstPrompt string `json:"first_prompt,omitempty"`
-	Branch      string `json:"branch,omitempty"`
-	Model       string `json:"model,omitempty"`
+	Cwd            string `json:"cwd,omitempty"`
+	NativeTitle    string `json:"native_title,omitempty"`
+	TitleSource    string `json:"title_source,omitempty"`
+	FirstPrompt    string `json:"first_prompt,omitempty"`
+	Branch         string `json:"branch,omitempty"`
+	Model          string `json:"model,omitempty"`
+	Effort         string `json:"effort,omitempty"`
+	PermissionMode string `json:"permission_mode,omitempty"`
+	// Workspace overrides the workspace chip derived from cwd (WorkBuddy reports
+	// the space name, which is not simply the parent directory).
+	Workspace string `json:"workspace,omitempty"`
 }
 
 // Item is one entry of a session transcript.

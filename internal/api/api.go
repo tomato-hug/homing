@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"sort"
 	"sync"
+
+	"github.com/tomato-hug/homing/internal/store"
 )
 
 // Deps is what route handlers get. Grow it as packages need more; keep it a
@@ -21,6 +23,12 @@ type Deps struct {
 	Log     *slog.Logger
 	DataDir string
 	Version string
+
+	// The store is opened on first use: DataDir is enough to build a Deps, and
+	// a test that mounts one route group never touches the rest of the files.
+	storeOnce  sync.Once
+	storeValue *store.Store
+	storeErr   error
 }
 
 // RouteFunc mounts routes on mux. Use Go 1.22 patterns, e.g. "GET /api/agents".

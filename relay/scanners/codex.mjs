@@ -4,11 +4,14 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { readJsonLines, firstLine, normalizeContent, readFileHeadAndTail, readFileSlice, gitBranchFor, workspaceLabel, META_TTL_MS } from "./lib/util.mjs";
+import { readJsonLines, firstLine, normalizeContent, readFileHeadAndTail, readFileSlice, gitBranchFor, workspaceLabel, NOISE_PATTERN, META_TTL_MS } from "./lib/util.mjs";
 
 let ctx = {};                       // { injectReply, log }
 // 标题索引缓存（v1 中的定义在被截取的 codex 区块之前，这里补齐）
 const codexTitleIndex = { key: "", map: new Map() };
+// rollout 索引缓存（v1 里定义在 server.mjs，抽取到本文件后要自己声明，否则整段 meta 会抛 ReferenceError 被 try/catch 吞掉）
+const codexRolloutIndexCache = { at: 0, map: new Map() };
+const codexRolloutMetaCache = new Map();   // path -> { size, mtimeMs, meta }
 
 export function init(c) { ctx = c || {}; }
 
@@ -265,7 +268,8 @@ export function meta(sessionId, cwdHint) {
   try {
     const index = codexTitles().get(sessionId);
     if (index?.thread_name) out.nativeTitle = index.thread_name;
-    const rolloutPath = codexRolloutIndex().get(sessionId) || findCodexRollout(sessionId);
+    // 索引本身就是全量扫 ~/.codex/sessions，够用；findCodexRollout 留在 server.mjs
+    const rolloutPath = codexRolloutIndex().get(sessionId) || null;
     const m = rolloutPath ? codexRolloutMeta(rolloutPath) : null;
     if (m) {
       out.cwd = out.cwd || m.cwd;

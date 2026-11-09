@@ -3,7 +3,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { readJsonLines, firstLine, normalizeContent, readFileHeadAndTail, readFileSlice, META_TTL_MS } from "./lib/util.mjs";
+import { readJsonLines, firstLine, normalizeContent, readFileHeadAndTail, readFileSlice, NOISE_PATTERN, META_TTL_MS } from "./lib/util.mjs";
 
 let ctx = {};                       // { transcriptPaths: Map, log }
 // 缓存（v1 中的定义在抽取区块之前，这里补齐）
