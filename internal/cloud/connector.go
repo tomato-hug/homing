@@ -425,8 +425,26 @@ func (c *Connector) Reject(ctx context.Context, clientID string) error {
 // SendEvent encrypts an event for every paired phone. The relay only sees the
 // envelope.
 func (c *Connector) SendEvent(ctx context.Context, name string, data any) error {
+	_, err := c.SendEventExcept(ctx, name, data, nil)
+	return err
+}
+
+// SendEventExcept sends an encrypted event to every paired phone except the
+// device IDs the caller already reached over a LAN socket.
+func (c *Connector) SendEventExcept(
+	ctx context.Context,
+	name string,
+	data any,
+	skip map[string]bool,
+) (int, error) {
 	var firstErr error
+	targets := 0
+	sent := 0
 	for _, peer := range c.peers.List() {
+		if skip[peer.DeviceID] {
+			continue
+		}
+		targets++
 		envelope, err := sealPayload(c.identity, peer, eventPayload{Type: "event", Name: name, Data: data})
 		if err != nil {
 			if firstErr == nil {
@@ -434,11 +452,18 @@ func (c *Connector) SendEvent(ctx context.Context, name string, data any) error 
 			}
 			continue
 		}
-		if err := c.send(ctx, envelopeMap(envelope)); err != nil && firstErr == nil {
-			firstErr = err
+		if err := c.send(ctx, envelopeMap(envelope)); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
+		sent++
 	}
-	return firstErr
+	if targets > 0 && sent == 0 && firstErr == nil {
+		firstErr = ErrNotConnected
+	}
+	return sent, firstErr
 }
 
 func (c *Connector) send(ctx context.Context, value any) error {

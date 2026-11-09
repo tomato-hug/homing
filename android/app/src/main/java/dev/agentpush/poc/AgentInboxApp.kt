@@ -10,6 +10,7 @@ class AgentInboxApp : Application() {
     override fun onCreate() {
         super.onCreate()
         CrashReporter.install(this)
+        HomingFirebase.initialize(this)
         SingletonImageLoader.setSafe { context ->
             ImageLoader.Builder(context)
                 .components {

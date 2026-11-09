@@ -24,6 +24,7 @@ import (
 	"github.com/tomato-hug/homing/internal/agent"
 	"github.com/tomato-hug/homing/internal/agent/scanlib"
 	"github.com/tomato-hug/homing/internal/api"
+	"github.com/tomato-hug/homing/internal/cloud"
 	"github.com/tomato-hug/homing/internal/notify"
 	"github.com/tomato-hug/homing/internal/platform"
 	"github.com/tomato-hug/homing/internal/store"
@@ -79,6 +80,7 @@ func Start(d *api.Deps) *Service {
 		Log:    func(format string, args ...any) { d.Log.Debug("notify: "+format, args...) },
 	})
 	services[d] = svc
+	cloud.AttachPush(d, svc.SetPush)
 
 	adapter.SetEventSink(svc.Ingest)
 	go svc.watchAgents(context.Background())

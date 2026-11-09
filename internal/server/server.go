@@ -152,6 +152,9 @@ func New(cfg Config) (*Server, error) {
 // DB exposes storage for tests and for callers that need queue statistics.
 func (s *Server) DB() *DB { return s.db }
 
+// IsOnline reports whether a device currently has a live websocket.
+func (s *Server) IsOnline(deviceID string) bool { return s.isOnline(deviceID) }
+
 // SetWaker replaces the wake-up dispatcher. Call it before Start; it exists so
 // the entry point can build a dispatcher around the database New opened.
 func (s *Server) SetWaker(waker Waker) {

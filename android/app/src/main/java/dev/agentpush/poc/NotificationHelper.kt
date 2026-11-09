@@ -24,6 +24,9 @@ object NotificationHelper {
 
     const val SERVICE_CHANNEL_ID = "agent_connection"
     const val REPLY_CHANNEL_ID = "agent_replies"
+    const val P0_CHANNEL_ID = "homing_p0"
+    const val P1_CHANNEL_ID = "homing_p1"
+    const val P2_CHANNEL_ID = "homing_p2"
     const val SERVICE_NOTIFICATION_ID = 1
 
     fun createChannels(context: Context) {
@@ -46,7 +49,87 @@ object NotificationHelper {
             description = "保持 Homing 与 Mac 中继服务的实时连接"
             setShowBadge(false)
         }
-        manager.createNotificationChannels(listOf(replyChannel, serviceChannel))
+        val p0Channel = NotificationChannel(
+            P0_CHANNEL_ID,
+            "Homing 需要处理",
+            NotificationManager.IMPORTANCE_HIGH,
+        ).apply {
+            description = "需要授权或执行失败的提醒"
+            enableVibration(true)
+            vibrationPattern = longArrayOf(0, 180, 100, 180)
+            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+        }
+        val p1Channel = NotificationChannel(
+            P1_CHANNEL_ID,
+            "Homing 等待回复",
+            NotificationManager.IMPORTANCE_DEFAULT,
+        ).apply {
+            description = "agent 正在等待你输入"
+            enableVibration(true)
+            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+        }
+        val p2Channel = NotificationChannel(
+            P2_CHANNEL_ID,
+            "Homing 已完成",
+            NotificationManager.IMPORTANCE_LOW,
+        ).apply {
+            description = "任务完成摘要，不打断当前操作"
+            setShowBadge(true)
+            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+        }
+        manager.createNotificationChannels(
+            listOf(replyChannel, serviceChannel, p0Channel, p1Channel, p2Channel),
+        )
+    }
+
+    fun channelIdForLevel(level: String): String = when (level.uppercase()) {
+        "P0" -> P0_CHANNEL_ID
+        "P2" -> P2_CHANNEL_ID
+        else -> P1_CHANNEL_ID
+    }
+
+    fun notifyAgentAlert(context: Context, payload: NotifyPayload) {
+        val notificationId = notificationId(payload.notificationKey)
+        val brand = payload.brand
+        val title = if (payload.level == "P2" && payload.merged) {
+            "Homing · ${payload.title}"
+        } else if (brand == AgentBrand.UNKNOWN) {
+            payload.title
+        } else {
+            "${brand.displayName} · ${payload.title}"
+        }
+        val body = payload.summary.ifBlank { payload.title }
+        val openIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            payload.targetSessionId?.let { putExtra(EXTRA_SESSION_ID, it) }
+        }
+        val openPendingIntent = PendingIntent.getActivity(
+            context,
+            notificationId,
+            openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val builder = Notification.Builder(
+            context,
+            channelIdForLevel(payload.level),
+        )
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setStyle(Notification.BigTextStyle().bigText(body))
+            .setSubText("Homing")
+            .setContentIntent(openPendingIntent)
+            .setAutoCancel(true)
+            .setCategory(Notification.CATEGORY_MESSAGE)
+            .setVisibility(Notification.VISIBILITY_PRIVATE)
+            .setColor(notificationColor(brand))
+            .setShowWhen(true)
+            .setWhen(parseMillis(payload.at))
+        if (payload.level != "P2") {
+            builder.setPriority(Notification.PRIORITY_HIGH)
+        }
+        context.getSystemService(NotificationManager::class.java)
+            .notify(notificationId, builder.build())
     }
 
     fun buildServiceNotification(context: Context, status: String): Notification {

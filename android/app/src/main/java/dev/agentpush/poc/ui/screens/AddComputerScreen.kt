@@ -56,6 +56,7 @@ import dev.agentpush.poc.protocol.PairedComputer
 import dev.agentpush.poc.protocol.PairedComputerStore
 import dev.agentpush.poc.protocol.PairingInvite
 import dev.agentpush.poc.protocol.ProtocolPairingClient
+import dev.agentpush.poc.PushService
 import dev.agentpush.poc.ui.HomingCard
 import dev.agentpush.poc.ui.theme.HomingMono
 import dev.agentpush.poc.ui.theme.HomingPalette
@@ -131,6 +132,7 @@ fun AddComputerScreen(
 
                 override fun onAccepted(computer: PairedComputer) {
                     store.save(computer)
+                    PushService.requestReconnect(context)
                     status = PairingUiState.Accepted(computer)
                 }
 

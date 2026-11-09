@@ -271,6 +271,19 @@ func (h *Hub) SendEvent(ctx context.Context, name string, data any) (int, error)
 	return sent, nil
 }
 
+// OnlinePeers returns the paired phones with at least one live LAN socket.
+func (h *Hub) OnlinePeers() map[string]bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make(map[string]bool, len(h.conns))
+	for deviceID, conns := range h.conns {
+		if len(conns) > 0 {
+			out[deviceID] = true
+		}
+	}
+	return out
+}
+
 func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -365,6 +378,12 @@ func (h *Hub) handleMessage(conn *hostConn, message map[string]any) (err error) 
 		return h.handlePairJoin(conn, message)
 	case "pair.revoke":
 		return h.handleRevoke(conn, message)
+	case "push.register":
+		// Pushes are only meaningful through the cloud relay, but accept the
+		// registration on the LAN socket so the same client code can connect
+		// to either transport.
+		conn.send(h.ctx, map[string]any{"t": "push.registered", "provider": "lan"})
+		return nil
 	case "msg":
 		return h.handleEnvelope(conn, message)
 	case "ping":

@@ -16,6 +16,12 @@ val hasHomingReleaseSigning =
         !homingReleaseStorePassword.isNullOrBlank() &&
         !homingReleaseKeyPassword.isNullOrBlank()
 
+fun firebaseBuildConfig(name: String): String {
+    val value = providers.environmentVariable(name).orNull.orEmpty().trim()
+    val escaped = value.replace("\\", "\\\\").replace("\"", "\\\"")
+    return "\"$escaped\""
+}
+
 android {
     namespace = "dev.agentpush.poc"
     compileSdk = 35
@@ -26,6 +32,27 @@ android {
         targetSdk = 35
         versionCode = 9
         versionName = "0.7.0"
+
+        buildConfigField(
+            "String",
+            "FIREBASE_PROJECT_ID",
+            firebaseBuildConfig("HOMING_FIREBASE_PROJECT_ID"),
+        )
+        buildConfigField(
+            "String",
+            "FIREBASE_APPLICATION_ID",
+            firebaseBuildConfig("HOMING_FIREBASE_APPLICATION_ID"),
+        )
+        buildConfigField(
+            "String",
+            "FIREBASE_API_KEY",
+            firebaseBuildConfig("HOMING_FIREBASE_API_KEY"),
+        )
+        buildConfigField(
+            "String",
+            "FIREBASE_SENDER_ID",
+            firebaseBuildConfig("HOMING_FIREBASE_SENDER_ID"),
+        )
     }
 
     signingConfigs {
@@ -122,6 +149,7 @@ dependencies {
     implementation("io.coil-kt.coil3:coil-network-okhttp:3.3.0")
     implementation("io.coil-kt.coil3:coil-gif:3.3.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.google.firebase:firebase-messaging:24.1.2")
     implementation("com.mikepenz:multiplatform-markdown-renderer-m3:0.38.1")
     implementation("com.mikepenz:multiplatform-markdown-renderer-coil3:0.38.1")
     implementation("com.goterl:lazysodium-android:5.1.0@aar")
