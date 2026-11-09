@@ -39,7 +39,7 @@ func ExtractFileItems(file, source string, limit int) []agent.Item {
 			if _, seen := byID[it.ID]; !seen {
 				order = append(order, it.ID)
 			}
-			byID[it.ID] = it   // 后写覆盖：与 Node 的 Map.set 一致
+			byID[it.ID] = it // 后写覆盖：与 Node 的 Map.set 一致
 		}
 	}
 	out := make([]agent.Item, 0, len(order))
@@ -56,8 +56,8 @@ type callInfo struct {
 	id    string
 	kind  string
 	name  string
-	files bool
-	plan  bool
+	files []agent.ItemFile
+	plan  []agent.ItemPlan
 }
 
 type itemState struct {
@@ -86,6 +86,7 @@ func extractRow(st *itemState, row map[string]any) []agent.Item {
 			st.model = m
 		}
 	}
+	model := st.model
 
 	switch str(row["type"]) {
 	case "reasoning":
@@ -94,7 +95,8 @@ func extractRow(st *itemState, row map[string]any) []agent.Item {
 			return nil
 		}
 		id, seq := st.next(at)
-		return []agent.Item{{ID: id, Role: "assistant", Kind: "reasoning", Seq: seq, At: at, Text: text}}
+		return []agent.Item{{TS: at, ID: id, Seq: seq, Type: "reasoning", Role: "assistant", Text: text, Model: model}}
+
 	case "function_call":
 		callID := firstOf(str(row["callId"]), str(row["id"]))
 		toolID := fmt.Sprintf("%s-tool-%s", st.source, callID)
@@ -102,10 +104,16 @@ func extractRow(st *itemState, row map[string]any) []agent.Item {
 		input := clip(firstOf(str(row["arguments"]), str(row["input"])), 300)
 		name := firstOf(str(row["name"]), "tool")
 		st.byCall[callID] = &callInfo{id: toolID, kind: "tool_call", name: name}
-		return []agent.Item{{ID: toolID, Role: "assistant", Kind: "tool_call", Seq: st.seq, At: at, Text: input}}
+		return []agent.Item{{
+			TS: at, ID: toolID, Seq: st.seq, Type: "tool_call", Role: "assistant",
+			Command: input, Model: model,
+			Tool: &agent.ItemTool{Name: name, InputSummary: &input, Status: "running"},
+		}}
+
 	case "function_call_result":
 		callID := firstOf(str(row["callId"]), str(row["id"]))
-		return toolResultItem(st, row, callID, at)
+		return toolResult(st, callID, normalize(row["output"], clip(jsonText(row["output"]), 800)),
+			toolStatus(str(row["status"])), at, model)
 	}
 
 	blocks := contentBlocks(row, msg)
@@ -128,7 +136,7 @@ func extractRow(st *itemState, row map[string]any) []agent.Item {
 				continue
 			}
 			id, seq := st.next(at)
-			out = append(out, agent.Item{ID: id, Role: itemRole(role), Kind: itemRole(role), Seq: seq, At: at, Text: clip(text, 4000)})
+			out = append(out, agent.Item{TS: at, ID: id, Seq: seq, Type: itemRole(role), Role: itemRole(role), Text: clip(text, 4000), Model: model})
 		case map[string]any:
 			switch str(b["type"]) {
 			case "text", "input_text", "output_text":
@@ -137,65 +145,107 @@ func extractRow(st *itemState, row map[string]any) []agent.Item {
 					continue
 				}
 				id, seq := st.next(at)
-				out = append(out, agent.Item{ID: id, Role: itemRole(role), Kind: itemRole(role), Seq: seq, At: at, Text: clip(text, 4000)})
+				out = append(out, agent.Item{TS: at, ID: id, Seq: seq, Type: itemRole(role), Role: itemRole(role), Text: clip(text, 4000), Model: model})
+
 			case "thinking":
 				text := clip(firstOf(str(b["thinking"]), str(b["text"])), 300)
 				if text == "" {
 					continue
 				}
 				id, seq := st.next(at)
-				out = append(out, agent.Item{ID: id, Role: "assistant", Kind: "reasoning", Seq: seq, At: at, Text: text})
+				out = append(out, agent.Item{TS: at, ID: id, Seq: seq, Type: "reasoning", Role: "assistant", Text: text, Model: model})
+
 			case "tool_use":
 				callID := str(b["id"])
 				toolID := fmt.Sprintf("%s-tool-%s", st.source, callID)
 				st.calls[callID] = toolID
 				name := firstOf(str(b["name"]), "tool")
 				input, _ := b["input"].(map[string]any)
-				files := fileChange(name, input)
-				kind := "tool_call"
-				if files {
-					kind = "file_change"
+
+				files := claudeFileChange(name, input)
+				if len(files) > 0 {
+					st.byCall[callID] = &callInfo{id: toolID, kind: "file_change", name: name, files: files}
+					paths := make([]string, 0, len(files))
+					for _, f := range files {
+						paths = append(paths, f.Path)
+					}
+					summary := strings.Join(paths, ", ")
+					out = append(out, agent.Item{
+						TS: at, ID: toolID, Seq: st.seq, Type: "file_change", Role: "assistant",
+						Files: files, Model: model,
+						Tool: &agent.ItemTool{Name: name, InputSummary: &summary, Status: "running"},
+					})
+					continue
 				}
-				st.byCall[callID] = &callInfo{id: toolID, kind: kind, name: name, files: files}
-				text := ""
-				if files {
-					text = fileSummary(input)
-				} else {
-					text = clip(jsonText(input), 300)
+				summary := shortJson(input, 300)
+				if name == "Bash" {
+					summary = str(input["command"])
 				}
-				out = append(out, agent.Item{ID: toolID, Role: "assistant", Kind: kind, Seq: st.seq, At: at, Text: text})
+				st.byCall[callID] = &callInfo{id: toolID, kind: "tool_call", name: name}
+				clipped := clip(summary, 300)
+				item := agent.Item{
+					TS: at, ID: toolID, Seq: st.seq, Type: "tool_call", Role: "assistant",
+					Model: model,
+					Tool:  &agent.ItemTool{Name: name, InputSummary: &clipped, Status: "running"},
+				}
+				if name == "Bash" {
+					item.Command = summary
+				}
+				out = append(out, item)
+
 			case "tool_result":
 				callID := str(b["tool_use_id"])
-				text := clip(jsonText(b["content"]), 800)
-				known := st.byCall[callID]
-				id := toolIDFor(st, callID)
-				kind := "tool_call"
-				if known != nil && known.kind != "" {
-					kind = known.kind
+				content := normalize(b["content"])
+				if content == "" {
+					content = shortJson(b["content"], 800)
 				}
-				out = append(out, agent.Item{ID: id, Role: "tool", Kind: kind, Seq: st.seq, At: at, Text: text})
+				status := "done"
+				if truthy(b["is_error"]) {
+					status = "failed"
+				}
+				out = append(out, toolResult(st, callID, content, status, at, model)...)
 			}
 		}
 	}
 	return out
 }
 
-func toolResultItem(st *itemState, row map[string]any, callID, at string) []agent.Item {
-	outText := normalize(row["output"])
-	if outText == "" {
-		outText = clip(jsonText(row["output"]), 800)
-	}
+func toolResult(st *itemState, callID, content, status, at, model string) []agent.Item {
 	known := st.byCall[callID]
 	id := toolIDFor(st, callID)
 	kind := "tool_call"
-	if known != nil && known.kind != "" {
-		kind = known.kind
+	name := "tool"
+	var files []agent.ItemFile
+	var plan []agent.ItemPlan
+	if known != nil {
+		if known.kind != "" {
+			kind = known.kind
+		}
+		if known.name != "" {
+			name = known.name
+		}
+		files = known.files
+		plan = known.plan
 	}
-	return []agent.Item{{
-		ID: id, Role: "tool", Kind: kind, Seq: st.seq, At: at,
-		Text:  tail(clip(outText, 1600), 800),
-		Error: exitError(outText),
-	}}
+	tailText := tailRunes(content, 800)
+	code, hasCode := extractExitCode(content)
+	item := agent.Item{
+		TS: at, ID: id, Seq: st.seq, Type: kind, Role: "tool",
+		Model: model, Files: files, Plan: plan,
+		Tool: &agent.ItemTool{
+			Name:       name,
+			OutputTail: &tailText,
+			Status:     status,
+		},
+	}
+	if hasCode {
+		item.Tool.ExitCode = &code
+		item.ExitCode = &code
+	}
+	if status == "failed" {
+		item.Error = "tool failed"
+	}
+	return []agent.Item{item}
 }
 
 func toolIDFor(st *itemState, callID string) string {
@@ -277,31 +327,69 @@ func noise(text string) bool {
 	return false
 }
 
-func fileChange(name string, input map[string]any) bool {
+// claudeFileChange mirrors the Node helper: Edit / Write / MultiEdit become files[].
+func claudeFileChange(name string, input map[string]any) []agent.ItemFile {
 	if input == nil {
-		return false
+		return nil
 	}
+	filePath := firstOf(str(input["file_path"]), str(input["path"]))
 	switch name {
-	case "Edit", "Write", "MultiEdit", "NotebookEdit":
-		return true
+	case "Edit":
+		oldText := str(input["old_string"])
+		newText := str(input["new_string"])
+		diff := "+ " + newText
+		if oldText != "" && newText != "" {
+			diff = "- " + oldText + "\n+ " + newText
+		}
+		return []agent.ItemFile{{
+			Path:    filePath,
+			Added:   countLines(newText),
+			Removed: countLines(oldText),
+			Diff:    clip(diff, 1500),
+		}}
+	case "Write", "MultiEdit":
+		if edits, ok := input["edits"].([]any); ok && len(edits) > 0 {
+			out := make([]agent.ItemFile, 0, len(edits))
+			for _, e := range edits {
+				m, _ := e.(map[string]any)
+				oldText := str(m["old_string"])
+				newText := str(m["new_string"])
+				out = append(out, agent.ItemFile{
+					Path:    firstOf(str(m["file_path"]), filePath),
+					Added:   countLines(newText),
+					Removed: countLines(oldText),
+					Diff:    clip("- "+oldText+"\n+ "+newText, 1500),
+				})
+				if len(out) >= 20 {
+					break
+				}
+			}
+			return out
+		}
+		content := firstOf(str(input["content"]), str(input["new_string"]))
+		return []agent.ItemFile{{Path: filePath, Added: countLines(content), Diff: clip(content, 1500)}}
 	}
-	return false
+	return nil
 }
 
-func fileSummary(input map[string]any) string {
-	path := firstOf(str(input["file_path"]), str(input["path"]))
-	return clip(path, 300)
-}
-
-func exitError(output string) string {
-	code, ok := exitCodeOf(output)
-	if !ok || code == 0 {
-		return ""
+func countLines(s string) int {
+	if s == "" {
+		return 0
 	}
-	return fmt.Sprintf("exit_code=%d", code)
+	return len(strings.Split(s, "\n"))
 }
 
-func exitCodeOf(text string) (int, bool) {
+func toolStatus(value string) string {
+	switch strings.ToLower(value) {
+	case "failed", "error":
+		return "failed"
+	case "running", "pending":
+		return "running"
+	}
+	return "done"
+}
+
+func extractExitCode(text string) (int, bool) {
 	for _, line := range strings.Split(text, "\n") {
 		l := strings.ToLower(strings.TrimSpace(line))
 		if i := strings.Index(l, "process exited with code"); i >= 0 {
@@ -310,14 +398,22 @@ func exitCodeOf(text string) (int, bool) {
 				return n, true
 			}
 		}
-		if i := strings.Index(l, "exit code:"); i >= 0 {
-			var n int
-			if _, err := fmt.Sscanf(strings.TrimSpace(l[i+len("exit code:"):]), "%d", &n); err == nil {
-				return n, true
-			}
-		}
 	}
 	return 0, false
+}
+
+func shortJson(v any, limit int) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return clip(s, limit)
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return ""
+	}
+	return clip(string(raw), limit)
 }
 
 // tailRows reads the last window bytes of a JSONL file and parses whole lines,
@@ -363,7 +459,7 @@ func itemTime(row map[string]any) string {
 	if ts := str(row["timestamp"]); ts != "" {
 		return ts
 	}
-	if ts := str(row["createdAt"]); ts != "" {
+	if ts := str(row["ts"]); ts != "" {
 		return ts
 	}
 	return ""
@@ -391,7 +487,7 @@ func clip(s string, n int) string {
 	return s
 }
 
-func tail(s string, n int) string {
+func tailRunes(s string, n int) string {
 	r := []rune(s)
 	if len(r) > n {
 		return string(r[len(r)-n:])
@@ -402,6 +498,11 @@ func tail(s string, n int) string {
 func str(v any) string {
 	s, _ := v.(string)
 	return s
+}
+
+func truthy(v any) bool {
+	b, _ := v.(bool)
+	return b
 }
 
 func firstOf(vals ...string) string {

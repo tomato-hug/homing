@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/tomato-hug/homing/internal/agent"
@@ -30,7 +31,7 @@ func (Agent) ReadItems(_ context.Context, sessionID string, limit int) ([]agent.
 			if _, seen := byID[it.ID]; !seen {
 				order = append(order, it.ID)
 			}
-			byID[it.ID] = it   // 后写覆盖：与 Node 的 Map.set 一致
+			byID[it.ID] = it // 后写覆盖：与 Node 的 Map.set 一致
 		}
 	}
 	out := make([]agent.Item, 0, len(order))
@@ -44,9 +45,11 @@ func (Agent) ReadItems(_ context.Context, sessionID string, limit int) ([]agent.
 }
 
 type codexCall struct {
-	id   string
-	kind string
-	name string
+	id    string
+	kind  string
+	name  string
+	files []agent.ItemFile
+	plan  []agent.ItemPlan
 }
 
 type codexItems struct {
@@ -67,16 +70,19 @@ func (s *codexItems) row(row map[string]any) []agent.Item {
 		return nil
 	}
 	at := str(row["timestamp"])
+	model := s.model
 
 	if str(row["type"]) == "turn_context" {
 		if m := str(payload["model"]); m != "" {
 			s.model = m
+			model = m
 		}
 	}
 	if str(row["type"]) == "event_msg" && str(payload["type"]) == "thread_settings_applied" {
 		if ts, ok := payload["thread_settings"].(map[string]any); ok {
 			if m := str(ts["model"]); m != "" {
 				s.model = m
+				model = m
 			}
 		}
 	}
@@ -95,7 +101,7 @@ func (s *codexItems) row(row map[string]any) []agent.Item {
 			return nil
 		}
 		id, seq := s.next()
-		return []agent.Item{{ID: id, Role: role, Kind: role, Seq: seq, At: at, Text: clip(text, 4000)}}
+		return []agent.Item{{TS: at, ID: id, Seq: seq, Type: role, Role: role, Text: clip(text, 4000), Model: model}}
 
 	case "reasoning":
 		summary := ""
@@ -114,7 +120,7 @@ func (s *codexItems) row(row map[string]any) []agent.Item {
 			return nil
 		}
 		id, seq := s.next()
-		return []agent.Item{{ID: id, Role: "assistant", Kind: "reasoning", Seq: seq, At: at, Text: text}}
+		return []agent.Item{{TS: at, ID: id, Seq: seq, Type: "reasoning", Role: "assistant", Text: text, Model: model}}
 
 	case "function_call":
 		callID := str(payload["call_id"])
@@ -122,51 +128,89 @@ func (s *codexItems) row(row map[string]any) []agent.Item {
 		s.calls[callID] = id
 		name := firstOf(str(payload["name"]), "shell")
 		command := codexCommand(str(payload["arguments"]))
+		status := "running"
+		if str(payload["status"]) == "completed" {
+			status = "done"
+		}
 		s.byCall[callID] = &codexCall{id: id, kind: "tool_call", name: name}
-		return []agent.Item{{ID: id, Role: "assistant", Kind: "tool_call", Seq: s.seq, At: at, Text: clip(command, 300)}}
+		return []agent.Item{{
+			TS: at, ID: id, Seq: s.seq, Type: "tool_call", Role: "assistant",
+			Command: command, Model: model,
+			Tool: &agent.ItemTool{Name: name, InputSummary: &command, Status: status},
+		}}
 
 	case "function_call_output":
 		callID := str(payload["call_id"])
-		output := str(payload["output"])
-		return s.toolResult(callID, output, at)
+		return s.toolResult(callID, str(payload["output"]), at, model)
 
 	case "custom_tool_call":
 		callID := str(payload["call_id"])
 		id := fmt.Sprintf("codex-tool-%s", callID)
 		s.calls[callID] = id
 		name := firstOf(str(payload["name"]), "tool")
+
+		if plan := parsePlanInput(str(payload["input"])); len(plan) > 0 {
+			s.byCall[callID] = &codexCall{id: id, kind: "plan", name: name, plan: plan}
+			summary := "update_plan"
+			return []agent.Item{{
+				TS: at, ID: id, Seq: s.seq, Type: "plan", Role: "assistant",
+				Plan: plan, Model: model,
+				Tool: &agent.ItemTool{Name: name, InputSummary: &summary, Status: "running"},
+			}}
+		}
+		input := clip(str(payload["input"]), 300)
 		s.byCall[callID] = &codexCall{id: id, kind: "tool_call", name: name}
-		text := clip(str(payload["input"]), 300)
-		return []agent.Item{{ID: id, Role: "assistant", Kind: "tool_call", Seq: s.seq, At: at, Text: text}}
+		return []agent.Item{{
+			TS: at, ID: id, Seq: s.seq, Type: "tool_call", Role: "assistant",
+			Model: model,
+			Tool:  &agent.ItemTool{Name: name, InputSummary: &input, Status: "running"},
+		}}
 
 	case "custom_tool_call_output":
 		callID := str(payload["call_id"])
-		return s.toolResult(callID, str(payload["output"]), at)
+		return s.toolResult(callID, str(payload["output"]), at, model)
 	}
 	return nil
 }
 
-func (s *codexItems) toolResult(callID, output, at string) []agent.Item {
+func (s *codexItems) toolResult(callID, output, at, model string) []agent.Item {
 	known := s.byCall[callID]
 	id := fmt.Sprintf("codex-tool-%s", callID)
 	kind := "tool_call"
-	if known != nil && known.id != "" {
-		id = known.id
+	name := "tool"
+	var files []agent.ItemFile
+	var plan []agent.ItemPlan
+	if known != nil {
+		if known.id != "" {
+			id = known.id
+		}
 		if known.kind != "" {
 			kind = known.kind
 		}
+		if known.name != "" {
+			name = known.name
+		}
+		files = known.files
+		plan = known.plan
 	} else if cached, ok := s.calls[callID]; ok {
 		id = cached
 	}
-	errText := ""
-	if code, ok := exitCodeOf(output); ok && code != 0 {
-		errText = fmt.Sprintf("exit_code=%d", code)
+
+	tail := tailRunes(output, 800)
+	item := agent.Item{
+		TS: at, ID: id, Seq: s.seq, Type: kind, Role: "tool",
+		Model: model, Files: files, Plan: plan,
+		Tool: &agent.ItemTool{Name: name, OutputTail: &tail, Status: "done"},
 	}
-	return []agent.Item{{
-		ID: id, Role: "tool", Kind: kind, Seq: s.seq, At: at,
-		Text:  tailRunes(output, 800),
-		Error: errText,
-	}}
+	if code, ok := exitCodeOf(output); ok {
+		item.Tool.ExitCode = &code
+		item.ExitCode = &code
+		if code != 0 {
+			item.Tool.Status = "failed"
+			item.Error = fmt.Sprintf("exit_code=%d", code)
+		}
+	}
+	return []agent.Item{item}
 }
 
 // codexCommand pulls cmd out of the JSON arguments, falling back to raw text.
@@ -178,6 +222,88 @@ func codexCommand(arguments string) string {
 		return doc.Cmd
 	}
 	return arguments
+}
+
+// parsePlanInput mirrors the Node helper: {plan|steps:[{step|title|text,status}]}.
+func parsePlanInput(input string) []agent.ItemPlan {
+	if input == "" {
+		return nil
+	}
+	var parsed any
+	if json.Unmarshal([]byte(input), &parsed) != nil {
+		return nil
+	}
+	var raw []any
+	switch t := parsed.(type) {
+	case []any:
+		raw = t
+	case map[string]any:
+		if v, ok := t["plan"].([]any); ok {
+			raw = v
+		} else if v, ok := t["steps"].([]any); ok {
+			raw = v
+		}
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	var out []agent.ItemPlan
+	for _, entry := range raw {
+		m, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		step := firstOf(str(m["step"]), str(m["title"]), str(m["text"]))
+		if step == "" {
+			continue
+		}
+		status := firstOf(str(m["status"]), "pending")
+		out = append(out, agent.ItemPlan{Step: clip(step, 300), Status: status})
+		if len(out) >= 50 {
+			break
+		}
+	}
+	return out
+}
+
+var patchHeader = regexp.MustCompile(`(?m)^\*\*\* (Add|Update|Delete) File: (.+)$`)
+
+// parsePatchFiles mirrors the Node helper for `*** Begin Patch` style diffs.
+func parsePatchFiles(patch string) []agent.ItemFile {
+	if patch == "" {
+		return nil
+	}
+	matches := patchHeader.FindAllStringSubmatchIndex(patch, -1)
+	var out []agent.ItemFile
+	for i, m := range matches {
+		start := m[1]
+		end := len(patch)
+		if i+1 < len(matches) {
+			end = matches[i+1][0]
+		}
+		section := patch[start:end]
+		pathStart, pathEnd := m[4], m[5]
+		out = append(out, agent.ItemFile{
+			Path:    strings.TrimSpace(patch[pathStart:pathEnd]),
+			Added:   countPatchLines(section, "+"),
+			Removed: countPatchLines(section, "-"),
+			Diff:    clip(strings.TrimSpace(section), 1500),
+		})
+		if len(out) >= 20 {
+			break
+		}
+	}
+	return out
+}
+
+func countPatchLines(section, sign string) int {
+	n := 0
+	for _, line := range strings.Split(section, "\n") {
+		if strings.HasPrefix(line, sign) && !strings.HasPrefix(line, sign+sign+sign) {
+			n++
+		}
+	}
+	return n
 }
 
 func rolloutTail(file string, window int64) []map[string]any {

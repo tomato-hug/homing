@@ -81,15 +81,50 @@ type Meta struct {
 	Workspace string `json:"workspace,omitempty"`
 }
 
-// Item is one entry of a session transcript.
+// Item is one entry of a session transcript. The JSON shape is the Node relay's
+// extractItems output, key for key (relay/server.mjs): `ts` / `type` rather than
+// `at` / `kind`, and the same nested objects.
+//
+// Fields Node writes as explicit null (tool.input_summary, tool.output_tail,
+// tool.exit_code) are pointers without omitempty so they marshal back to null;
+// fields Node omits entirely (text, model, command) keep omitempty.
 type Item struct {
-	ID    string `json:"id"`
-	Role  string `json:"role"`
-	Kind  string `json:"kind"`
-	Seq   int    `json:"seq"`
-	At    string `json:"at"`
-	Text  string `json:"text"`
-	Error string `json:"error,omitempty"`
+	TS       string     `json:"ts"`
+	ID       string     `json:"id"`
+	Seq      int        `json:"seq"`
+	Type     string     `json:"type"`
+	Role     string     `json:"role"`
+	Text     string     `json:"text,omitempty"`
+	Model    string     `json:"model,omitempty"`
+	Command  string     `json:"command,omitempty"`
+	ExitCode *int       `json:"exit_code,omitempty"`
+	Tool     *ItemTool  `json:"tool,omitempty"`
+	Files    []ItemFile `json:"files,omitempty"`
+	Plan     []ItemPlan `json:"plan,omitempty"`
+	Error    string     `json:"error,omitempty"`
+}
+
+// ItemTool is the tool block of a tool_call / file_change entry.
+type ItemTool struct {
+	Name         string  `json:"name"`
+	InputSummary *string `json:"input_summary"`
+	OutputTail   *string `json:"output_tail"`
+	ExitCode     *int    `json:"exit_code"`
+	Status       string  `json:"status"`
+}
+
+// ItemFile is one touched file of a file_change entry.
+type ItemFile struct {
+	Path    string `json:"path"`
+	Added   int    `json:"added"`
+	Removed int    `json:"removed"`
+	Diff    string `json:"diff"`
+}
+
+// ItemPlan is one step of a plan entry.
+type ItemPlan struct {
+	Step   string `json:"step"`
+	Status string `json:"status"`
 }
 
 // Model is one selectable model.

@@ -2,9 +2,9 @@ package workbuddy
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -52,7 +52,7 @@ func (Agent) Models(context.Context) ([]agent.Model, string, error) {
 	seen := map[string]bool{}
 	defaultModel := ""
 	for i, fi := range files {
-		if i >= 15 {
+		if i >= 15 || len(out) >= 12 {
 			break
 		}
 		for _, m := range modelsInFile(fi.path) {
@@ -68,6 +68,8 @@ func (Agent) Models(context.Context) ([]agent.Model, string, error) {
 	}
 	return out, defaultModel, nil
 }
+
+var requestModelRe = regexp.MustCompile(`"requestModelId"\s*:\s*"([^"]+)"`)
 
 // modelsInFile reads the last 256 KB and collects providerData.model values,
 // newest file first, which is what the Node relay does.
@@ -97,20 +99,11 @@ func modelsInFile(path string) []string {
 		if line == "" || !strings.Contains(line, "providerData") {
 			continue
 		}
-		var row struct {
-			ProviderData struct {
-				Model string `json:"model"`
-			} `json:"providerData"`
-			Message struct {
-				Model string `json:"model"`
-			} `json:"message"`
-		}
-		if json.Unmarshal([]byte(line), &row) != nil {
-			continue
-		}
-		m := firstNonEmptyStr(row.ProviderData.Model, row.Message.Model)
-		if m != "" {
-			out = append(out, m)
+		// Node 匹配的是 requestModelId（模型请求 id），不是 providerData.model
+		for _, m := range requestModelRe.FindAllStringSubmatch(line, -1) {
+			if len(m) > 1 && m[1] != "" {
+				out = append(out, m[1])
+			}
 		}
 	}
 	return out

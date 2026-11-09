@@ -238,7 +238,7 @@ func (a *ManifestAgent) ReadItems(ctx context.Context, sessionID string, limit i
 	}
 	out := make([]agent.Item, 0, len(items))
 	for i, it := range items {
-		out = append(out, agent.Item{ID: fmt.Sprintf("%s-%d", sessionID, i), Role: it.Role, Kind: it.Kind, Seq: i, At: it.At, Text: it.Text})
+		out = append(out, agent.Item{ID: fmt.Sprintf("%s-%d", sessionID, i), Role: it.Role, Type: it.Kind, Seq: i, TS: it.At, Text: it.Text})
 	}
 	return out, nil
 }

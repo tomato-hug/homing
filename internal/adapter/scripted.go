@@ -298,9 +298,9 @@ func (s *ScriptAgent) ReadItems(ctx context.Context, sessionID string, limit int
 		out = append(out, agent.Item{
 			ID:   fmt.Sprintf("%s-%d", sessionID, i),
 			Role: strField(m, "role"),
-			Kind: firstNonEmpty(strField(m, "kind"), "message"),
+			Type: firstNonEmpty(strField(m, "kind"), "message"),
 			Seq:  i,
-			At:   strField(m, "at"),
+			TS: strField(m, "at"),
 			Text: strField(m, "text"),
 		})
 	}

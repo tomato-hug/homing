@@ -181,9 +181,9 @@ func ReadItems(path, sessionID string, limit int) []agent.Item {
 		items = append(items, agent.Item{
 			ID:    rowID.String,
 			Role:  role,
-			Kind:  kind.String,
+			Type: kind.String,
 			Seq:   int(seq.Int64),
-			At:    iso(created.Int64),
+			TS: iso(created.Int64),
 			Text:  scanlib.Truncate(itemText(role, payload), 4000),
 			Error: errorText(payload),
 		})

@@ -94,6 +94,21 @@ compare() { # path
 # 这里把两边投影到共同语义再比，差异就会被看见；富字段的缺口在汇报里说明。
 read -r -d '' PROJECT_ITEMS <<'PYPROJ'
 import json, sys
+# 完整条目对照：除时间字段（两边采样时刻不同）外逐字段比。
+raw = json.load(sys.stdin)
+items = raw.get("items") or []
+DROP = {"ts", "at"}
+def scrub(v):
+    if isinstance(v, dict):
+        return {k: scrub(x) for k, x in v.items() if k not in DROP}
+    if isinstance(v, list):
+        return [scrub(x) for x in v]
+    return v
+print(json.dumps({"source": raw.get("source"), "count": len(items),
+                  "items": [scrub(i) for i in items]},
+                 ensure_ascii=False, indent=1, sort_keys=True))
+PYPROJ'
+import json, sys
 raw = json.load(sys.stdin)
 items = raw.get("items") or []
 out = []
@@ -134,10 +149,91 @@ compare_items() { # session_id
   return 1
 }
 
+status_checks=0
+status_fail=0
+
+compare_status() { # method path
+  local method="$1" path="$2" node_code go_code
+  status_checks=$((status_checks + 1))
+  if [[ "$method" == "HEAD" ]]; then
+    node_code="$(curl -sS -I --noproxy '*' -m 30 -o /dev/null -w '%{http_code}' \
+      "http://127.0.0.1:$NODE_PORT$path" 2>/dev/null || echo 000)"
+    go_code="$(curl -sS -I --noproxy '*' -m 30 -o /dev/null -w '%{http_code}' \
+      "http://127.0.0.1:$GO_PORT$path" 2>/dev/null || echo 000)"
+  else
+    node_code="$(curl -sS --noproxy '*' -m 30 -o /dev/null -w '%{http_code}' \
+      -X "$method" "http://127.0.0.1:$NODE_PORT$path" 2>/dev/null || echo 000)"
+    go_code="$(curl -sS --noproxy '*' -m 30 -o /dev/null -w '%{http_code}' \
+      -X "$method" "http://127.0.0.1:$GO_PORT$path" 2>/dev/null || echo 000)"
+  fi
+  if [[ "$node_code" == "$go_code" ]]; then
+    echo "OK    $method $path ($node_code)"
+    return 0
+  fi
+  echo "DIFF  $method $path (Node $node_code / Go $go_code)"
+  status_fail=$((status_fail + 1))
+  return 1
+}
+
+compare_apk() {
+  local node go
+  status_checks=$((status_checks + 1))
+  node="$(curl -sS -I --noproxy '*' -m 30 "http://127.0.0.1:$NODE_PORT/apk" 2>/dev/null |
+    tr 'A-Z' 'a-z' | awk '/^http\//{code=$2} /^content-type:/{ct=$2} END{gsub("\r","",ct); print code" "ct}')"
+  go="$(curl -sS -I --noproxy '*' -m 30 "http://127.0.0.1:$GO_PORT/apk" 2>/dev/null |
+    tr 'A-Z' 'a-z' | awk '/^http\//{code=$2} /^content-type:/{ct=$2} END{gsub("\r","",ct); print code" "ct}')"
+  if [[ "$node" == "$go" ]]; then
+    echo "OK    HEAD /apk ($node)"
+    return 0
+  fi
+  echo "DIFF  HEAD /apk (Node $node / Go $go)"
+  status_fail=$((status_fail + 1))
+  return 1
+}
+
+compare_attachment() {
+  local events="$TMP/events-for-file.json" path node go
+  status_checks=$((status_checks + 1))
+  curl -sS --noproxy '*' -m 60 -H "Authorization: Bearer $HOMING_TOKEN" \
+    "http://127.0.0.1:$NODE_PORT/api/events?since=0" -o "$events" 2>/dev/null || true
+  path="$(python3 - "$events" <<'PY'
+import json, sys
+try:
+    raw = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+events = raw if isinstance(raw, list) else raw.get("events") or []
+for event in events:
+    for item in event.get("attachments") or []:
+        url = item.get("url") or ""
+        if url.startswith("/f/"):
+            print(url)
+            raise SystemExit
+PY
+)"
+  if [[ -z "$path" ]]; then
+    echo "SKIP  GET /f/... （没有带附件的现存事件）"
+    return 0
+  fi
+  node="$(curl -sS --noproxy '*' -m 30 -o /dev/null -w '%{http_code} %{content_type}' \
+    "http://127.0.0.1:$NODE_PORT$path" 2>/dev/null || echo '000')"
+  go="$(curl -sS --noproxy '*' -m 30 -o /dev/null -w '%{http_code} %{content_type}' \
+    "http://127.0.0.1:$GO_PORT$path" 2>/dev/null || echo '000')"
+  if [[ "$node" == "$go" ]]; then
+    echo "OK    GET /f/... ($node)"
+    return 0
+  fi
+  echo "DIFF  GET /f/... (Node $node / Go $go)"
+  status_fail=$((status_fail + 1))
+  return 1
+}
+
 PATHS=(
   "/api/agents"
   "/api/projects"
   "/api/inbox"
+  "/api/away"
+  "/api/devices"
   "/api/sessions?limit=50"
   "/api/sessions?source=codex&limit=20"
   "/api/sessions?source=claude&limit=20"
@@ -179,9 +275,26 @@ done
 
 
 echo
-if [[ $fail -eq 0 ]]; then
-  echo "全部一致（$(( ${#PATHS[@]} )) 个接口）"
+echo "--- 新增兼容接口（只读 / 鉴权 / 静态资源） ---"
+# POST /hook/*、/api/upload、/api/sessions/new、/api/approvals、/stop 会写真实
+# 事件或启动进程，不在这里对 Node 数据跑；由 internal/relayapi 的测试覆盖。
+for path in /hook/claude /hook/workbuddy /hook/codex /hook/generic; do
+  compare_status GET "$path"
+done
+compare_status POST "/api/upload?event_id=1&name=demo.txt"
+compare_status POST "/api/sessions/new"
+compare_status POST "/api/approvals/1"
+compare_status POST "/api/sessions/demo-none/stop"
+compare_status GET "/p/1/"
+compare_apk
+compare_attachment
+echo "SKIP  /api/v1/acp （这是 Node 调 WorkBuddy 桌面的出站 ACP 客户端，不是 Homing 路由）"
+
+
+echo
+if [[ $fail -eq 0 && $status_fail -eq 0 ]]; then
+  echo "全部一致（$(( ${#PATHS[@]} )) 个接口，$status_checks 个状态检查）"
 else
-  echo "$fail / ${#PATHS[@]} 个接口有差异"
+  echo "$fail / ${#PATHS[@]} 个接口有差异；$status_fail / $status_checks 个状态检查有差异"
 fi
-exit $(( fail > 0 ? 1 : 0 ))
+exit $(( (fail > 0 || status_fail > 0) ? 1 : 0 ))

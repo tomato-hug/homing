@@ -42,7 +42,13 @@ func (Agent) Models(context.Context) ([]agent.Model, string, error) {
 	}
 	add(defaultModel)
 
-	for i, file := range rolloutFiles(30) {
+	// Node walks ~/.codex/sessions oldest-first and takes the first 20 rollouts,
+	// so the Go reader reverses its newest-first listing to match.
+	files := rolloutFiles(365)
+	for i, j := 0, len(files)-1; i < j; i, j = i+1, j-1 {
+		files[i], files[j] = files[j], files[i]
+	}
+	for i, file := range files {
 		if i >= 20 {
 			break
 		}

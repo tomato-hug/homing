@@ -25,7 +25,7 @@ func TestExtractFileItemsDemo(t *testing.T) {
 
 	kinds := make([]string, 0, len(items))
 	for _, it := range items {
-		kinds = append(kinds, it.Kind)
+		kinds = append(kinds, it.Type)
 		if it.ID == "" || it.Seq == 0 {
 			t.Fatalf("条目缺少 id/seq: %+v", it)
 		}
