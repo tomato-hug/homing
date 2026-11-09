@@ -164,3 +164,50 @@ registerAdapterRoutes(app, custom.runtime);
 
 `registerAdapterRoutes` 兼容三种 `app` 形态：有 `addRoute(method, path, handler)` 的注册器、数组、任意对象（挂到 `__homingRoutes`）。
 另有 `dispatchAdapterRoute(runtime, { method, pathname, body, token, fromLoopback })` 可直接在原生 `http.createServer` 的分发链里用。
+
+---
+
+## Go 版（internal/adapter）
+
+同一套清单与目录，Go 实现逐项对齐 Node：
+
+| 项 | Node | Go |
+|---|---|---|
+| 清单目录 | `~/.homing/agents` | 同 |
+| 脚本目录 | `~/.homing/adapters` | 同 |
+| 令牌文件 | `data/ingest-tokens.json` | 同（字段一致，可直接搬家） |
+| YAML | 自带最小子集解析 | `gopkg.in/yaml.v3` |
+| SQLite | `node:sqlite` | `modernc.org/sqlite`（纯 Go，CGO_ENABLED=0 也能编） |
+| zstd | `zlib.zstdDecompressSync` | `klauspost/compress/zstd` |
+| 脚本运行 | 子进程 + `--permission` | 同（runner.mjs 用 `go:embed` 打进二进制） |
+
+脚本适配器的调用协议改成**标准输入输出一行 JSON**：
+
+```
+$ node --permission --allow-fs-read=/path/adapter.mjs /tmp/adapter-runner.mjs /path/adapter.mjs
+{"op":"listSessions","args":{"limit":5}}      ← stdin
+{"sessions":[...]}                             ← stdout
+```
+
+- 运行时先找 `node`，没有就找 `bun`；两个都没有时，该适配器在 `GET /api/adapters` 里报 `status: "error"`，
+  原因写「没有找到 node 或 bun」，而不是安静地返回空列表。
+- 网络仍然只是约定（`HOMING_ADAPTER_NO_NET=1`）：Node 的 `--permission` 不管网络，Go 侧沿用同一条约定并在文档写明。
+
+### `db_glob`：逐会话分库
+
+`antigravity` 这类 agent 每个会话一个 `.db`。清单可以这样写，Go 版已支持：
+
+```yaml
+sessions:
+  source: sqlite
+  db_glob: ~/.gemini/antigravity/conversations/*.db
+  query: select session_id, title, cwd, model, last_ts from ... limit 1
+```
+
+每个库跑一次 `query`，会话 id 取 `session_id`/`id` 列，取不到就用文件名（去掉 `.db`）。
+**尚未为 antigravity 写现成清单**：它的表结构没有样本可核对，按约定不猜；等装过并跑过一次会话再补。
+
+### 与 relay 的关系
+
+`relay/` 下的 Node 版保持不动，也不再接进 `relay/server.mjs`。Go 版通过 `internal/adapter` 的 `init()`
+自己 `agent.RegisterProvider` 与 `api.Register`，不需要改 `internal/api`、`internal/agent` 或 `cmd/homing`。

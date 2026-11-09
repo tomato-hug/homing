@@ -7,15 +7,17 @@
 | agent | 平台 | 会话位置 | 格式 | 推送 | 回复 | 状态 |
 |---|---|---|---|---|---|---|
 | **CodeBuddy Code** | macOS `~/.codebuddy` | `projects/<slug>/<id>.jsonl` | JSONL，`type:"message"` + `role` + `content`（Claude Code 同族，标题走 `custom-title`/`ai-title`/`summary`） | poll | CLI `codebuddy --resume`（本机未安装 CLI，清单里未启用） | ✅ **已接** — 实测 3 个会话，标题取自首个会话的 AI 标题 |
-| **DeepSeek Harness (dsh)** | macOS `~/.dsh` | `sessions/<slug>/session-<id>/session.v4.jsonl.zstd` | **zstd 压缩的 JSONL**；首行是会话头 `{type:"session", id, createdAt, cwd}` | poll | 无（未见注入接口） | ✅ **已接** — 实测 3 个会话，均为空会话（只有 session 头，无正文记录），故标题回落为空 |
+| **DeepSeek Harness (dsh)** | macOS `~/.dsh` | `sessions/<slug>/session-<id>/session.v4.jsonl.zstd` | **zstd 压缩的 JSONL**；首行是会话头 `{type:"session", id, createdAt, cwd}` | poll | 无（未见注入接口） | ✅ **已接** — 实测 7 个会话，均为空会话（只有 session 头，无正文记录），故标题回落为空 |
 | **Gemini CLI** | macOS `~/.gemini` | `tmp/<project>/chats/*.json` | 一个会话一个 JSON：`{ sessionId, messages: [{type, content}] }` | poll | 无 | ⚠️ **清单已备、本机无数据** — `~/.gemini` 存在但没有任何 `tmp/*/chats`（没跑过会话），实测 0 条 |
 | **Hermes Agent** | macOS `~/.hermes` | `state.db`（SQLite）→ `sessions` + `messages` 表 | SQL：`sessions(id, source, model, started_at, message_count)`；无 title / cwd 列 | poll | 无 | ⚠️ **清单已备、本机无数据** — `sessions` 与 `messages` 均为 0 行；标题只能回落到 `session_id` |
-| **OpenClaw** | macOS `~/.openclaw` | `agents/<agent>/sessions/<uuid>.jsonl` | JSONL，首行 `{type, version, id, timestamp, cwd}`，正文按 generic 映射 | poll | 无 | ✅ **已接** — 实测 3 个会话（目录里 12 个文件，`.reset` / `.deleted` 变体不取） |
+| **OpenClaw** | macOS `~/.openclaw` | `agents/<agent>/sessions/<uuid>.jsonl` | JSONL，首行 `{type, version, id, timestamp, cwd}`，正文按 generic 映射 | poll | 无 | ✅ **已接** — 实测 12 个会话（目录里 12 个主 `.jsonl`，`.reset` / `.deleted` 变体不取） |
 | **Antigravity** | macOS `~/.gemini/antigravity` | `conversations/<id>.db`（**每个会话一个 SQLite**）+ `conversation_summaries.db` | SQLite，逐会话分库 | — | 无 | ❌ **暂不能接** — 分库结构，当前清单只支持「单库 + 一条 query」；要接得先给 `sessions.source: sqlite` 增加「目录内每文件一库」的模式 |
 
 ## 结论
 
-- **能接且实测有数据**：CodeBuddy（3）、dsh（3，空会话）、OpenClaw（3）。
+- **能接且实测有数据**：CodeBuddy（3）、dsh（7，空会话）、OpenClaw（12）。
+- **Node 版与 Go 版读出的数字一致**：`HOMING_REAL_MANIFESTS=adapters go test ./internal/adapter/ -run Real -v`
+  在两边都是 codebuddy 3 / dsh 7 / gemini-cli 0 / hermes 0 / openclaw 12。
 - **能接但本机没跑过会话**：Gemini CLI、Hermes —— 清单已写好，装上并产生会话后无需改代码即可出现。
 - **当前框架接不了**：Antigravity（分库 SQLite）。这属于框架能力缺口，不是它自身无法读取；补齐方式见下。
 
