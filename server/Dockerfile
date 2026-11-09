@@ -1,27 +1,27 @@
-FROM node:22-bookworm-slim
+# Go implementation (internal/server). Build from the repository root:
+#   docker build -f server/Dockerfile -t homing-server .
+FROM golang:1.24 AS build
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 make g++ \
-    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
 
-WORKDIR /app
+# Expand this list when homing-server starts importing more internal packages.
+COPY cmd/homing-server ./cmd/homing-server
+COPY internal/protocol ./internal/protocol
+COPY internal/server ./internal/server
 
-COPY packages/protocol-js/package.json packages/protocol-js/package-lock.json packages/protocol-js/
-COPY packages/protocol-js/src packages/protocol-js/src
-RUN cd packages/protocol-js && npm ci --omit=dev
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -trimpath -ldflags="-s -w" \
+    -o /out/homing-server ./cmd/homing-server
 
-COPY server/package.json server/package-lock.json server/
-RUN cd server && npm ci --omit=dev
+FROM gcr.io/distroless/static-debian12:nonroot
 
-COPY server/index.mjs server/
-COPY server/src server/src
+COPY --from=build /out/homing-server /usr/local/bin/homing-server
 
-ENV NODE_ENV=production
-ENV PORT=8080
-ENV HOST=0.0.0.0
-ENV DB_PATH=/data/homing.sqlite
-
+ENV HOST=0.0.0.0 \
+    PORT=8080 \
+    DB_PATH=/data/homing.sqlite
 VOLUME ["/data"]
 EXPOSE 8080
-
-CMD ["node", "server/index.mjs"]
+ENTRYPOINT ["/usr/local/bin/homing-server"]
