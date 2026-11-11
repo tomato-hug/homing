@@ -3,6 +3,7 @@ package dev.agentpush.poc.ui
 import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -49,6 +50,9 @@ import dev.agentpush.poc.ui.screens.BrowserScreen
 import dev.agentpush.poc.ui.screens.HomingInboxScreen
 import dev.agentpush.poc.ui.screens.HomingHomeScreen
 import dev.agentpush.poc.ui.screens.HomingSplashScreen
+import dev.agentpush.poc.ui.screens.RoomsIcon
+import dev.agentpush.poc.ui.screens.RoomScreen
+import dev.agentpush.poc.ui.screens.RoomsScreen
 import dev.agentpush.poc.ui.screens.MeScreen
 import dev.agentpush.poc.ui.screens.NewSessionScreen
 import dev.agentpush.poc.ui.screens.ProjectsScreen
@@ -60,6 +64,8 @@ import java.util.Base64
 private const val ROUTE_INBOX = "inbox"
 private const val ROUTE_PROJECTS = "projects"
 private const val ROUTE_ME = "me"
+private const val ROUTE_ROOMS = "rooms"
+private const val ROUTE_ROOM = "room/{roomToken}"
 private const val ROUTE_SETTINGS = "settings"
 private const val ROUTE_ADD_COMPUTER = "add-computer"
 private const val ROUTE_NEW_SESSION = "new-session?cwd={cwd}"
@@ -106,19 +112,12 @@ fun AgentApp(
         viewModel.consumePendingNavigation()
     }
 
-    if (!splashDone) {
-        HomingSplashScreen(
-            connection = appState.connection,
-            transportKind = appState.transportKind,
-            onFinished = { splashDone = true },
-        )
-        return
-    }
 
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
     val showBottomBar = currentRoute == ROUTE_INBOX ||
         currentRoute == ROUTE_PROJECTS ||
+        currentRoute == ROUTE_ROOMS ||
         currentRoute == ROUTE_ME
     val visibleHome = remember(appState.home, appState.mobileInbox) {
         appState.home?.let(appState.mobileInbox::visibleHome)
@@ -142,6 +141,9 @@ fun AgentApp(
         }
     }
 
+    // 启动页叠在主界面上方：收件箱在下面先加载，启动页结束时鸽子飞到顶栏位置再淡出，
+    // 不再从启动页硬切到收件箱。
+    Box(modifier = Modifier.fillMaxSize()) {
     Scaffold(
         containerColor = HomingPalette.Background,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
@@ -216,6 +218,24 @@ fun AgentApp(
                         navController.navigate(newSessionRoute(cwd))
                     },
                     onOpenSettings = { navController.navigate(ROUTE_SETTINGS) },
+                )
+            }
+            composable(ROUTE_ROOMS) {
+                RoomsScreen(
+                    viewModel = viewModel,
+                    onOpenRoom = { roomId -> navController.navigate("room/${encodeToken(roomId)}") },
+                )
+            }
+            composable(
+                route = ROUTE_ROOM,
+                arguments = listOf(navArgument("roomToken") { type = NavType.StringType }),
+            ) { entry ->
+                val roomId = decodeToken(entry.arguments?.getString("roomToken").orEmpty())
+                RoomScreen(
+                    viewModel = viewModel,
+                    roomId = roomId,
+                    onBack = { navController.popBackStack() },
+                    onOpenSession = { sessionId -> navController.navigate(sessionRoute(sessionId)) },
                 )
             }
             composable(ROUTE_ME) {
@@ -301,6 +321,14 @@ fun AgentApp(
             }
         }
     }
+    if (!splashDone) {
+        HomingSplashScreen(
+            connection = appState.connection,
+            transportKind = appState.transportKind,
+            onFinished = { splashDone = true },
+        )
+    }
+    }
 }
 
 private data class BottomDestination(
@@ -311,6 +339,7 @@ private data class BottomDestination(
 private val bottomDestinations = listOf(
     BottomDestination(ROUTE_INBOX, "收件箱"),
     BottomDestination(ROUTE_PROJECTS, "会话"),
+    BottomDestination(ROUTE_ROOMS, "会议室"),
     BottomDestination(ROUTE_ME, "我的"),
 )
 
@@ -387,6 +416,7 @@ private fun BottomIcon(route: String) {
     Icon(
         imageVector = when (route) {
             ROUTE_PROJECTS -> Icons.Outlined.FolderOpen
+            ROUTE_ROOMS -> RoomsIcon
             ROUTE_ME -> Icons.Outlined.Person
             else -> Icons.Outlined.Inbox
         },

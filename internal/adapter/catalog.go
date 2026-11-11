@@ -583,7 +583,7 @@ func catalogEntryFor(ctx context.Context, spec catalogSpec, live agent.Agent, se
 	}
 
 	entry.Detected = detected
-	entry.Connected = settings.Connected
+	entry.Connected = agentconfig.EffectiveConnected(settings, spec.Readiness == ReadinessBuiltin, detected)
 	entry.Available = entry.Available || entry.ManifestInstalled
 	entry.CanConnect = entry.Available && detected
 	if entry.HookFile != "" {
@@ -593,7 +593,7 @@ func catalogEntryFor(ctx context.Context, spec catalogSpec, live agent.Agent, se
 		entry.ConfigFile = tildifyPath(expandHome(entry.ConfigFile))
 	}
 	if spec.Readiness == ReadinessBuiltin || spec.Readiness == ReadinessAdapter {
-		entry.HookInstalled = settings.Connected && storeHookInstalled(spec.ID)
+		entry.HookInstalled = entry.Connected && storeHookInstalled(spec.ID)
 	}
 	entry.KitInstalled, entry.KitDir = catalogKitState(spec.ID)
 	entry.CanConnect = entry.CanConnect || entry.KitInstalled

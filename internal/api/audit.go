@@ -23,6 +23,8 @@ var auditAllowedKeys = map[string]bool{
 	"stopped":           true,
 	"kind":              true,
 	"branch":            true,
+	"room_id":           true,
+	"participants":      true,
 }
 
 // Audit appends one security-relevant action to audit.jsonl. Callers pass only

@@ -532,6 +532,7 @@ internal fun InboxTopBar(
             animationKey = animationKey,
             contentDescription = "Homing",
         )
+        // 品牌名永远单行：空间不够时让右侧的连接胶囊先缩短，而不是把 Homing 折成两行。
         Text(
             text = "Homing",
             style = MaterialTheme.typography.titleLarge.copy(
@@ -539,11 +540,15 @@ internal fun InboxTopBar(
                 fontWeight = FontWeight.SemiBold,
             ),
             color = HomingPalette.Text,
-            modifier = Modifier.weight(1f),
+            maxLines = 1,
+            softWrap = false,
+            modifier = Modifier.testTag("inbox-brand-title"),
         )
+        Spacer(Modifier.weight(1f))
         MacStatusPill(
             connection = connection,
             transportKind = transportKind,
+            modifier = Modifier.weight(1f, fill = false),
         )
         if (inboxModeEnabled != null && onToggleInboxMode != null) {
             IconButton(

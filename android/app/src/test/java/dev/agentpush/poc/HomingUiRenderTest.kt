@@ -67,6 +67,19 @@ class HomingUiRenderTest {
         }
         compose.onNodeWithText("Homing").assertExists()
         compose.onNodeWithText("每个 agent 的回复，都能飞回你手里。").assertExists()
+        compose.onNodeWithText("已连接 我的 Mac").assertExists()
+    }
+
+    @Test
+    fun splashShowsConnectingCopyUntilConnected() {
+        compose.setContent {
+            AgentInboxTheme {
+                HomingSplashScreen(
+                    connection = ConnectionState.RECONNECTING,
+                    onFinished = {},
+                )
+            }
+        }
         compose.onNodeWithText("正在连接 我的 Mac…").assertExists()
     }
 
@@ -230,7 +243,7 @@ class HomingUiRenderTest {
         compose.onNodeWithText("我的").assertExists()
         compose.onNodeWithText("重新配对").assertExists()
         compose.onNodeWithText("Codex").assertExists()
-        compose.onNodeWithText("Homing 0.9.0").performScrollTo().assertExists()
+        compose.onNodeWithText("Homing 0.10.0").performScrollTo().assertExists()
         compose.onNodeWithText("添加 Agent").performScrollTo().assertExists()
         compose.onNodeWithText("等你回复").performScrollTo().assertExists()
         compose.onNodeWithText("离开模式").assertDoesNotExist()
@@ -280,15 +293,17 @@ class HomingUiRenderTest {
         compose.onNodeWithTag(
             "new-session-agent-status-codex",
             useUnmergedTree = true,
-        ).assertTextEquals("在线")
+        ).assertTextEquals("可后台启动")
         compose.onNodeWithTag("new-session-agent-list")
             .performScrollToNode(hasTestTag("new-session-agent-workbuddy"))
         compose.onNodeWithTag("new-session-agent-workbuddy").assertIsNotEnabled()
         compose.onNodeWithTag(
             "new-session-agent-status-workbuddy",
             useUnmergedTree = true,
-        ).assertTextEquals("离线")
-        compose.onNodeWithText("2 个 Agent 在线，离线项已禁用").assertExists()
+        ).assertTextEquals("需先打开 WorkBuddy")
+        compose.onNodeWithText(
+            "2 个 Agent 可启动。Codex、Claude Code 由电脑在后台用命令行启动，不需要打开它们的桌面端",
+        ).assertExists()
     }
 
     private fun installState(state: AgentUiState) {

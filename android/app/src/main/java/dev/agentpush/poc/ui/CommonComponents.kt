@@ -285,6 +285,7 @@ fun MacStatusPill(
                 style = MaterialTheme.typography.labelMedium,
                 color = HomingPalette.Body,
                 maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
     }

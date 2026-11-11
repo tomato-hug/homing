@@ -597,7 +597,7 @@ fun NewSessionScreen(
                         uploadStage ?: if (selectedAgentOnline) {
                             "启动 ${agentDisplayName(agentProfile)} 任务"
                         } else {
-                            "没有在线 Agent"
+                            "没有可启动的 Agent"
                         },
                     )
                 }
@@ -679,7 +679,7 @@ internal fun NewSessionAgentPicker(
         ) {
             Icon(
                 Icons.Outlined.Refresh,
-                contentDescription = "刷新 Agent 在线状态",
+                contentDescription = "刷新 Agent 状态",
                 modifier = Modifier.size(18.dp),
             )
         }
@@ -687,15 +687,15 @@ internal fun NewSessionAgentPicker(
     Text(
         text = when {
             !directoryAvailable && !loading -> "正在等待电脑返回 Agent 状态…"
-            onlineCount == 0 -> "当前没有在线 Agent；离线项暂时不能选择"
-            else -> "$onlineCount 个 Agent 在线，离线项已禁用"
+            onlineCount == 0 -> "当前没有可启动的 Agent；灰色项暂时不能选择"
+            else -> "$onlineCount 个 Agent 可启动。Codex、Claude Code 由电脑在后台用命令行启动，不需要打开它们的桌面端"
         },
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
     if (!error.isNullOrBlank()) {
         Text(
-            text = "在线状态刷新失败：$error",
+            text = "Agent 状态刷新失败：$error",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.error,
             maxLines = 2,
@@ -808,7 +808,7 @@ private fun NewSessionAgentCard(
                             ),
                     )
                     Text(
-                        text = if (online) "在线" else "离线",
+                        text = newSessionAvailabilityLabel(profile.source, online),
                         modifier = Modifier.testTag(
                             "new-session-agent-status-${profile.source}",
                         ),
@@ -877,3 +877,16 @@ private fun ProjectMenuItem(project: ProjectInfo, onClick: () -> Unit) {
         onClick = onClick,
     )
 }
+
+/**
+ * 新建会话列表里每个 Agent 的状态文字。这里说的是“能不能从手机新建”，不是桌面端开没开：
+ * Codex、Claude Code 由电脑在后台直接运行命令行启动；WorkBuddy 要靠正在运行的桌面端。
+ */
+internal fun newSessionAvailabilityLabel(source: String, available: Boolean): String =
+    when {
+        available && (source == "codex" || source == "claude") -> "可后台启动"
+        available && source == "workbuddy" -> "桌面端已打开"
+        available -> "可启动"
+        source == "workbuddy" -> "需先打开 WorkBuddy"
+        else -> "未就绪"
+    }

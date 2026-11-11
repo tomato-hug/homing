@@ -1127,6 +1127,22 @@ object AgentApi {
         )
     }
 
+    /** 会议室接口（/api/rooms）共用的请求入口，解析在 Rooms.kt。走同一套局域网 / 云端传输。 */
+    internal suspend fun roomRequest(
+        settings: AppSettings,
+        path: String,
+        method: String,
+        body: String? = null,
+    ): String = withContext(Dispatchers.IO) {
+        requestText(
+            settings = settings,
+            path = path,
+            method = method,
+            body = body,
+            readTimeoutMs = 30_000,
+        )
+    }
+
     private suspend fun requestText(
         settings: AppSettings,
         path: String,

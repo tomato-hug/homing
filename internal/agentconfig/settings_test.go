@@ -150,3 +150,51 @@ func TestCodexHookIsManual(t *testing.T) {
 		t.Fatal("codex hooks.json must not be created")
 	}
 }
+
+func TestEffectiveConnectedDefaultsBuiltinToDetected(t *testing.T) {
+	saved := "2026-11-12T00:00:00Z"
+	cases := []struct {
+		name     string
+		row      Settings
+		builtin  bool
+		detected bool
+		want     bool
+	}{
+		{"builtin detected, never saved", Settings{}, true, true, true},
+		{"builtin not installed", Settings{}, true, false, false},
+		{"user disconnected explicitly", Settings{UpdatedAt: &saved, Connected: false}, true, true, false},
+		{"user connected explicitly", Settings{UpdatedAt: &saved, Connected: true}, false, false, true},
+		{"catalog agent without hook", Settings{}, false, true, false},
+		{"catalog agent with hook", Settings{Connected: true}, false, true, true},
+	}
+	for _, tc := range cases {
+		if got := EffectiveConnected(tc.row, tc.builtin, tc.detected); got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestCodexNotifyCountsAsHook(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s := &Store{DataDir: t.TempDir(), Home: home}
+	if s.HookInstalled("codex") {
+		t.Fatal("no config yet, hook must not be reported")
+	}
+	config := "model = \"gpt-5\"\nnotify = [\"/Users/me/agent-push-poc/hooks/codex-notify-wrapper.sh\"]\n"
+	if err := os.WriteFile(filepath.Join(home, ".codex", "config.toml"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !s.HookInstalled("codex") {
+		t.Fatal("notify line pointing at codex-notify must count as an installed hook")
+	}
+	other := "notify = [\"/usr/local/bin/terminal-notifier\"]\n"
+	if err := os.WriteFile(filepath.Join(home, ".codex", "config.toml"), []byte(other), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if s.HookInstalled("codex") {
+		t.Fatal("an unrelated notify command is not a Homing hook")
+	}
+}

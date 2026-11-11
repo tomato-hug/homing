@@ -69,7 +69,11 @@ func consoleAdapterPayload(d *api.Deps) map[string]any {
 	for _, item := range builtinAdapters {
 		home := tildifyPath(platform.DescribeHome(item.ID).Path)
 		configFile := tildifyPath(store.ConfigFile(item.ID))
-		connected := settings[item.ID].Connected
+		detected := false
+		if info, err := os.Stat(platform.DataPathFor(item.ID, platform.Home())); err == nil && info != nil {
+			detected = true
+		}
+		connected := agentconfig.EffectiveConnected(settings[item.ID], true, detected)
 		view := map[string]any{
 			"id":             item.ID,
 			"name":           item.Name,

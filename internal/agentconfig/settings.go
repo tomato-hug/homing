@@ -104,13 +104,43 @@ func (s *Store) ConfigFile(id string) string {
 // HookInstalled reports whether an agent's config already points at a local
 // Homing hook URL. It deliberately does not pin a port: switching 18787 -> 18788
 // must not make the console claim every integration disappeared.
+//
+// Codex has two ways in: hooks.json (PermissionRequest, written by Homing) and
+// the older `notify` line in ~/.codex/config.toml that runs
+// hooks/codex-notify-wrapper.sh. Machines set up by the Node relay only have
+// the second one, so both count.
 func (s *Store) HookInstalled(id string) bool {
 	file := s.ConfigFile(id)
 	if file == "" {
 		return false
 	}
-	raw, err := os.ReadFile(file)
-	return err == nil && installedHookPattern.Match(raw)
+	if raw, err := os.ReadFile(file); err == nil && installedHookPattern.Match(raw) {
+		return true
+	}
+	if id == "codex" {
+		raw, err := os.ReadFile(filepath.Join(s.Home, ".codex", "config.toml"))
+		return err == nil && codexNotifyPattern.Match(raw)
+	}
+	return false
+}
+
+// codexNotifyPattern matches a `notify = [...]` line that hands Codex events
+// to Homing: the bundled wrapper/script, or any command posting to /hook/codex.
+var codexNotifyPattern = regexp.MustCompile(`(?m)^\s*notify\s*=.*(codex-notify|/hook/codex)`)
+
+// EffectiveConnected is what "已接入" means on the phone and in the console.
+// An explicit choice saved by the user always wins. Without one, a built-in
+// agent that is installed on this machine counts as connected: Homing already
+// reads its sessions, whether or not a push hook is configured (the hook is
+// reported separately). Custom or catalog-only agents still need the hook.
+func EffectiveConnected(row Settings, builtin, detected bool) bool {
+	if row.UpdatedAt != nil {
+		return row.Connected
+	}
+	if builtin && detected {
+		return true
+	}
+	return row.Connected
 }
 
 // Read loads one settings row, filling every missing key from Defaults. In
