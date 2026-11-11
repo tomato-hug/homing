@@ -34,3 +34,11 @@ relay/*.bak-*
 
 # Go 的构建期工具（build/icon 生成托盘图标），不是构建产物
 !/build/
+
+# 本机产物与临时目录（2026-11-12）
+/homing
+/homing.new
+/.playwright-cli/
+/output/
+/.agent-inbox/
+/.verify/

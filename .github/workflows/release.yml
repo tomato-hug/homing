@@ -1,0 +1,140 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish (vX.Y.Z)"
+        required: true
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  binaries:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64
+            os: macos-14
+            goos: darwin
+            goarch: arm64
+            gui: true
+          - name: macOS amd64
+            os: macos-13
+            goos: darwin
+            goarch: amd64
+            gui: true
+          - name: Windows amd64
+            os: windows-latest
+            goos: windows
+            goarch: amd64
+            gui: true
+          - name: Linux amd64
+            os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            gui: false
+          - name: Linux arm64
+            os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            gui: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+      - name: Build embedded console
+        shell: bash
+        run: bash scripts/build-console.sh
+      - name: Build binaries
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GUI: ${{ matrix.gui }}
+          VERSION: ${{ inputs.tag || github.ref_name }}
+        run: |
+          mkdir -p dist
+          ext=""
+          [ "$GOOS" = "windows" ] && ext=".exe"
+          tags=()
+          [ "$GUI" != "true" ] && tags=(-tags headless)
+          go build "${tags[@]}" -trimpath \
+            -ldflags "-s -w -X main.version=${VERSION#v}" \
+            -o "dist/homing_${GOOS}_${GOARCH}${ext}" ./cmd/homing
+          go build -tags headless -trimpath \
+            -ldflags "-s -w" \
+            -o "dist/homing-server_${GOOS}_${GOARCH}${ext}" ./cmd/homing-server
+      - uses: actions/upload-artifact@v4
+        with:
+          name: homing-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/homing_* 
+          if-no-files-found: error
+
+  release:
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Checksums
+        shell: bash
+        run: |
+          cd artifacts
+          sha256sum homing_* > checksums.txt
+          cat checksums.txt
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" artifacts/* --clobber
+          else
+            gh release create "$TAG" artifacts/* --generate-notes --title "Homing $TAG"
+          fi
+
+  docker:
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/tomato-hug/homing
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
