@@ -76,7 +76,7 @@ command -v go >/dev/null 2>&1 || die "找不到 go（先 brew install go）"
 go version
 mkdir -p "$BACKUP" "$BIN_DIR"
 if [ -f "$GO_PLIST" ] && launchctl print "gui/$UID_N/$GO_LABEL" >/dev/null 2>&1 && health 127.0.0.1; then
-  echo "Go 版已经在运行（$GO_LABEL），无需切换。"
+  echo "Go 版已经在运行（${GO_LABEL}），无需切换。"
   exit 0
 fi
 
@@ -99,7 +99,7 @@ if [ -f "$NODE_PLIST" ]; then
   cp "$NODE_PLIST" "$BACKUP/$NODE_LABEL.plist.$STAMP"
   echo "Node LaunchAgent -> $BACKUP/$NODE_LABEL.plist.$STAMP"
 else
-  echo "没有找到 $NODE_PLIST（Node 可能是手动启动的）"
+  echo "没有找到 ${NODE_PLIST}（Node 可能是手动启动的）"
 fi
 ( cd "$DATA" && tar -czf "$BACKUP/data-$STAMP.tgz" --exclude ./backup --exclude ./bin --exclude './*.log' . ) \
   && echo "数据目录 -> $BACKUP/data-$STAMP.tgz" \
@@ -184,6 +184,6 @@ else
 fi
 
 step "完成"
-echo "Go 版已接管 $PORT，并会在登录时自动启动（$GO_PLIST）。"
+echo "Go 版已接管 ${PORT}，并会在登录时自动启动（${GO_PLIST}）。"
 echo "下一步：手机上完全退出 Homing 再打开，不用改任何设置。"
 echo "回滚：bash scripts/rollback-to-node.sh"

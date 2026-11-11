@@ -20,7 +20,7 @@ PORT=18787
 STAMP="$(date +%Y%m%d-%H%M%S)"
 
 NODE_BACKUP="$(ls -t "$BACKUP/$NODE_LABEL".plist.* 2>/dev/null | head -1)"
-[ -n "$NODE_BACKUP" ] || { echo "找不到 Node LaunchAgent 的备份（$BACKUP），无法回滚"; exit 1; }
+[ -n "$NODE_BACKUP" ] || { echo "找不到 Node LaunchAgent 的备份（${BACKUP}），无法回滚"; exit 1; }
 echo "使用备份：$NODE_BACKUP"
 
 echo "== 停止 Go 版 =="
