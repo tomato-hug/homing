@@ -13,6 +13,14 @@ import { createNotifier } from "./notify.mjs";
 import platform from "./platform/index.mjs";
 import { createConsole } from "./console.mjs";
 import { verifyDeviceToken } from "./platform/devices.mjs";
+import {
+  mergeReplyRecord,
+  normalizeReplyRecord,
+  oldestQueuedReplyBeforeEvent,
+  queuedReplyIDsConfirmedByEvents,
+  resolveCodexFinishStatus,
+  shouldIgnoreReplyStatusDowngrade,
+} from "./reply-state.mjs";
 
 const relayDir = platform.relayDir;
 
@@ -199,22 +207,30 @@ function readJsonLines(filePath) {
 const config = ensureConfig();
 const events = readJsonLines(eventsPath);
 
-// replies.jsonl 是追加式日志：同一个 id 可能有多行（状态会从 queued 变成 held / injected / failed），
-// 以最后一行为准。
+// replies.jsonl 是追加式日志：同一个 id 可能有多行。正常会从 queued 前进到
+// held / injected / failed；旧版本曾在 injected 之后误写回 queued，加载时修复这种
+// 不可逆回退，避免历史消息永久留在“排队管理”里。
 const replies = (() => {
   const byId = new Map();
   for (const record of readJsonLines(repliesPath)) {
     if (Number.isSafeInteger(record.id)) {
-      byId.set(record.id, record);
+      byId.set(record.id, mergeReplyRecord(byId.get(record.id), record));
     }
   }
-  return [...byId.values()]
+  const merged = [...byId.values()]
     .sort((a, b) => a.id - b.id)
-    .map((reply) => ({
-      injected: false,
-      ...reply,
-      status: typeof reply.status === "string" ? reply.status : "queued",
-    }));
+    .map(normalizeReplyRecord);
+  const confirmed = new Set(queuedReplyIDsConfirmedByEvents(merged, events));
+  return merged.map((reply) =>
+    confirmed.has(reply.id)
+      ? {
+          ...reply,
+          status: "injected",
+          injected: true,
+          message: "Agent 已产生后续回复，确认已送达",
+        }
+      : reply,
+  );
 })();
 let nextEventId = events.reduce((max, event) => {
   return Number.isSafeInteger(event.id) ? Math.max(max, event.id) : max;
@@ -297,6 +313,11 @@ function addEvent({ source, kind, session_id, cwd, title, text }) {
     sendEvent(client, event);
   }
   try {
+    confirmQueuedReplyFromAgentEvent(event);
+  } catch (error) {
+    console.log(`[reply] 确认排队消息失败（已忽略）: ${error.message}`);
+  }
+  try {
     ensureTailer(event.session_id, event.source);
   } catch {
     // tail 失败不影响入库
@@ -312,6 +333,14 @@ function addEvent({ source, kind, session_id, cwd, title, text }) {
     console.log(`[notify] 分级失败（已忽略）: ${err.message}`);
   }
   return event;
+}
+
+function confirmQueuedReplyFromAgentEvent(event) {
+  const reply = oldestQueuedReplyBeforeEvent(replies, event);
+  if (!reply) {
+    return;
+  }
+  setReplyStatus(reply, "injected", "Agent 已产生后续回复，确认已送达");
 }
 
 function sendEvent(response, event) {
@@ -332,6 +361,7 @@ function sendEvent(response, event) {
 const HOLD_TIMEOUT_MS = Number(process.env.HOLD_TIMEOUT_MS || 10 * 60 * 1000);
 const CODEX_INJECT_TIMEOUT_MS = 10 * 60 * 1000;
 const codexBin = resolveCodexBin();
+let codexDaemonReady = false;
 
 // session_id -> [{ eventId, source, resolve, settled, timer }]
 const pendingHolds = new Map();
@@ -387,6 +417,12 @@ function broadcastReplyStatus(reply) {
 }
 
 function setReplyStatus(reply, status, message) {
+  if (shouldIgnoreReplyStatusDowngrade(reply.status, status)) {
+    console.log(
+      `[reply] #${reply.id} 忽略过期状态回退 ${reply.status} -> queued`,
+    );
+    return;
+  }
   reply.status = status;
   reply.injected = status === "injected";
   reply.message = message || statusMessages[status] || "";
@@ -598,7 +634,8 @@ function resolveInjectionCwd(event) {
   return relayDir;
 }
 
-// Codex 注入：codex exec resume <thread> <text>（子进程，参数数组，不拼 shell）。
+// Codex 注入：优先用 `codex queue --resume`，它会走 Codex 自己的 thread store，
+// 不会和桌面 App 已持有的 writer 冲突。旧版 CLI 才回退到 `codex exec resume`。
 function injectCodexReply(reply, event) {
   const threadId = reply.session_id;
   if (!threadId) {
@@ -621,8 +658,137 @@ function injectCodexReply(reply, event) {
 function runCodexInjection(state, reply, event) {
   state.running = true;
 
+  ensureCodexDaemon();
+  const cwd = resolveInjectionCwd(event);
+  const args = ["queue", "--thread", reply.session_id, "--message", deliveryTextFor(reply), "--resume"];
+  if (cwd) {
+    args.push("-C", cwd);
+  }
+
+  let child;
+  try {
+    child = spawn(codexBin, args, {
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: process.env,
+    });
+  } catch (error) {
+    state.running = false;
+    setReplyStatus(reply, "failed", `无法启动 codex queue: ${error.message}`);
+    drainCodexQueue(state);
+    return;
+  }
+
+  state.child = child;
+  setReplyStatus(reply, "queued", "正在交给 Codex 原生队列");
+
+  const killTimer = setTimeout(() => {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // 忽略
+    }
+  }, CODEX_INJECT_TIMEOUT_MS);
+  let handedOff = false;
+  let finished = false;
+  const probeTimer = setTimeout(() => {
+    if (finished) {
+      return;
+    }
+    handedOff = true;
+    const modelNote = reply.model || reply.effort
+      ? "；原生队列沿用该会话当前模型与强度"
+      : "";
+    setReplyStatus(
+      reply,
+      "injected",
+      `已交给 Codex 原生队列，继续在会话中执行${modelNote}`,
+    );
+    console.log(`[reply] #${reply.id} Codex 原生队列已接收，回合在后台继续`);
+  }, 800);
+
+  let output = "";
+  child.stdout.on("data", (chunk) => {
+    if (output.length < 4000) {
+      output += chunk.toString("utf8");
+    }
+  });
+  child.stderr.on("data", (chunk) => {
+    if (output.length < 4000) {
+      output += chunk.toString("utf8");
+    }
+  });
+
+  const finish = (code, error) => {
+    if (finished) {
+      return;
+    }
+    finished = true;
+    clearTimeout(probeTimer);
+    clearTimeout(killTimer);
+    state.running = false;
+    state.child = null;
+    if (code !== 0) {
+      const detail = (error?.message || output.trim() || "").slice(0, 300);
+      if (/unrecognized subcommand|unknown command|unexpected argument/i.test(detail)) {
+        console.log(`[reply] #${reply.id} 当前 codex 不支持 queue，回退 exec resume`);
+        runLegacyCodexInjection(state, reply, event);
+        return;
+      }
+      setReplyStatus(reply, "failed", `codex queue 注入失败（exit=${code}）${detail ? `: ${detail}` : ""}`);
+    } else {
+      const status = resolveCodexFinishStatus(handedOff, output);
+      const modelNote = reply.model || reply.effort
+        ? "；原生队列沿用该会话当前模型与强度"
+        : "";
+      if (status !== reply.status) {
+        setReplyStatus(
+          reply,
+          status,
+          status === "queued"
+            ? `已排入 Codex 队列，等待会话恢复${modelNote}`
+            : handedOff
+              ? `已交给 Codex 原生队列，继续在会话中执行${modelNote}`
+              : `已注入 Codex thread ${reply.session_id}${modelNote}`,
+        );
+      }
+      console.log(`[reply] #${reply.id} Codex 原生队列已接收`);
+    }
+    drainCodexQueue(state);
+  };
+
+  child.on("error", (error) => finish(-1, error));
+  child.on("close", (code) => finish(code ?? -1));
+}
+
+function ensureCodexDaemon() {
+  if (codexDaemonReady || !codexBin) {
+    return;
+  }
+  try {
+    execFileSync(codexBin, ["app-server", "daemon", "version"], {
+      stdio: "ignore",
+      timeout: 3000,
+    });
+    codexDaemonReady = true;
+    return;
+  } catch {
+    // 没有常驻 app-server；启动一次后再走原生队列。
+  }
+  try {
+    execFileSync(codexBin, ["app-server", "daemon", "start"], {
+      stdio: "ignore",
+      timeout: 15000,
+    });
+    codexDaemonReady = true;
+  } catch (error) {
+    console.log(`[reply] Codex daemon 启动失败，消息仍会排队: ${error.message}`);
+  }
+}
+
+function runLegacyCodexInjection(state, reply, event) {
+  state.running = true;
   const args = ["exec", "resume", "--skip-git-repo-check"];
-  // 只对这一轮生效：命令行参数，不改 config.toml
   if (reply.model) {
     args.push("-m", reply.model);
   }
@@ -646,12 +812,7 @@ function runCodexInjection(state, reply, event) {
   }
 
   state.child = child;
-  setReplyStatus(
-    reply,
-    "injected",
-    `已注入 Codex thread ${reply.session_id}${reply.model ? `（model=${reply.model}` : ""}${reply.effort ? `${reply.model ? "，" : "（"}effort=${reply.effort}` : ""}${reply.model || reply.effort ? "）" : ""}`,
-  );
-
+  setReplyStatus(reply, "queued", "当前 Codex 使用兼容模式注入");
   const timer = setTimeout(() => {
     try {
       child.kill("SIGKILL");
@@ -676,11 +837,10 @@ function runCodexInjection(state, reply, event) {
       const detail = (error?.message || stderr.trim() || "").slice(0, 300);
       setReplyStatus(reply, "failed", `codex 注入失败（exit=${code}）${detail ? `: ${detail}` : ""}`);
     } else {
-      console.log(`[reply] #${reply.id} Codex 注入回合结束`);
+      setReplyStatus(reply, "injected", `已注入 Codex thread ${reply.session_id}`);
     }
     drainCodexQueue(state);
   };
-
   child.on("error", (error) => finish(-1, error));
   child.on("close", (code) => finish(code ?? -1));
 }
@@ -2550,6 +2710,7 @@ function listAgents() {
       capabilities: {
         reply: true,
         new_session: codexBinAvailable,
+        new_session_ready: codexBinAvailable,
         switch_model: true,
         effort: true,
         stop: true,
@@ -2570,6 +2731,7 @@ function listAgents() {
       capabilities: {
         reply: true,
         new_session: Boolean(claudeBin),
+        new_session_ready: Boolean(claudeBin),
         switch_model: Boolean(claudeBin),
         effort: false,
         stop: Boolean(claudeBin),
@@ -2589,10 +2751,13 @@ function listAgents() {
       available: workbuddyRunning(),
       capabilities: {
         reply: true,
-        new_session: true,
+        // WorkBuddy 5.9+ 已移除旧的 /api/v1/acp/connect 桥；旧桥即使存在
+        // 也会复用当前活跃会话。未核实独立会话协议前不能声称可新建。
+        new_session: false,
+        new_session_ready: false,
         switch_model: false,
         effort: false,
-        stop: true,
+        stop: false,
         approve: false,
         live: true,
       },
@@ -2633,7 +2798,13 @@ function listAgents() {
       source: id,
       display_name: sc.name || id,
       available: Boolean(probe.installed),
-      capabilities: { ...(sc.capabilities || {}) },
+      capabilities: {
+        ...(sc.capabilities || {}),
+        // Node 中继的 scanner 只负责读取；没有 /api/sessions/new 启动器
+        // 就不能把 installed 当成可新建。
+        new_session: false,
+        new_session_ready: false,
+      },
       models: [],
       default_model: null,
       icon: iconFor(id),
@@ -3291,10 +3462,41 @@ function workspaceLabel(cwd) {
   return path.basename(parent);
 }
 
+const nativeTitlePrefixPattern =
+  /^(?:会话标题|會話標題|對話標題|标题|標題|conversation title|session title|title)\s*[：:]\s*/i;
+
+function cleanAgentNativeTitle(value) {
+  if (typeof value !== "string") {
+    return "";
+  }
+  let title = value.trim();
+  while (true) {
+    const withoutHeading = title.replace(/^#{1,6}\s+/, "").trim();
+    if (withoutHeading === title) {
+      break;
+    }
+    title = withoutHeading;
+  }
+  while (true) {
+    const withoutPrefix = title.replace(nativeTitlePrefixPattern, "").trim();
+    if (withoutPrefix === title) {
+      break;
+    }
+    title = withoutPrefix;
+  }
+  return title;
+}
+
 function sessionTitleFor({ source, sessionId, nativeTitle, nativeTitleSource, firstPrompt, cwd }) {
   const cleanTitle = (value) =>
     typeof value === "string" && value.trim() ? Array.from(value.trim()).slice(0, 200).join("") : "";
-  const byNative = cleanTitle(nativeTitle);
+  // Only titles generated by the agent are cleaned. A title explicitly named
+  // by the user can legitimately start with "Title:" or "标题：".
+  const byNative = cleanTitle(
+    !nativeTitleSource || nativeTitleSource === "agent"
+      ? cleanAgentNativeTitle(nativeTitle)
+      : nativeTitle,
+  );
   if (byNative) {
     return { title: byNative, title_source: nativeTitleSource || "agent" };
   }
@@ -4731,6 +4933,12 @@ function sseWriteFiltered(response, chunk, sessionId) {
 function broadcastItem(sessionId, item) {
   const chunk = `event: item\ndata: ${JSON.stringify({ session_id: sessionId, item })}\n\n`;
   for (const client of sseClients) {
+    if (
+      item?.type === "reasoning" &&
+      client.__includeReasoning !== true
+    ) {
+      continue;
+    }
     sseWriteFiltered(client, chunk, sessionId);
   }
 }
@@ -4976,6 +5184,9 @@ async function handleRequest(request, response) {
       response.flushHeaders?.();
 
       const sessionFilter = (url.searchParams.get("session_id") || "").trim();
+      response.__includeReasoning = ["1", "true", "yes", "on"].includes(
+        (url.searchParams.get("include_reasoning") || "").trim().toLowerCase(),
+      );
       if (sessionFilter) {
         response.__sessionFilter = sessionFilter;
         const filterSource = sessionSourceFor(sessionFilter);
@@ -5363,7 +5574,19 @@ async function handleRequest(request, response) {
       const body = await readBody(request);
       const source = body.source;
       if (!["codex", "workbuddy", "claude"].includes(source)) {
-        sendJson(response, 400, { error: "source 只能是 codex、workbuddy 或 claude" });
+        sendJson(response, 409, {
+          ok: false,
+          code: "agent_not_driveable",
+          error: "这个 Agent 目前只能读取会话，还没有可用的新会话驱动",
+        });
+        return;
+      }
+      if (source === "workbuddy") {
+        sendJson(response, 409, {
+          ok: false,
+          code: "new_session_not_ready",
+          error: "WorkBuddy 当前版本只能读取和回复，暂不支持安全地新建独立会话",
+        });
         return;
       }
       const cwd = typeof body.cwd === "string" ? body.cwd.trim() : "";
@@ -5393,8 +5616,6 @@ async function handleRequest(request, response) {
       let result;
       if (source === "codex") {
         result = await startCodexSession(cwd, finalText);
-      } else if (source === "workbuddy") {
-        result = await startWorkbuddySession(cwd, finalText);
       } else {
         result = startClaudeSession(cwd, finalText);
       }
@@ -5441,7 +5662,11 @@ async function handleRequest(request, response) {
       }
       const parsed = readRecentItems(source, filePath, limit);
       // 挂起中的授权请求补一条 approval 条目，手机端据此直接调 /api/approvals/<event_id>
-      const items = [...(parsed?.items || []), ...pendingApprovalItems(sessionId)];
+      const includeReasoning = ["1", "true", "yes", "on"].includes(
+        (url.searchParams.get("include_reasoning") || "").trim().toLowerCase(),
+      );
+      const items = [...(parsed?.items || []), ...pendingApprovalItems(sessionId)]
+        .filter((item) => includeReasoning || item?.type !== "reasoning");
       sendJson(response, 200, {
         session_id: sessionId,
         source,
@@ -5646,7 +5871,9 @@ server.listen(port, host, () => {
     `端口代理: ${config.proxy.enabled ? `开启（白名单 ${config.proxy.ports.join(",") || "空"}）` : "关闭"}`,
   );
   console.log(`能力链接: ${capabilities.size} 个有效 token（7 天有效）`);
-  console.log(`Codex 注入命令: ${codexBin} exec resume --skip-git-repo-check --all <thread> <text>`);
+  console.log(
+    `Codex 注入命令: ${codexBin} queue --thread <thread> --message <text> --resume（旧版回退 exec resume）`,
+  );
   console.log(`控制台: http://127.0.0.1:${port}/console`);
   console.log(`数据目录: ${platform.dataDir}`);
   platform.writeRuntimeInfo({

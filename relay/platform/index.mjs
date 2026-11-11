@@ -7,6 +7,25 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+// ESM imports run before server.mjs parses argv, so resolve --data-dir here
+// before the platform paths are frozen. Otherwise isolated test instances can
+// accidentally read and write the user's real Homing data directory.
+function cliOption(name) {
+  const index = process.argv.indexOf(name);
+  if (index >= 0 && process.argv[index + 1] && !process.argv[index + 1].startsWith("-")) {
+    return process.argv[index + 1];
+  }
+  const inline = process.argv.find((value) => value.startsWith(`${name}=`));
+  return inline ? inline.slice(name.length + 1) : "";
+}
+
+if (!process.env.HOMING_DATA_DIR) {
+  const explicitDataDir = cliOption("--data-dir");
+  if (explicitDataDir) {
+    process.env.HOMING_DATA_DIR = path.resolve(explicitDataDir);
+  }
+}
+
 export const VERSION = "0.7.0";
 export const PRODUCT = "Homing";
 // 端口可以在命令行里改（homingd --port 18800），所以是可变绑定，import 方拿到的是实时值
