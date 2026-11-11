@@ -81,9 +81,9 @@ export function renderAbout(ctx: PageContext): PageResult {
   function paintInfo(info: ConnectionInfo) {
     const entries: Array<[string, string]> = [
       ["应用版本", `v${info.version}`],
-      ["运行方式", info.packaged ? "单文件 homingd" : "node relay/server.mjs"],
+      ["运行方式", info.runtime === "go" ? "单文件 homing（Go）" : info.packaged ? "单文件 homingd" : "node relay/server.mjs"],
       ["平台", `${info.platform} · ${info.arch}`],
-      ["Node", info.node],
+      [info.runtime === "go" ? "Go" : "Node", info.runtime === "go" ? info.runtime_version || "-" : info.node],
       ["端口", String(info.port)],
       ["已运行", uptime(info.uptime_s)],
       ["数据目录", info.data_dir],

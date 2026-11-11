@@ -4,22 +4,100 @@ export const AGENT_LABELS: Record<string, string> = {
   codex: "Codex",
   claude: "Claude Code",
   workbuddy: "WorkBuddy",
+  kimi: "Kimi Code",
   opencode: "OpenCode",
   zcode: "ZCode",
+  dsh: "DeepSeek Harness",
+  openclaw: "OpenClaw",
+  codebuddy: "CodeBuddy Code",
+  "gemini-cli": "Gemini CLI",
+  hermes: "Hermes Agent",
+  cursor: "Cursor",
+  goose: "Goose",
+  zed: "Zed",
+  aider: "Aider",
+  continue: "Continue",
+  "qwen-code": "Qwen Code",
+  cline: "Cline",
+  "roo-code": "Roo Code",
+  crush: "Crush",
+  amp: "Amp",
+  droid: "Droid",
+  "copilot-cli": "GitHub Copilot CLI",
+  openhands: "OpenHands",
+  antigravity: "Google Antigravity",
+  warp: "Warp",
+  trae: "Trae",
+  qoder: "Qoder",
+  windsurf: "Windsurf",
+  kiro: "Kiro",
 };
 
-/** agent 用灰底等宽字母方块，不给 agent 上品牌色 */
+/** 未知 agent 的字母回退；已知 agent 使用 agent-icons 里的品牌图标。 */
 export const AGENT_INITIALS: Record<string, string> = {
   codex: "C",
   claude: "Cl",
   workbuddy: "W",
+  kimi: "K",
   opencode: "O",
   zcode: "Z",
+  dsh: "DS",
+  openclaw: "OC",
+  codebuddy: "CB",
+  "gemini-cli": "G",
+  hermes: "H",
+  cursor: "Cu",
+  goose: "Go",
+  zed: "Ze",
+  aider: "Ai",
+  continue: "Co",
+  "qwen-code": "Qw",
+  cline: "Cl",
+  "roo-code": "Ro",
+  crush: "Cr",
+  amp: "Am",
+  droid: "Dr",
+  "copilot-cli": "GH",
+  openhands: "OH",
+  antigravity: "Ag",
+  warp: "Wa",
+  trae: "Tr",
+  qoder: "Qo",
+  windsurf: "Ws",
+  kiro: "Ki",
+  kilo: "Ki",
+  nanobot: "NB",
+  "reasonix-desktop": "Rx",
+  pig: "PiG",
+  bub: "Bu",
+  type4me: "4",
+  cowork: "协",
+  opencodereview: "OCR",
+  junie: "Ju",
+  "kimi-desktop": "K",
+  "minimax-design": "MM",
+  pink: "Pi",
+  wispterm: ">_",
+  citebox: "[]",
+  "wisp-science": "Ws",
+  kaku: "K",
+  eta: "η",
+  "rhino9-ai": "Rh",
+  "nowledge-mem": "N",
+  "deveco-code": "DV",
+  pi: "π",
+  mothx: "M",
+  penguin: "Pg",
+  omo: "OMO",
+  omp: "omp",
+  atomcode: "At",
+  snow: "Sn",
 };
 
 export const signalLabel = (signal?: string): string => {
   if (signal === "hook") return "钩子推送";
   if (signal === "http_events") return "本地事件";
+  if (signal === "watch") return "监听文件";
   if (signal === "poll") return "轮询读取";
   return "未知";
 };
@@ -27,6 +105,7 @@ export const signalLabel = (signal?: string): string => {
 export const signalHint = (signal?: string): string => {
   if (signal === "hook") return "agent 主动推送，最及时";
   if (signal === "http_events") return "本地服务推送";
+  if (signal === "watch") return "盯住会话目录，比轮询快";
   if (signal === "poll") return "60 秒轮询一次，略有延迟";
   return "";
 };

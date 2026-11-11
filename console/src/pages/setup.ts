@@ -192,13 +192,6 @@ export function renderSetup(ctx: PageContext): PageResult {
   // ------------------------------------------------------------ 第二步
 
   function stepMethod() {
-    const selfInput = h("input", {
-      class: "input mono",
-      placeholder: "https://homing.example.com",
-      disabled: true,
-      style: "margin-top:10px",
-    });
-
     const make = (key: "lan" | "cloud" | "self_hosted", title: string, desc: string, badge: HTMLElement | null, disabled: boolean, extra?: HTMLElement) => {
       const el = h(
         "div",
@@ -222,13 +215,43 @@ export function renderSetup(ctx: PageContext): PageResult {
     };
 
     clear(body);
+    const cloudConfigured = Boolean(connection?.cloud?.configured);
+    const cloudConnected = cloudConfigured && Boolean(connection?.cloud?.connected);
+    const relayLink = h(
+      "div",
+      { class: "note", style: "margin-top:8px" },
+      button("去连接页查看或配置", {
+        small: true,
+        variant: "quiet",
+        iconSvg: icons.plug,
+        onClick: () => ctx.navigate("/console/relay"),
+      }),
+    );
     body.append(
       h("h2", { text: "手机怎么连过来" }),
       h("p", { class: "wizard-sub", text: "先选一种；以后可以在「连接」页改。" }),
       make("lan", "局域网直连", "手机和这台电脑在同一个 Wi-Fi 下，直接连，不经过任何服务器。", tag("推荐 · 这一版默认", "ok"), false),
-      make("cloud", "Homing 云中转", "不在同一个网络时，通过 Homing 的服务器转发。", tag("即将推出", "warn"), true),
-      make("self_hosted", "自建服务器", "把 homingd 跑在自己的服务器上，手机连那台机器。", tag("这一版不可选", "mute"), true, selfInput),
-      h("div", { class: "note", style: "margin-top:10px" }, "三种方式都会使用端到端加密；端到端加密在 M4 接入，这一版是局域网内的设备令牌鉴权。"),
+      make(
+        "cloud",
+        "Homing 云中转",
+        "不在同一个网络时，通过 Homing 的服务器转发。首次设置向导仍用局域网扫码，云中转请在连接页确认状态。",
+        tag(cloudConnected ? "已连接" : cloudConfigured ? "已配置" : "可配置", cloudConnected ? "ok" : "plain"),
+        true,
+        relayLink,
+      ),
+      make(
+        "self_hosted",
+        "自建服务器",
+        "把 homingd 跑在自己的服务器上，手机连那台机器；与云中转使用同一套加密 RPC。",
+        tag("可配置", "plain"),
+        true,
+        h(
+          "div",
+          { class: "note", style: "margin-top:8px" },
+          "先在连接页确认中继地址；Homing 不会替你执行第三方安装命令。",
+        ),
+      ),
+      h("div", { class: "note", style: "margin-top:10px" }, "局域网直连使用设备令牌鉴权与明文 HTTP；云中转和自建服务器走端到端加密 RPC。"),
     );
   }
 

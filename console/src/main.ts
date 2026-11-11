@@ -4,6 +4,8 @@ import { icons, pigeon } from "./lib/icons";
 import { endpoints, poll, type ConnectionInfo, type Inbox } from "./lib/api";
 import { pill } from "./lib/ui";
 import { renderInbox } from "./pages/inbox";
+import { renderHome } from "./pages/home";
+import { renderCollab } from "./pages/collab";
 import { renderSessions } from "./pages/sessions";
 import { renderAgents } from "./pages/agents";
 import { renderDevices } from "./pages/devices";
@@ -14,7 +16,9 @@ import { renderSettings } from "./pages/settings";
 import { renderLogs } from "./pages/logs";
 import { renderAbout } from "./pages/about";
 import { renderSetup } from "./pages/setup";
+import { renderLibrary } from "./pages/library";
 import { notFoundWithNav } from "./pages/notfound";
+import { renderTray } from "./pages/tray";
 
 export interface PageContext {
   navigate: (path: string, options?: { replace?: boolean }) => void;
@@ -40,36 +44,40 @@ interface Route {
 // ---------------------------------------------------------------- 路由表
 
 const routes: Route[] = [
-  { path: "/console/", crumbs: ["使用", "收件箱"], iconSvg: icons.inbox, render: renderInbox },
+  { path: "/console/tray", crumbs: ["Homing"], iconSvg: icons.overview, render: renderTray },
+  { path: "/console/", crumbs: ["使用", "总览"], iconSvg: icons.overview, render: renderHome },
+  { path: "/console/inbox", crumbs: ["使用", "收件箱"], iconSvg: icons.inbox, render: renderInbox },
   { path: "/console/sessions", crumbs: ["使用", "会话"], iconSvg: icons.chat, render: renderSessions },
-  { path: "/console/agents", crumbs: ["使用", "Agent"], iconSvg: icons.agents, render: renderAgents },
+  { path: "/console/collab", crumbs: ["使用", "协作"], iconSvg: icons.cornerDown, render: renderCollab },
+  { path: "/console/agents", crumbs: ["Agent", "已接入"], iconSvg: icons.agents, render: renderAgents },
   { path: "/console/devices", crumbs: ["手机", "设备"], iconSvg: icons.phone, render: renderDevices },
   { path: "/console/notifications", crumbs: ["手机", "通知"], iconSvg: icons.bell, render: renderNotifications },
   { path: "/console/relay", crumbs: ["连接", "中转与局域网"], iconSvg: icons.plug, render: renderRelay },
   {
     path: "/console/adapters",
-    crumbs: ["扩展", "接入", "内置"],
+    crumbs: ["Agent", "目录与接入", "内置"],
     iconSvg: icons.puzzle,
     render: (ctx) => renderAdapters(ctx, "builtin"),
   },
   {
     path: "/console/adapters/discover",
-    crumbs: ["扩展", "接入", "发现"],
+    crumbs: ["Agent", "目录与接入", "发现"],
     iconSvg: icons.puzzle,
     render: (ctx) => renderAdapters(ctx, "discover"),
   },
   {
     path: "/console/adapters/installed",
-    crumbs: ["扩展", "接入", "已安装"],
+    crumbs: ["Agent", "目录与接入", "已安装"],
     iconSvg: icons.puzzle,
     render: (ctx) => renderAdapters(ctx, "installed"),
   },
   {
     path: "/console/adapters/custom",
-    crumbs: ["扩展", "接入", "自定义"],
+    crumbs: ["Agent", "目录与接入", "自定义"],
     iconSvg: icons.puzzle,
     render: (ctx) => renderAdapters(ctx, "custom"),
   },
+  { path: "/console/library", crumbs: ["Agent", "资源库"], iconSvg: icons.library, render: renderLibrary },
   { path: "/console/settings", crumbs: ["设置"], iconSvg: icons.gear, render: renderSettings },
   { path: "/console/logs", crumbs: ["设置", "运行日志"], iconSvg: icons.logs, render: renderLogs },
   { path: "/console/about", crumbs: ["设置", "关于"], iconSvg: icons.info, render: renderAbout },
@@ -102,9 +110,28 @@ const navGroups: NavGroup[] = [
   {
     label: "使用",
     items: [
-      { path: "/console/", label: "收件箱", iconSvg: icons.inbox, badge: "waiting" },
+      { path: "/console/", label: "总览", iconSvg: icons.overview, badge: "waiting" },
       { path: "/console/sessions", label: "会话", iconSvg: icons.chat },
-      { path: "/console/agents", label: "Agent", iconSvg: icons.agents },
+      { path: "/console/collab", label: "协作", iconSvg: icons.cornerDown },
+    ],
+  },
+  {
+    label: "Agent",
+    items: [
+      { path: "/console/agents", label: "已接入", iconSvg: icons.agents },
+      { path: "/console/adapters", label: "目录与接入", iconSvg: icons.puzzle },
+      { path: "/console/library", label: "资源库", iconSvg: icons.library },
+    ],
+    children: [
+      {
+        parent: "/console/adapters",
+        items: [
+          { path: "/console/adapters", label: "内置" },
+          { path: "/console/adapters/discover", label: "发现" },
+          { path: "/console/adapters/installed", label: "已安装" },
+          { path: "/console/adapters/custom", label: "自定义" },
+        ],
+      },
     ],
   },
   {
@@ -118,21 +145,6 @@ const navGroups: NavGroup[] = [
     label: "连接",
     items: [{ path: "/console/relay", label: "中转与局域网", iconSvg: icons.plug }],
   },
-  {
-    label: "扩展",
-    items: [{ path: "/console/adapters", label: "接入", iconSvg: icons.puzzle }],
-    children: [
-      {
-        parent: "/console/adapters",
-        items: [
-          { path: "/console/adapters", label: "内置" },
-          { path: "/console/adapters/discover", label: "发现" },
-          { path: "/console/adapters/installed", label: "已安装" },
-          { path: "/console/adapters/custom", label: "自定义" },
-        ],
-      },
-    ],
-  },
 ];
 
 // ---------------------------------------------------------------- 外壳状态
@@ -140,8 +152,9 @@ const navGroups: NavGroup[] = [
 const shellState: {
   connection: ConnectionInfo | null;
   inbox: Inbox | null;
+  home: Awaited<ReturnType<typeof endpoints.home>> | null;
   online: boolean;
-} = { connection: null, inbox: null, online: false };
+} = { connection: null, inbox: null, home: null, online: false };
 
 let appRoot: HTMLElement;
 let sidebarNav: HTMLElement;
@@ -153,6 +166,7 @@ let navBadge: HTMLElement | null = null;
 let currentDispose: (() => void) | null = null;
 let shellPoll: (() => void) | null = null;
 let currentPath = "/console/";
+const consoleVersion = "v0.9.0";
 
 function normalizePath(path: string): string {
   const url = new URL(path, location.origin);
@@ -186,9 +200,13 @@ function navItem(leaf: NavLeaf, active: boolean): HTMLElement {
     leaf.iconSvg ? icon(leaf.iconSvg, 15) : null,
     h("span", { text: leaf.label }),
   );
+  if (active) el.setAttribute("aria-current", "page");
   el.addEventListener("click", () => navigate(leaf.path));
   el.addEventListener("keydown", (event) => {
-    if ((event as KeyboardEvent).key === "Enter") navigate(leaf.path);
+    if ((event as KeyboardEvent).key === "Enter" || (event as KeyboardEvent).key === " ") {
+      event.preventDefault();
+      navigate(leaf.path);
+    }
   });
   if (leaf.badge === "waiting") {
     navBadge = h("span", { class: "nav-badge" });
@@ -233,7 +251,7 @@ function buildSidebar(): HTMLElement {
       { class: "brand" },
       pigeon(24, "#CBD5E1"),
       h("span", { class: "brand-name", text: "Homing" }),
-      h("span", { class: "brand-ver", text: "v0.7.0" }),
+      h("span", { class: "brand-ver", text: consoleVersion }),
     ),
     sidebarNav,
     foot,
@@ -257,7 +275,7 @@ function paintSidebarStatus() {
 
 function paintNavBadge() {
   if (!navBadge) return;
-  const count = shellState.inbox?.counts.waiting || 0;
+  const count = shellState.home?.counts.needs_you ?? shellState.inbox?.counts.waiting ?? 0;
   navBadge.textContent = count > 0 ? String(count) : "";
 }
 
@@ -270,8 +288,8 @@ function paintConnection() {
     connectionSlot.append(pill("本机服务未响应", "bad", "homingd 可能已退出"));
     return;
   }
-  const waiting = shellState.inbox?.counts.waiting || 0;
-  const running = shellState.inbox?.counts.running || 0;
+  const waiting = shellState.home?.counts.needs_you ?? shellState.inbox?.counts.waiting ?? 0;
+  const running = shellState.home?.counts.running ?? shellState.inbox?.counts.running ?? 0;
   const text = waiting || running
     ? [waiting ? `${waiting} 等处理` : "", running ? `${running} 运行中` : ""].filter(Boolean).join(" · ")
     : "已连接";
@@ -290,23 +308,34 @@ function buildCrumbs(route: Route): HTMLElement {
 }
 
 async function refreshShell() {
+  let connection: ConnectionInfo;
   try {
-    const [connection, inbox] = await Promise.all([endpoints.connection(), endpoints.inbox()]);
+    connection = await endpoints.connection();
     shellState.connection = connection;
-    shellState.inbox = inbox;
     shellState.online = true;
   } catch {
     shellState.online = false;
+    paintConnection();
+    paintNavBadge();
+    paintSidebarStatus();
+    return;
   }
+
+  // 連線本身很快，會話掃描可能還要十幾秒。先把「已連上」畫出來，避免把
+  // 正在載入誤報成服務離線。
   paintConnection();
-  paintNavBadge();
   paintSidebarStatus();
+
+  const home = await endpoints.home().catch(() => null);
+  shellState.home = home;
+  shellState.inbox = home ? null : await endpoints.inbox().catch(() => null);
+  paintNavBadge();
 }
 
 // ---------------------------------------------------------------- 路由渲染
 
 function buildTopbar(route: Route, refreshBtn: HTMLButtonElement): HTMLElement {
-  connectionSlot = h("div", { style: "display:flex;gap:8px;align-items:center" });
+  connectionSlot = h("div", { class: "connection-slot" });
   return h("header", { class: "topbar" }, buildCrumbs(route), h("div", { class: "spacer" }), connectionSlot, refreshBtn);
 }
 
@@ -337,6 +366,18 @@ function renderRoute() {
 
   currentPath = route.path;
 
+  if (path === "/console/tray") {
+    // 托盤面板由 Wails 以 360px 寬的獨立視窗載入，不能套主控制台側欄。
+    const result = renderTray({ navigate, refreshShell, refreshPage: renderRoute });
+    clear(appRoot);
+    document.body.classList.add("tray-mode");
+    appRoot.append(result.el);
+    currentDispose = result.dispose || null;
+    void refreshShell();
+    return;
+  }
+  document.body.classList.remove("tray-mode");
+
   if (path === "/console/setup") {
     // 向导不套侧栏：首次打开时只做一件事
     const result = route.render({ navigate, refreshShell, refreshPage: renderRoute }, query);
@@ -358,15 +399,42 @@ function renderRoute() {
   });
 
   topbar = buildTopbar(route, refreshBtn);
-  content = h("div", { class: "content" }, result.el);
+  const contentClass =
+    route.path === "/console/sessions"
+      ? "content content-workbench"
+      : route.path === "/console/" ||
+          route.path === "/console/agents" ||
+          route.path === "/console/library" ||
+          route.path === "/console/collab"
+        ? "content content-wide"
+        : "content";
+  content = h(
+    "div",
+    { class: contentClass },
+    result.el,
+  );
 
   clear(appRoot);
-  appRoot.append(h("div", { class: "shell" }, buildSidebar(), h("div", { class: "main" }, topbar, content)));
+  appRoot.append(
+    h(
+      "div",
+      { class: route.path === "/console/sessions" ? "shell shell-workbench" : "shell" },
+      buildSidebar(),
+      h("div", { class: "main" }, topbar, content),
+    ),
+  );
 
   currentDispose = result.dispose || null;
   paintConnection();
   paintNavBadge();
   paintSidebarStatus();
+  window.requestAnimationFrame(() => {
+    if (!window.matchMedia("(max-width: 760px)").matches) return;
+    appRoot.querySelector<HTMLElement>(".nav-item.active")?.scrollIntoView({
+      block: "nearest",
+      inline: "nearest",
+    });
+  });
   void refreshShell();
 
   if (!shellPoll) {

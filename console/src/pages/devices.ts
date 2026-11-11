@@ -8,6 +8,13 @@ import { endpoints, poll, type Device, type PairOffer } from "../lib/api";
 import { button, emptyState, groupHead, listCard, reportError, tag, toast, spinner } from "../lib/ui";
 import type { PageContext, PageResult } from "../main";
 
+const ALL_DEVICE_SCOPES = ["read", "reply", "drive"] as const;
+const DEVICE_SCOPE_LABELS: Record<string, string> = {
+  read: "读取",
+  reply: "回复",
+  drive: "操作",
+};
+
 export function renderDevices(ctx: PageContext, query: URLSearchParams): PageResult {
   const root = h("div");
   let disposed = false;
@@ -34,7 +41,11 @@ export function renderDevices(ctx: PageContext, query: URLSearchParams): PageRes
     clear(devicesHost);
     devicesHost.append(
       devices.length === 0
-        ? h("div", { class: "list-card" }, emptyState("还没有配对手机", "点上面的「配对新手机」，用 App 扫码即可"))
+        ? h(
+            "div",
+            { class: "list-card" },
+            emptyState("还没有配对手机", "在下方点「配对新手机」，再用 App 扫码。"),
+          )
         : listCard(
             ...devices.map((device) =>
               h(
@@ -56,10 +67,42 @@ export function renderDevices(ctx: PageContext, query: URLSearchParams): PageRes
                     h("span", { class: "mono", text: `${device.platform === "android" ? "Android" : device.platform} · ${appVersionLabel(device.app_version)}` }),
                     ` · ${device.paired_via === "qr" ? "扫码配对" : "配对码配对"} · ${device.last_seen_at ? timeAgo(device.last_seen_at) : "还没连过"}`,
                   ),
+                  h(
+                    "div",
+                    { class: "lrow-sub" },
+                    `权限：${(device.scopes?.length ? device.scopes : ALL_DEVICE_SCOPES)
+                      .map((scope) => DEVICE_SCOPE_LABELS[scope] || scope)
+                      .join(" / ")}`,
+                  ),
                 ),
                 h(
                   "div",
                   { class: "lrow-actions" },
+                  ...ALL_DEVICE_SCOPES.map((scope) => {
+                    const enabled = (device.scopes?.length ? device.scopes : ALL_DEVICE_SCOPES).includes(scope);
+                    return button(`${DEVICE_SCOPE_LABELS[scope]}${enabled ? " ✓" : " ✕"}`, {
+                      small: true,
+                      variant: "quiet",
+                      title: enabled ? `关闭「${DEVICE_SCOPE_LABELS[scope]}」权限` : `开启「${DEVICE_SCOPE_LABELS[scope]}」权限`,
+                      onClick: async () => {
+                        const current = device.scopes?.length ? device.scopes : [...ALL_DEVICE_SCOPES];
+                        const next = enabled
+                          ? current.filter((item) => item !== scope)
+                          : [...current, scope];
+                        if (enabled && scope === "read") {
+                          const ok = window.confirm("关闭读取权限后，这台手机会看不到任何会话。继续？");
+                          if (!ok) return;
+                        }
+                        try {
+                          await endpoints.setDeviceScopes(device.device_id, next);
+                          toast("权限已更新", "ok");
+                          await refreshDevices();
+                        } catch (err) {
+                          reportError(err, "更新权限失败");
+                        }
+                      },
+                    });
+                  }),
                   button("移除", {
                     small: true,
                     variant: "quiet",
@@ -250,7 +293,17 @@ export function renderDevices(ctx: PageContext, query: URLSearchParams): PageRes
   root.append(
     h("div", { class: "group" }, groupHead("已配对的手机"), devicesHost),
     h("div", { class: "group" }, groupHead("配对"), pairingHost),
-    h("div", { class: "note", style: "padding:0 2px" }, "二维码里是一次性配对令牌，5 分钟有效；扫码后手机会换发一张长期设备令牌，可以在上面随时移除。这一版是局域网直连，端到端加密在 M4。"),
+    h(
+      "details",
+      { class: "quiet-details" },
+      h("summary", { text: "配对与安全说明" }),
+      h(
+        "p",
+        {
+          text: "二维码里是一次性配对令牌，5 分钟有效。扫码后手机会换发长期设备令牌，可随时在上方移除。这一版使用局域网直连，端到端加密计划在 M4。",
+        },
+      ),
+    ),
   );
 
   paintPairing();

@@ -1,5 +1,5 @@
 // 扩展 › 接入：内置 / 发现 / 已安装 / 自定义
-// 自定义页的清单解析、/api/ingest、脚本适配器加载由 relay 侧（DSH）接上，这里先把界面和三张方式卡片做完。
+// 自定义接入三条路：清单、脚本适配器、事件上报；后端都已接上。
 
 import { h, clear, icon } from "../lib/dom";
 import { icons } from "../lib/icons";
@@ -21,8 +21,6 @@ const FORMAT_LABELS: Record<string, string> = {
   jsonl: "JSON Lines（一行一条）",
   json: "JSON 数组",
   sqlite: "SQLite 库",
-  markdown: "Markdown 聊天记录",
-  log: "纯文本日志",
 };
 
 const PUSH_LABELS: Record<string, string> = {
@@ -136,7 +134,11 @@ export function renderAdapters(ctx: PageContext, tab: AdapterTab): PageResult {
               h(
                 "div",
                 { class: "lrow-actions" },
-                button("还不能装", { small: true, variant: "quiet", disabled: true, title: "适配器市场随 ingest 一起上" }),
+                button("用自定义接入", {
+                  small: true,
+                  variant: "quiet",
+                  onClick: () => ctx.navigate("/console/adapters/custom"),
+                }),
               ),
             ),
           ),
@@ -144,7 +146,7 @@ export function renderAdapters(ctx: PageContext, tab: AdapterTab): PageResult {
         h(
           "div",
           { class: "note", style: "margin-top:8px" },
-          "社区适配器要等 relay 的 ingest 与安装通道接上才能装；现在可以先用「自定义」写一份清单。",
+          "这里列的是还没打包进内置接入的 agent；可以先用「自定义」写清单、挂通用钩子，或写脚本适配器。社区市场与签名安装通道尚未实现。",
         ),
       ),
     );
@@ -252,6 +254,7 @@ export function renderAdapters(ctx: PageContext, tab: AdapterTab): PageResult {
       kind: "file",
       path: "",
       format: "jsonl",
+      query: "",
       push: "poll",
       command: "",
       test: null as AdapterTestResult | null,
@@ -260,6 +263,9 @@ export function renderAdapters(ctx: PageContext, tab: AdapterTab): PageResult {
     const yamlBox = h("pre", { class: "yaml" });
     const testHost = h("div");
     const formHost = h("div", { class: "adapter-form" });
+    let tokenAgent = "my-agent";
+    let tokenReplyUrl = "";
+    let issuedToken = "";
 
     function currentManifest() {
       const command = state.command.trim();
@@ -267,6 +273,7 @@ export function renderAdapters(ctx: PageContext, tab: AdapterTab): PageResult {
         id: slug(state.name || "adapter"),
         name: state.name || "未命名接入",
         source: { kind: state.kind, path: state.path || "~/", format: state.format },
+        ...(state.format === "sqlite" ? { query: state.query } : {}),
         push: { method: state.push },
         // 没写回复命令就是只读，别硬报「命令不能为空」
         reply: { mode: command ? "command" : "none", command },
@@ -283,6 +290,7 @@ export function renderAdapters(ctx: PageContext, tab: AdapterTab): PageResult {
         ["  kind", manifest.source.kind],
         ["  path", manifest.source.path],
         ["  format", manifest.source.format],
+        ...(state.format === "sqlite" ? [["  query", state.query || "select …"] as [string, string]] : []),
         ["push:", ""],
         ["  method", manifest.push.method],
         ["reply:", ""],
@@ -341,8 +349,21 @@ export function renderAdapters(ctx: PageContext, tab: AdapterTab): PageResult {
     }
     formatSelect.addEventListener("change", () => {
       state.format = (formatSelect as HTMLSelectElement).value;
+      queryField.style.display = state.format === "sqlite" ? "" : "none";
       paintYaml();
     });
+
+    const queryInput = h("input", {
+      class: "input mono",
+      placeholder: "select id as session_id, title, cwd, last_ts from sessions",
+      value: state.query,
+    });
+    queryInput.addEventListener("input", () => {
+      state.query = (queryInput as HTMLInputElement).value;
+      paintYaml();
+    });
+    const queryField = field("SQL 查询（SQLite 必填）", queryInput, "列名用 session_id / title / cwd / model / last_ts");
+    queryField.style.display = state.format === "sqlite" ? "" : "none";
 
     const pushSelect = h("select", { class: "select" });
     for (const [label, value] of Object.entries(PUSH_VALUE)) {
@@ -467,24 +488,12 @@ export function renderAdapters(ctx: PageContext, tab: AdapterTab): PageResult {
 
     function paintForm() {
       clear(formHost);
-      if (state.method !== "manifest") {
-        formHost.append(
-          h(
-            "div",
-            { style: "grid-column:1 / -1" },
-            h(
-              "div",
-              { class: "list-card", style: "padding:16px" },
-              h(
-                "div",
-                { class: "note", style: "line-height:1.8" },
-                state.method === "events"
-                  ? `让 agent 在需要你决定的时候往 http://${location.host}/hook/generic 发一条 JSON，Homing 就会把它变成一条收件箱事件。具体字段和鉴权等 relay 的 /api/ingest 接上后一起放开。`
-                  : "脚本适配器：写一个可执行脚本，按约定输出事件 JSON；Homing 定时跑它，把输出当成事件。加载器由 relay 侧实现，这一版先把入口放这里。",
-              ),
-            ),
-          ),
-        );
+      if (state.method === "events") {
+        paintEvents();
+        return;
+      }
+      if (state.method === "script") {
+        paintScript();
         return;
       }
 
@@ -496,6 +505,7 @@ export function renderAdapters(ctx: PageContext, tab: AdapterTab): PageResult {
           field("会话来源", kindSelect),
           field("文件位置", pathInput, "目录或单个文件都行，支持 ~"),
           field("记录格式", formatSelect),
+          queryField,
           field("推送方式", pushSelect, "钩子最及时；没有钩子的 agent 用监听文件或轮询"),
           field("回复命令", commandInput, "留空就是只读；{session_id} 和 {text} 会被替换"),
           h(
@@ -510,13 +520,199 @@ export function renderAdapters(ctx: PageContext, tab: AdapterTab): PageResult {
       );
     }
 
+    function copySnippet(text: string, label: string) {
+      void navigator.clipboard
+        .writeText(text)
+        .then(() => toast(`已复制${label}`, "ok"))
+        .catch(() => toast("复制失败，请手动选中", "bad"));
+    }
+
+    function snippet(text: string): HTMLElement {
+      return h("pre", {
+        class: "yaml",
+        style: "white-space:pre-wrap;word-break:break-word;margin:8px 0 0",
+        text,
+      });
+    }
+
+    function paintEvents() {
+      const agentInput = h("input", {
+        class: "input mono",
+        placeholder: "my-agent",
+        value: tokenAgent,
+      });
+      agentInput.addEventListener("input", () => {
+        tokenAgent = (agentInput as HTMLInputElement).value.trim() || "my-agent";
+        issuedToken = "";
+        paintToken();
+      });
+
+      const replyUrlInput = h("input", {
+        class: "input mono",
+        placeholder: "可选：http://127.0.0.1:9001/homing-reply",
+        value: tokenReplyUrl,
+      });
+      replyUrlInput.addEventListener("input", () => {
+        tokenReplyUrl = (replyUrlInput as HTMLInputElement).value.trim();
+        issuedToken = "";
+        paintToken();
+      });
+
+      const tokenHost = h("div");
+      const tokenButton = button("生成上报令牌", {
+        small: true,
+        iconSvg: icons.key,
+        onClick: async () => {
+          tokenButton.disabled = true;
+          try {
+            const result = await endpoints.issueIngestToken(tokenAgent, tokenReplyUrl);
+            issuedToken = result.token;
+            paintToken();
+            toast("令牌已生成，只显示这一次", "ok", 6000);
+          } catch (err) {
+            reportError(err, "生成令牌失败");
+          } finally {
+            tokenButton.disabled = false;
+          }
+        },
+      });
+
+      function ingestCurl() {
+        return `curl -sX POST http://${location.host}/api/ingest \\
+  -H 'Authorization: Bearer ${issuedToken || "hmg_…"}' \\
+  -H 'Content-Type: application/json' \\
+  -d '{"agent":"${tokenAgent}","session_id":"demo-session-1",
+       "kind":"needs_reply","title":"等待确认",
+       "text":"要现在发布吗？","cwd":"/tmp/demo-project"}'`;
+      }
+
+      function hookCurl() {
+        return `curl -sX POST http://${location.host}/hook/generic \\
+  -H 'Content-Type: application/json' \\
+  -d '{"source":"${tokenAgent}","kind":"done","session_id":"demo-session-1",
+       "title":"任务完成","text":"构建通过","cwd":"/tmp/demo-project"}'`;
+      }
+
+      function paintToken() {
+        clear(tokenHost);
+        if (!issuedToken) {
+          tokenHost.append(
+            h("div", { class: "hint", text: "令牌只显示一次；事件上报用 Bearer，通用钩子不需要令牌。" }),
+          );
+          return;
+        }
+        const tokenCode = h("code", { class: "mono", text: issuedToken });
+        tokenHost.append(
+          h(
+            "div",
+            { class: "test-result" },
+            h("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap" },
+              h("span", { text: "上报令牌：" }),
+              tokenCode,
+              button("复制令牌", {
+                small: true,
+                variant: "quiet",
+                iconSvg: icons.copy,
+                onClick: () => copySnippet(issuedToken, "令牌"),
+              }),
+            ),
+            h("div", { class: "hint", text: "换 agent 就重新生成；旧的同名令牌会被替换。" }),
+          ),
+        );
+      }
+
+      const ingestBox = snippet(ingestCurl());
+      const hookBox = snippet(hookCurl());
+      formHost.append(
+        h(
+          "div",
+          { style: "grid-column:1 / -1;display:grid;gap:14px" },
+          h(
+            "div",
+            { class: "list-card", style: "padding:16px" },
+            h("div", { class: "yaml-head" }, h("span", { text: "方式 A · 通用钩子（最实时）" }), tag("无需令牌", "ok")),
+            h("div", { class: "note", style: "line-height:1.8;margin-top:8px" },
+              `把下面这条命令放进 agent 的 Stop / Notification / 完成回调里。Homing 只接受本机 127.0.0.1 来源；source 可以是任意小写 id。`,
+            ),
+            hookBox,
+            h("div", { style: "display:flex;gap:8px;margin-top:10px" },
+              button("复制钩子示例", { small: true, iconSvg: icons.copy, onClick: () => copySnippet(hookCurl(), "钩子示例") }),
+            ),
+          ),
+          h(
+            "div",
+            { class: "list-card", style: "padding:16px" },
+            h("div", { class: "yaml-head" }, h("span", { text: "方式 B · 带令牌事件上报" }), tag("可跨进程", "plain")),
+            h("div", { class: "note", style: "line-height:1.8;margin-top:8px" },
+              "适合能发 HTTP、但拿不到本机 cookie 的 agent。令牌绑定一个 agent id；填了回调地址后，手机回复会 POST 回该 agent。",
+            ),
+            h("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px" },
+              agentInput,
+              tokenButton,
+            ),
+            h("div", { style: "margin-top:8px" }, replyUrlInput),
+            h("div", { class: "hint", text: "回调可选；留空就是只读上报。回调 body 为 {agent, session_id, text}。" }),
+            tokenHost,
+            ingestBox,
+            h("div", { style: "display:flex;gap:8px;margin-top:10px" },
+              button("复制上报示例", { small: true, iconSvg: icons.copy, onClick: () => copySnippet(ingestCurl(), "上报示例") }),
+            ),
+          ),
+        ),
+      );
+      paintToken();
+    }
+
+    function paintScript() {
+      const scriptsDir = data.dirs?.scripts || "~/.homing/adapters";
+      const example = `// 保存到 ${scriptsDir}/my-agent.mjs
+export const meta = { reads: ["~/myagent/sessions"] };
+export const id = "my-agent";
+export const name = "My Agent";
+export const capabilities = { sessions: true, reply: false };
+export const pushSignal = "poll";
+
+export async function detect() {
+  return { installed: true, version: "1.0.0" };
+}
+
+export async function listSessions({ limit }) {
+  // 返回 [{ session_id, title, last_ts, cwd }]
+  return [];
+}
+
+export async function readItems(sessionId, { limit }) {
+  // 返回 [{ role, text, at }]
+  return [];
+}`;
+      formHost.append(
+        h(
+          "div",
+          { style: "grid-column:1 / -1" },
+          h(
+            "div",
+            { class: "list-card", style: "padding:16px" },
+            h("div", { class: "yaml-head" }, h("span", { text: "脚本适配器" }), h("span", { class: "mono", text: scriptsDir })),
+            h("div", { class: "note", style: "line-height:1.8;margin-top:8px" },
+              "把 .mjs 放进上面的目录，Homing 会用 node（没有就 bun）在隔离子进程里调用它。它只拿到声明过的读路径，回复命令不走 shell。",
+            ),
+            snippet(example),
+            h("div", { style: "display:flex;gap:8px;margin-top:10px" },
+              button("复制脚本模板", { small: true, iconSvg: icons.copy, onClick: () => copySnippet(example, "脚本模板") }),
+            ),
+            h("div", { class: "hint", text: "网络隔离目前是 HOMING_ADAPTER_NO_NET=1 约定，不是 OS 强制；需要联网的适配器请显式声明。" }),
+          ),
+        ),
+      );
+    }
+
     host.append(
       methods,
       formHost,
       h(
         "div",
         { class: "note", style: "margin-top:14px" },
-        "自定义接入的后端（清单解析、/api/ingest、脚本适配器加载）由 relay 那边接上；现在这三个接口是占位，清单文件会真的写进 ~/.homing/agents。",
+        "清单会写到 ~/.homing/agents；脚本适配器从 ~/.homing/adapters 加载；事件上报走本机 /hook/generic 或带令牌的 /api/ingest。",
       ),
     );
 
