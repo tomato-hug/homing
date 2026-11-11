@@ -183,6 +183,22 @@ func (s *IngestStore) Lookup(token string) *IngestToken {
 	return nil
 }
 
+// ReplyChannel returns the live token registered for agentID when it has a
+// callback URL. It deliberately ignores revoked tokens and read-only agents.
+func (s *IngestStore) ReplyChannel(agentID string) *IngestToken {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f := s.load()
+	for i := range f.Agents {
+		token := f.Agents[i]
+		if token.Agent == agentID && token.RevokedAt == nil &&
+			token.Reply != nil && token.Reply.URL != "" {
+			return &token
+		}
+	}
+	return nil
+}
+
 // Touch records that the agent pushed something.
 func (s *IngestStore) Touch(agentID string) {
 	s.mu.Lock()

@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 
+	"github.com/tomato-hug/homing/internal/api"
 	"github.com/tomato-hug/homing/internal/protocol"
 )
 
@@ -42,6 +44,13 @@ var allowedRPCMethods = map[string]bool{
 	http.MethodPatch:  true,
 	http.MethodPut:    true,
 	http.MethodDelete: true,
+}
+
+const maxCloudUploadBytes = 64 * 1024
+
+type cloudUploadBody struct {
+	DataBase64  string `json:"data_base64"`
+	ContentType string `json:"content_type,omitempty"`
 }
 
 // dispatchRPC runs one decrypted rpc payload against the local Homing HTTP
@@ -85,17 +94,23 @@ func dispatchRPC(ctx context.Context, handler http.Handler, payload []byte) []by
 		})
 	}
 
-	var body *bytes.Reader
-	if len(request.Body) > 0 && string(request.Body) != "null" {
-		body = bytes.NewReader(request.Body)
-	} else {
-		body = bytes.NewReader(nil)
+	body, contentType, err := rpcRequestBody(request, method)
+	if err != nil {
+		return mustJSON(rpcResult{
+			Type:   "rpc_result",
+			RID:    request.RID,
+			Status: http.StatusRequestEntityTooLarge,
+			Body:   map[string]any{"ok": false, "error": err.Error()},
+		})
 	}
 	httpRequest := httptest.NewRequestWithContext(ctx, method, request.Path, body)
-	if body.Len() > 0 {
+	if contentType != "" {
+		httpRequest.Header.Set("Content-Type", contentType)
+	} else if body.Len() > 0 {
 		httpRequest.Header.Set("Content-Type", "application/json")
 	}
 	httpRequest.Header.Set("X-Homing-RPC", "1")
+	httpRequest = api.WithTrustedLocalRPC(httpRequest)
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httpRequest)
 
@@ -109,6 +124,36 @@ func dispatchRPC(ctx context.Context, handler http.Handler, payload []byte) []by
 		Status: recorder.Code,
 		Body:   decoded,
 	})
+}
+
+func rpcRequestBody(
+	request rpcRequest,
+	method string,
+) (*bytes.Reader, string, error) {
+	if len(request.Body) == 0 || string(request.Body) == "null" {
+		return bytes.NewReader(nil), "", nil
+	}
+	if method != http.MethodPost || request.Path != "/api/upload" &&
+		!strings.HasPrefix(request.Path, "/api/upload?") {
+		return bytes.NewReader(request.Body), "application/json", nil
+	}
+	var upload cloudUploadBody
+	if json.Unmarshal(request.Body, &upload) == nil &&
+		upload.DataBase64 != "" {
+		data, err := base64.StdEncoding.DecodeString(upload.DataBase64)
+		if err != nil {
+			return nil, "", fmt.Errorf("invalid_base64")
+		}
+		if len(data) > maxCloudUploadBytes {
+			return nil, "", fmt.Errorf("cloud_upload_too_large")
+		}
+		contentType := strings.TrimSpace(upload.ContentType)
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		return bytes.NewReader(data), contentType, nil
+	}
+	return bytes.NewReader(request.Body), "application/json", nil
 }
 
 func mustJSON(value any) []byte {

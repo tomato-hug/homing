@@ -25,6 +25,22 @@ func (d *Deps) Store() (*store.Store, error) {
 	return d.storeValue, nil
 }
 
+// Close releases the store and the optional full-text index. The service
+// command calls it after the HTTP server has drained, so SQLite checkpoints its
+// WAL instead of relying on process teardown.
+func (d *Deps) Close() error {
+	d.searchMu.Lock()
+	if d.searchValue != nil {
+		_ = d.searchValue.Close()
+		d.searchValue = nil
+	}
+	d.searchMu.Unlock()
+	if d.storeValue != nil {
+		return d.storeValue.Close()
+	}
+	return nil
+}
+
 // SessionMetaFor builds the session_meta object Node stores on each event:
 // title, workspace, project, branch, model, effort, permission mode, context
 // ring and the agent's native state. Absent values are nil, which marshals to

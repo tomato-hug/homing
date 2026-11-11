@@ -27,15 +27,19 @@ func (s *Service) IngestStoreEvent(ev store.Event) (store.Event, error) {
 		return stored, err
 	}
 	api.Publish(stored)
+	for _, reply := range s.store.ConfirmQueuedRepliesForAgentEvent(stored) {
+		api.PublishReplyStatus(reply)
+	}
 	s.notifier.OnEvent(notify.Event{
-		ID:        stored.ID,
-		Source:    stored.Source,
-		SessionID: stored.SessionID,
-		Kind:      stored.Kind,
-		Title:     stored.Title,
-		Text:      stored.Text,
-		Cwd:       stored.Cwd,
-		Ts:        stored.Ts,
+		ID:         stored.ID,
+		Source:     stored.Source,
+		SessionID:  stored.SessionID,
+		Kind:       stored.Kind,
+		DispatchID: sessionMetaString(stored.SessionMeta, "dispatch_id"),
+		Title:      stored.Title,
+		Text:       stored.Text,
+		Cwd:        stored.Cwd,
+		Ts:         stored.Ts,
 	})
 	return stored, nil
 }

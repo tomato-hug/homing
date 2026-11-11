@@ -618,12 +618,18 @@ func (s *Server) handlePairDecision(conn *clientConn, message map[string]any, ac
 			return err
 		}
 		conn.send(s.ctx, map[string]any{"t": "pair.ok", "client_id": clientID})
-		s.sendTo(pending.clientID, map[string]any{
+		accepted := map[string]any{
 			"t":         "pair.accepted",
 			"host_id":   pending.hostID,
 			"host_pub":  pending.hostPub,
 			"client_id": pending.clientID,
-		})
+		}
+		// The host may advertise its direct LAN endpoint. This is optional for
+		// older hosts and older phones simply ignore it.
+		if urls, exists := message["lan_urls"]; exists {
+			accepted["lan_urls"] = urls
+		}
+		s.sendTo(pending.clientID, accepted)
 	} else {
 		conn.send(s.ctx, map[string]any{"t": "pair.rejected", "client_id": clientID})
 		s.sendTo(pending.clientID, map[string]any{

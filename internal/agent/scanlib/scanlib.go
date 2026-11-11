@@ -302,7 +302,11 @@ func GitBranch(cwd string) string {
 // Title is the display title plus where it came from (agent / custom /
 // first_prompt / project / fallback), same order as the Node helper.
 func Title(source, sessionID, nativeTitle, nativeTitleSource, firstPrompt, cwd string) (string, string) {
-	if clean := Truncate(strings.TrimSpace(nativeTitle), 200); clean != "" {
+	title := nativeTitle
+	if nativeTitleSource == "" || nativeTitleSource == "agent" {
+		title = cleanNativeTitle(nativeTitle)
+	}
+	if clean := Truncate(title, 200); clean != "" {
 		if nativeTitleSource == "" {
 			nativeTitleSource = "agent"
 		}
@@ -324,6 +328,44 @@ func Title(source, sessionID, nativeTitle, nativeTitleSource, firstPrompt, cwd s
 		short = "unknown"
 	}
 	return source + "-" + short, "fallback"
+}
+
+var markdownHeadingPrefix = regexp.MustCompile(`^#{1,6}\s+`)
+
+var nativeTitlePrefixes = []string{
+	"会话标题：", "会话标题:",
+	"對話標題：", "對話標題:",
+	"标题：", "标题:",
+	"標題：", "標題:",
+	"conversation title:", "session title:", "title:",
+}
+
+// cleanNativeTitle removes wrappers that agents themselves add to a generated
+// title. User-defined Homing titles are applied later and never pass here.
+func cleanNativeTitle(value string) string {
+	title := strings.TrimSpace(value)
+	for {
+		trimmed := strings.TrimSpace(markdownHeadingPrefix.ReplaceAllString(title, ""))
+		if trimmed == title {
+			break
+		}
+		title = trimmed
+	}
+	for {
+		lower := strings.ToLower(title)
+		matched := false
+		for _, prefix := range nativeTitlePrefixes {
+			if strings.HasPrefix(lower, prefix) {
+				title = strings.TrimSpace(title[len(prefix):])
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			break
+		}
+	}
+	return title
 }
 
 // Status derives the session status word from the last event and native state.

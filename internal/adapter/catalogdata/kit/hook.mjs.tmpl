@@ -1,0 +1,94 @@
+#!/usr/bin/env node
+// {{.Name}} -> Homing generic event hook.
+// Reads stdin or command-line text, maps common lifecycle fields, and posts to
+// the loopback service. Every failure exits 0 so notifications never block the
+// agent itself.
+
+import { request } from "node:http";
+
+const agent = "{{.ID}}";
+const endpoint = new URL(
+  process.env.HOMING_HOOK_URL || "http://127.0.0.1:18788/hook/generic",
+);
+
+function firstString(source, keys) {
+  for (const key of keys) {
+    if (typeof source?.[key] === "string" && source[key].trim()) return source[key];
+  }
+  return "";
+}
+
+function kindFromEvent(body) {
+  const event = firstString(body, ["hook_event_name", "event", "type", "eventName"]).toLowerCase();
+  if (/(stop|complete|idle|done|finish)/.test(event)) return "reply";
+  if (/(permission|approval)/.test(event)) return "permission";
+  if (/(error|fail)/.test(event)) return "error";
+  if (/(input|notify|notification)/.test(event)) return "needs_input";
+  return "";
+}
+
+let raw = "";
+for await (const chunk of process.stdin) raw += chunk;
+const args = process.argv.slice(2).join(" ").trim();
+
+let body;
+if (raw.trim()) {
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    body = { text: raw.trim() };
+  }
+} else {
+  body = {};
+}
+if (!body || typeof body !== "object" || Array.isArray(body)) body = { text: String(body) };
+
+if (!body.source && !body.agent) body.source = agent;
+if (!body.kind) body.kind = process.env.HOMING_KIND || kindFromEvent(body) || "message";
+if (!body.session_id) {
+  body.session_id =
+    firstString(body, [
+      "sessionId",
+      "thread_id",
+      "thread-id",
+      "conversation_id",
+      "conversationId",
+      "id",
+    ]) ||
+    process.env.HOMING_SESSION_ID ||
+    agent;
+}
+if (!body.cwd) body.cwd = firstString(body, ["workdir", "working_directory", "project_dir", "directory"]);
+if (!body.title) body.title = firstString(body, ["name", "title"]) || "{{.Name}} 发来一条通知";
+if (!body.text) {
+  body.text =
+    firstString(body, ["last_assistant_message", "last-assistant-message", "message", "output"]) ||
+    args;
+}
+
+try {
+  const payload = Buffer.from(JSON.stringify(body), "utf8");
+  const target = request(
+    {
+      protocol: endpoint.protocol,
+      hostname: endpoint.hostname,
+      port: endpoint.port || 80,
+      path: `${endpoint.pathname}${endpoint.search}`,
+      method: "POST",
+      timeout: 2000,
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": payload.length,
+        "X-Homing-Agent": agent,
+      },
+    },
+    (response) => response.resume(),
+  );
+  target.on("timeout", () => target.destroy());
+  target.on("error", () => {});
+  target.end(payload);
+} catch {
+  // A notification is best-effort.
+}
+
+process.exitCode = 0;

@@ -46,9 +46,50 @@ type Detection struct {
 
 // Capabilities is published as-is in GET /api/agents.
 type Capabilities struct {
-	Reply    bool `json:"reply"`
-	Sessions bool `json:"sessions"`
-	Models   bool `json:"models"`
+	// Core keeps the legacy /api/agents shape for the three first-party
+	// integrations. It is metadata only and never serialized directly.
+	Core            bool     `json:"-"`
+	Reply           bool     `json:"reply"`
+	Sessions        bool     `json:"sessions"`
+	Models          bool     `json:"models"`
+	NewSession      bool     `json:"new_session,omitempty"`
+	NewSessionAny   bool     `json:"-"`
+	Stop            bool     `json:"stop,omitempty"`
+	Approve         bool     `json:"approve,omitempty"`
+	Live            bool     `json:"live,omitempty"`
+	Dispatch        bool     `json:"dispatch,omitempty"`
+	SwitchModel     bool     `json:"switch_model,omitempty"`
+	Effort          bool     `json:"effort,omitempty"`
+	PermissionModes []string `json:"permission_modes,omitempty"`
+}
+
+// StartRequest is the provider-neutral description of a new session. Agents
+// map the fields they understand; unsupported values are rejected by the API
+// before they reach the vendor CLI.
+type StartRequest struct {
+	Cwd            string
+	Text           string
+	Files          []string
+	Model          string
+	Effort         string
+	PermissionMode string
+	Origin         string
+}
+
+// StartResult reports a freshly launched session. RequestID is used when the
+// agent cannot name the session until its first hook arrives.
+type StartResult struct {
+	SessionID string
+	RequestID string
+	Status    string
+	Message   string
+}
+
+// PermissionDecision is the provider-neutral answer to a permission request.
+// OptionID is used by ACP when the agent offered more than allow/deny.
+type PermissionDecision struct {
+	Allow    bool
+	OptionID string
 }
 
 // Session is one row of GET /api/sessions before the API layer adds governance
@@ -59,6 +100,10 @@ type Session struct {
 	Title       string `json:"title"`
 	TitleSource string `json:"title_source"`
 	LastTS      string `json:"last_ts"`
+	// LastUserTS is the last real user-authored turn when the scanner can find
+	// it. The home "resume" zone prefers it over LastTS so an agent's later
+	// autonomous progress does not outrank a session the user just touched.
+	LastUserTS  string `json:"last_user_ts,omitempty"`
 	NativeState string `json:"native_state"`
 	Cwd         string `json:"cwd,omitempty"`
 	Model       string `json:"model,omitempty"`
@@ -76,6 +121,7 @@ type Meta struct {
 	Model          string `json:"model,omitempty"`
 	Effort         string `json:"effort,omitempty"`
 	PermissionMode string `json:"permission_mode,omitempty"`
+	LastUserTS     string `json:"last_user_ts,omitempty"`
 	// Workspace overrides the workspace chip derived from cwd (WorkBuddy reports
 	// the space name, which is not simply the parent directory).
 	Workspace string `json:"workspace,omitempty"`
@@ -94,6 +140,7 @@ type Item struct {
 	Seq      int        `json:"seq"`
 	Type     string     `json:"type"`
 	Role     string     `json:"role"`
+	Partial  bool       `json:"partial,omitempty"`
 	Text     string     `json:"text,omitempty"`
 	Model    string     `json:"model,omitempty"`
 	Command  string     `json:"command,omitempty"`
@@ -102,6 +149,9 @@ type Item struct {
 	Files    []ItemFile `json:"files,omitempty"`
 	Plan     []ItemPlan `json:"plan,omitempty"`
 	Error    string     `json:"error,omitempty"`
+	// Truncated is set on live SSE frames when a very large diff or output had
+	// to be shortened. The full item remains available from the items endpoint.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // ItemTool is the tool block of a tool_call / file_change entry.
@@ -135,12 +185,15 @@ type Model struct {
 
 // ReplyOpts carries what the phone sent along with a reply.
 type ReplyOpts struct {
-	Model  string
-	Images []string // local file paths of uploaded attachments
+	Model          string
+	PermissionMode string
+	Images         []string // local file paths of uploaded attachments
+	ReplyID        int64    // Homing reply id, used to cancel a queued message
 }
 
-// Event is something that happened in an agent session. Kind uses the same words
-// as the Node relay's events: message, needs_reply, approval, done, error, turn.
+// Event is something that happened in an agent session. The event log uses the
+// relay's internal vocabulary (needs_input, permission, done, error, message);
+// public ingest/hook aliases are canonicalised before storage.
 type Event struct {
 	Source    string         `json:"source"`
 	SessionID string         `json:"session_id"`
@@ -174,6 +227,27 @@ type (
 	Replier interface {
 		Reply(ctx context.Context, sessionID, text string, opts ReplyOpts) error
 	}
+	// SessionStarter creates an independent session. It is deliberately
+	// separate from Replier: remote control of an existing transcript and
+	// launching a new process have different safety requirements.
+	SessionStarter interface {
+		StartSession(ctx context.Context, req StartRequest) (StartResult, error)
+	}
+	// Stopper stops a turn or process that Homing owns. Agents must return
+	// ErrUnsupported when the session was not launched by Homing.
+	Stopper interface {
+		StopSession(ctx context.Context, sessionID string) error
+	}
+	// PermissionResponder answers a permission request without going through
+	// the legacy Stop-hook hold. ACP implementations use it for option IDs.
+	PermissionResponder interface {
+		RespondPermission(ctx context.Context, sessionID string, eventID int64, decision PermissionDecision) error
+	}
+	// HookApprover reports the agent settings file and endpoint that must be
+	// configured before permission events can reach Homing.
+	HookApprover interface {
+		ApprovalHook() (settingsPath, endpoint string)
+	}
 	ModelLister interface {
 		Models(ctx context.Context) (models []Model, defaultModel string, err error)
 	}
@@ -183,6 +257,20 @@ type (
 		Watch(ctx context.Context, emit func(Event)) error
 	}
 )
+
+// EffectiveCapabilities overlays optional interface implementations onto the
+// static declaration. This keeps /api/agents truthful even when a provider
+// agent forgets to fill every redundant flag.
+func EffectiveCapabilities(a Agent) Capabilities {
+	caps := a.Capabilities()
+	// Trust an integration that explicitly reports sessions=false. A drive-only
+	// manifest still implements the optional ItemReader method set, but it has
+	// no verified transcript source and must not claim L1.
+	if a.PushSignal() != PushPoll {
+		caps.Live = true
+	}
+	return caps
+}
 
 // Provider returns agents that are only known at runtime (custom manifests,
 // script adapters). It is called on every All() so edits on disk show up.

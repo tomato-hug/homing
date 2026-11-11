@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,8 +20,9 @@ import (
 	"sync"
 	"time"
 
-	claudeagent "github.com/tomato-hug/homing/internal/agent/claude"
+	"github.com/tomato-hug/homing/internal/agent"
 	"github.com/tomato-hug/homing/internal/api"
+	"github.com/tomato-hug/homing/internal/driver"
 	filepaths "github.com/tomato-hug/homing/internal/files"
 	"github.com/tomato-hug/homing/internal/store"
 )
@@ -43,14 +45,33 @@ var launches = struct {
 }
 
 func newSession(d *api.Deps, w http.ResponseWriter, r *http.Request) {
+	if !requireDrive(d, w, r) {
+		return
+	}
+	if !d.CheckRate(w, r, "sessions_new", 20, time.Minute) {
+		return
+	}
 	body, _, err := readJSON(r)
 	if err != nil {
 		api.WriteJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	source := strings.TrimSpace(stringField(body, "source"))
-	if source != "codex" && source != "claude" && source != "workbuddy" {
-		api.WriteJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "source 只能是 codex、workbuddy 或 claude"})
+	source := strings.ToLower(strings.TrimSpace(stringField(body, "source")))
+	if !validHookSource(source) {
+		api.WriteJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "source 只能是已接入的 agent id"})
+		return
+	}
+	target, exists := agent.Get(r.Context(), source)
+	if !exists {
+		api.WriteJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "未知 Agent"})
+		return
+	}
+	if !effectiveCaps(target).NewSession {
+		message := "这个 Agent 目前只能读取或回复，还没有可安全新建独立会话的驱动"
+		api.WriteJSON(w, http.StatusConflict, map[string]any{
+			"ok": false, "error": message, "message": message,
+			"code": "agent_not_driveable",
+		})
 		return
 	}
 	cwd := strings.TrimSpace(stringField(body, "cwd"))
@@ -79,19 +100,66 @@ func newSession(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 	}
 	files := filepaths.NormalizeFiles(stringList(body["files"]))
 	finalText := filepaths.DeliveryText(text, files)
+	model := truncateRunes(strings.TrimSpace(stringField(body, "model")), 80)
+	effort := truncateRunes(strings.TrimSpace(stringField(body, "effort")), 32)
+	permissionMode := truncateRunes(
+		strings.ToLower(strings.TrimSpace(stringField(body, "permission_mode"))), 32,
+	)
+	if !api.PermissionModeAllowed(source, permissionMode) {
+		api.WriteJSON(w, http.StatusBadRequest, map[string]any{
+			"ok": false, "error": "permission_mode 不是该 Agent 支持的模式",
+			"code": "permission_mode_unsupported",
+		})
+		return
+	}
 
-	var result map[string]any
-	switch source {
-	case "codex":
-		result = startCodexSession(absolute, finalText)
-	case "workbuddy":
-		result = startWorkbuddySession(absolute, finalText)
-	default:
-		result = startClaudeSession(absolute, finalText)
+	started, startErr := startAgentSession(r.Context(), target, agent.StartRequest{
+		Cwd:            absolute,
+		Text:           finalText,
+		Files:          files,
+		Model:          model,
+		Effort:         effort,
+		PermissionMode: permissionMode,
+		Origin:         "phone",
+	})
+	if startErr != nil {
+		status := http.StatusBadGateway
+		code := "agent_start_failed"
+		switch {
+		case errors.Is(startErr, driver.ErrACPProcessLimit):
+			status = http.StatusTooManyRequests
+			code = "acp_process_limit"
+		case errors.Is(startErr, agent.ErrUnsupported):
+			status = http.StatusConflict
+			code = "agent_not_driveable"
+		}
+		api.WriteJSON(w, status, map[string]any{
+			"ok": false, "error": startErr.Error(), "code": code,
+		})
+		return
+	}
+	result := map[string]any{"ok": true, "status": firstNonEmpty(started.Status, "started")}
+	if started.SessionID != "" {
+		result["session_id"] = started.SessionID
+	} else {
+		result["session_id"] = nil
+	}
+	if started.RequestID != "" {
+		result["request_id"] = started.RequestID
+	}
+	if started.Message != "" {
+		result["warning"] = started.Message
 	}
 	result["cwd"] = absolute
+	if ok, _ := result["ok"].(bool); ok {
+		d.Audit(r, "new_session", map[string]any{
+			"target":     source,
+			"session_id": stringField(result, "session_id"),
+			"cwd":        absolute,
+		})
+	}
 	ok, _ := result["ok"].(bool)
-	if ok && stringField(result, "session_id") == "" {
+	if ok && stringField(result, "session_id") == "" && stringField(result, "request_id") == "" {
 		requestID := randomHex(8)
 		launches.mu.Lock()
 		launches.pending[requestID] = launchInfo{source: source, cwd: absolute, at: time.Now()}
@@ -106,9 +174,19 @@ func newSession(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 }
 
 func stopSession(d *api.Deps, w http.ResponseWriter, r *http.Request) {
+	if !requireDrive(d, w, r) {
+		return
+	}
 	sessionID := r.PathValue("id")
 	if sessionID == "" {
 		api.WriteJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "session_id 不能为空"})
+		return
+	}
+	d.Audit(r, "stop_session", map[string]any{"session_id": sessionID})
+	if via, stopped := stopRegisteredSession(r.Context(), d, sessionID); stopped {
+		api.WriteJSON(w, http.StatusOK, map[string]any{
+			"ok": true, "session_id": sessionID, "via": via,
+		})
 		return
 	}
 	launches.mu.Lock()
@@ -128,8 +206,8 @@ func stopSession(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 		api.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "session_id": sessionID, "via": "codex-exec"})
 		return
 	}
-	if claudeagent.Stop(sessionID) {
-		api.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "session_id": sessionID, "via": "claude-p"})
+	if driver.Default().Stop(sessionID) {
+		api.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "session_id": sessionID, "via": "acp"})
 		return
 	}
 	if hasACP {
@@ -145,12 +223,91 @@ func stopSession(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// stopManagedSession is the shared process/cancel path used by dispatch cancel.
+// It reports true when a process or ACP session was actually stopped.
+func stopManagedSession(sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	if _, stopped := stopRegisteredSession(context.Background(), nil, sessionID); stopped {
+		return true
+	}
+	launches.mu.Lock()
+	cmd := launches.procs[sessionID]
+	if cmd != nil {
+		delete(launches.procs, sessionID)
+	}
+	acp, hasACP := launches.acp[sessionID]
+	if hasACP {
+		delete(launches.acp, sessionID)
+	}
+	launches.mu.Unlock()
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Signal(os.Interrupt)
+		_ = cmd.Process.Kill()
+		return true
+	}
+	if driver.Default().Stop(sessionID) {
+		return true
+	}
+	if hasACP {
+		acpFire(acp.port, acp.connectionID, map[string]any{
+			"jsonrpc": "2.0", "id": 9, "method": "session/cancel",
+			"params": map[string]any{"sessionId": sessionID},
+		})
+		return true
+	}
+	return false
+}
+
+// stopRegisteredSession asks the owning Agent to stop the session. The API
+// passes Deps so it can resolve the source cheaply; dispatch cancellation has
+// no Deps and falls back to trying every registered Stopper.
+func stopRegisteredSession(ctx context.Context, d *api.Deps, sessionID string) (string, bool) {
+	if d != nil {
+		if source := d.SourceFor(ctx, sessionID); source != "" {
+			if a, ok := agent.Get(ctx, source); ok {
+				if stopper, supported := a.(agent.Stopper); supported {
+					if err := stopper.StopSession(ctx, sessionID); err == nil {
+						return a.Name(), true
+					}
+				}
+			}
+		}
+	}
+	for _, a := range agent.All(ctx) {
+		stopper, supported := a.(agent.Stopper)
+		if !supported {
+			continue
+		}
+		if err := stopper.StopSession(ctx, sessionID); err == nil {
+			return a.Name(), true
+		}
+	}
+	return "", false
+}
+
 func startCodexSession(cwd, text string) map[string]any {
+	return startCodexSessionWithOptions(cwd, text, "", "", "")
+}
+
+func startCodexSessionWithOptions(cwd, text, model, effort, permissionMode string) map[string]any {
 	binary := resolveBinary("codex")
 	if binary == "" {
 		return map[string]any{"ok": false, "error": "本机没有 codex 命令"}
 	}
-	cmd := exec.Command(binary, "exec", "--json", "--skip-git-repo-check", "-C", cwd, text)
+	args := []string{"exec", "--json", "--skip-git-repo-check", "-C", cwd}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	if effort != "" {
+		args = append(args, "-c", `model_reasoning_effort="`+effort+`"`)
+	}
+	if permissionMode == "read_only" || permissionMode == "plan" {
+		args = append(args, "--sandbox", "read-only")
+	}
+	args = append(args, text)
+	cmd := exec.Command(binary, args...)
 	cmd.Dir = cwd
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -222,23 +379,67 @@ func startCodexSession(cwd, text string) map[string]any {
 }
 
 func startClaudeSession(cwd, text string) map[string]any {
+	return startClaudeSessionWithOptions(cwd, text, "", "", "")
+}
+
+func startClaudeSessionWithOptions(cwd, text, model, effort, permissionMode string) map[string]any {
 	binary := resolveBinary("claude")
 	if binary == "" {
 		return map[string]any{"ok": false, "error": "本机没有 claude 命令"}
 	}
-	cmd := exec.Command(binary, "-p", text)
+	sessionID := ""
+	args := []string{"-p"}
+	if claudeSupportsSessionID(binary) {
+		sessionID = randomUUID()
+		args = append(args, "--session-id", sessionID)
+	}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	if effort != "" {
+		args = append(args, "--effort", effort)
+	}
+	switch permissionMode {
+	case "plan", "read_only":
+		args = append(args, "--permission-mode", "plan")
+	case "accept_edits", "accept-edits":
+		args = append(args, "--permission-mode", "acceptEdits")
+	case "auto":
+		args = append(args, "--permission-mode", "auto")
+	}
+	args = append(args, text)
+	cmd := exec.Command(binary, args...)
 	cmd.Dir = cwd
 	cmd.Stdout, cmd.Stderr = nil, nil
 	if err := cmd.Start(); err != nil {
 		return map[string]any{"ok": false, "error": err.Error()}
 	}
 	go cmd.Wait()
+	if sessionID != "" {
+		return map[string]any{"ok": true, "session_id": sessionID, "status": "started"}
+	}
 	return map[string]any{"ok": true, "session_id": nil, "status": "started"}
 }
+
+func claudeSupportsSessionID(binary string) bool {
+	if cached, ok := claudeSessionIDSupport.Load(binary); ok {
+		return cached.(bool)
+	}
+	out, err := exec.Command(binary, "--help").CombinedOutput()
+	if err != nil {
+		return false
+	}
+	supported := strings.Contains(string(out), "--session-id")
+	actual, _ := claudeSessionIDSupport.LoadOrStore(binary, supported)
+	return actual.(bool)
+}
+
+var claudeSessionIDSupport sync.Map
 
 func claimLaunch(d *api.Deps, event store.Event) {
 	requestID := ""
 	launches.mu.Lock()
+	var oldest time.Time
 	for id, launch := range launches.pending {
 		if launch.source != event.Source {
 			continue
@@ -248,14 +449,20 @@ func claimLaunch(d *api.Deps, event store.Event) {
 		if eventCwd != launchCwd {
 			continue
 		}
-		delete(launches.pending, id)
+		if requestID != "" && !launch.at.Before(oldest) {
+			continue
+		}
 		requestID = id
-		break
+		oldest = launch.at
+	}
+	if requestID != "" {
+		delete(launches.pending, requestID)
 	}
 	launches.mu.Unlock()
 	if requestID == "" {
 		return
 	}
+	bindDispatch(d, requestID, event)
 	go func() {
 		time.Sleep(300 * time.Millisecond)
 		payload := map[string]any{
@@ -272,6 +479,18 @@ func claimLaunch(d *api.Deps, event store.Event) {
 		}
 		api.PublishNamed("session", event.SessionID, payload)
 	}()
+}
+
+func bindDispatch(d *api.Deps, requestID string, event store.Event) {
+	s, err := d.Store()
+	if err != nil {
+		return
+	}
+	dispatch, ok := s.BindDispatchTarget(requestID, event.Source, event.SessionID)
+	if !ok {
+		return
+	}
+	publishDispatch(d, dispatch)
 }
 
 func resolveBinary(name string) string {
@@ -314,6 +533,15 @@ func randomHex(n int) string {
 		return strconv.FormatInt(time.Now().UnixNano(), 16)
 	}
 	return hex.EncodeToString(buf)
+}
+
+func randomUUID() string {
+	var buf [16]byte
+	_, _ = rand.Read(buf[:])
+	buf[6] = (buf[6] & 0x0f) | 0x40
+	buf[8] = (buf[8] & 0x3f) | 0x80
+	raw := hex.EncodeToString(buf[:])
+	return raw[0:8] + "-" + raw[8:12] + "-" + raw[12:16] + "-" + raw[16:20] + "-" + raw[20:32]
 }
 
 // ---- WorkBuddy ACP -------------------------------------------------------

@@ -234,7 +234,10 @@ func pairPeers(t *testing.T, host *testPeer, client *testPeer, clientIdentity te
 	waiting := client.next(t, func(message map[string]any) bool {
 		return message["t"] == "pair.waiting"
 	}, 2*time.Second)
-	host.send(t, map[string]any{"t": "pair.accept", "client_id": clientIdentity.deviceID})
+	host.send(t, map[string]any{
+		"t": "pair.accept", "client_id": clientIdentity.deviceID,
+		"lan_urls": []string{"ws://127.0.0.1:18787/v1/ws"},
+	})
 	accepted := client.next(t, func(message map[string]any) bool {
 		return message["t"] == "pair.accepted"
 	}, 2*time.Second)
@@ -305,6 +308,10 @@ func TestPairingThroughTokenAndCode(t *testing.T) {
 	codePair := pairPeers(t, host, client, clientIdentity, "code")
 	if got := stringField(codePair.accepted, "host_id"); got != hostIdentity.deviceID {
 		t.Fatalf("pair.accepted host_id = %q", got)
+	}
+	lanURLs, _ := codePair.accepted["lan_urls"].([]any)
+	if len(lanURLs) != 1 || lanURLs[0] != "ws://127.0.0.1:18787/v1/ws" {
+		t.Fatalf("pair.accepted lan_urls = %#v", codePair.accepted["lan_urls"])
 	}
 	paired, err = fixture.server.db.IsPaired(context.Background(), hostIdentity.deviceID, clientIdentity.deviceID)
 	if err != nil || !paired {

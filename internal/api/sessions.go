@@ -12,6 +12,7 @@ import (
 
 	"github.com/tomato-hug/homing/internal/agent"
 	"github.com/tomato-hug/homing/internal/agent/scanlib"
+	"github.com/tomato-hug/homing/internal/driver"
 	"github.com/tomato-hug/homing/internal/store"
 )
 
@@ -40,6 +41,7 @@ type Summary struct {
 	Status         string        `json:"status"`
 	Unread         int           `json:"unread"`
 	LastTS         *string       `json:"last_ts"`
+	LastUserTS     *string       `json:"last_user_ts,omitempty"`
 	LastPreview    *string       `json:"last_preview"`
 	EventCount     int           `json:"event_count"`
 	Effort         *string       `json:"effort"`
@@ -48,11 +50,35 @@ type Summary struct {
 	Running        bool          `json:"running"`
 	RunningSince   *string       `json:"running_since"`
 	Read           bool          `json:"read"`
+	SeenEventID    int64         `json:"seen_event_id"`
+	SeenAt         *string       `json:"seen_at,omitempty"`
 	Pinned         bool          `json:"pinned"`
 	Muted          bool          `json:"muted"`
 	Archived       bool          `json:"archived"`
+	RemindOnDone   bool          `json:"remind_on_done"`
 	IsTemp         bool          `json:"is_temp"`
 	IsEmpty        bool          `json:"is_empty"`
+	Collab         *CollabInfo   `json:"collab,omitempty"`
+}
+
+// CollabInfo is the parent/child relationship shown beside a session.
+type CollabInfo struct {
+	Role     string        `json:"role"`
+	Parent   *CollabParent `json:"parent,omitempty"`
+	Children []CollabChild `json:"children,omitempty"`
+}
+
+type CollabParent struct {
+	SessionID  string `json:"session_id"`
+	Source     string `json:"source"`
+	DispatchID string `json:"dispatch_id"`
+}
+
+type CollabChild struct {
+	DispatchID string `json:"dispatch_id"`
+	Agent      string `json:"agent"`
+	Status     string `json:"status"`
+	Preset     string `json:"preset,omitempty"`
 }
 
 // contextReporter is the optional capability an agent has when it can report the
@@ -76,6 +102,7 @@ type sessionMeta struct {
 	PermissionMode string
 	ContextUsage   *ContextUsage
 	NativeState    string
+	LastUserTS     string
 }
 
 // metaFor asks the agent for the session metadata and fills in the shared
@@ -92,6 +119,7 @@ func (d *Deps) metaFor(ctx context.Context, source, sessionID, cwdHint string) s
 		out.NativeTitle = m.NativeTitle
 		out.Effort = m.Effort
 		out.PermissionMode = m.PermissionMode
+		out.LastUserTS = m.LastUserTS
 		out.Workspace = m.Workspace
 		if reporter, ok := a.(contextReporter); ok {
 			if used, limit, ok := reporter.ContextUsage(sessionID); ok {
@@ -305,6 +333,7 @@ func (d *Deps) buildSummary(ctx context.Context, c candidate) (Summary, bool) {
 		Status:         scanlib.Status(lastKind, pending, lastTS, firstNonEmpty(nativeState, meta.NativeState), runningWindow),
 		Unread:         unread,
 		LastTS:         optional(lastTS),
+		LastUserTS:     optional(meta.LastUserTS),
 		LastPreview:    optional(lastPreview),
 		EventCount:     eventCount,
 		Effort:         optional(meta.Effort),
@@ -316,11 +345,61 @@ func (d *Deps) buildSummary(ctx context.Context, c candidate) (Summary, bool) {
 		summary.RunningSince = summary.LastTS
 	}
 	state := d.storeState(source, sessionID)
-	summary.Read, summary.Pinned, summary.Muted, summary.Archived =
-		state.Read, state.Pinned, state.Muted, state.Archived
+	summary.Read, summary.Pinned, summary.Muted, summary.Archived, summary.RemindOnDone =
+		state.Read, state.Pinned, state.Muted, state.Archived, state.RemindOnDone
+	summary.SeenEventID = state.SeenEventID
+	summary.SeenAt = optional(state.SeenAt)
+	if state.SeenAt != "" {
+		if s, ok := d.store(); ok {
+			unread := 0
+			for _, event := range s.Events() {
+				if event.Source == source && event.SessionID == sessionID && event.ID > state.SeenEventID {
+					unread++
+				}
+			}
+			summary.Unread = unread
+		}
+	}
+	if state.Title != "" {
+		summary.Title = state.Title
+		summary.TitleSource = "homing"
+	}
+	if s, ok := d.store(); ok {
+		summary.Collab = collabFor(s, source, sessionID)
+	}
 	summary.IsTemp = scanlib.TempCwd(deref(summary.Cwd))
 	summary.IsEmpty = d.isEmptySession(ctx, source, sessionID, summary)
 	return summary, true
+}
+
+func collabFor(s *store.Store, source, sessionID string) *CollabInfo {
+	if s == nil || sessionID == "" {
+		return nil
+	}
+	var info CollabInfo
+	for _, dispatch := range s.Dispatches() {
+		switch {
+		case dispatch.ParentSessionID == sessionID:
+			info.Role = "parent"
+			info.Children = append(info.Children, CollabChild{
+				DispatchID: dispatch.ID,
+				Agent:      dispatch.TargetAgent,
+				Status:     dispatch.Status,
+				Preset:     dispatch.Preset,
+			})
+		case dispatch.TargetSessionID == sessionID:
+			info.Role = "child"
+			info.Parent = &CollabParent{
+				SessionID:  dispatch.ParentSessionID,
+				Source:     dispatch.ParentSource,
+				DispatchID: dispatch.ID,
+			}
+		}
+	}
+	if info.Role == "" {
+		return nil
+	}
+	return &info
 }
 
 func (d *Deps) storeState(source, sessionID string) store.State {
@@ -397,6 +476,9 @@ func (d *Deps) sourceFor(ctx context.Context, sessionID string) string {
 	if sessionID == "" {
 		return ""
 	}
+	if managed := driver.Default().SessionAgent(sessionID); managed != "" {
+		return managed
+	}
 	if s, ok := d.store(); ok {
 		events := s.Events()
 		for i := len(events) - 1; i >= 0; i-- {
@@ -427,12 +509,15 @@ func init() {
 		mux.HandleFunc("GET /api/sessions/{id}", d.guard(d.handleSession))
 		mux.HandleFunc("PATCH /api/sessions/{id}", d.guard(d.handlePatchSession))
 		mux.HandleFunc("GET /api/sessions/{id}/items", d.guard(d.handleSessionItems))
+		mux.HandleFunc("GET /api/sessions/{id}/commands", d.guard(d.handleSessionCommands))
+		mux.HandleFunc("GET /api/sessions/{id}/export", d.guard(d.handleSessionExport))
+		mux.HandleFunc("GET /api/fs/complete", d.guard(d.handleFSComplete))
 	})
 }
 
 func (d *Deps) handleSessions(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
-	limit := clampInt(query.Get("limit"), 100, 1, 500)
+	limit := clampInt(query.Get("limit"), 100, 1, 2000)
 	source := query.Get("source")
 	if source == "all" {
 		source = ""
@@ -441,7 +526,7 @@ func (d *Deps) handleSessions(w http.ResponseWriter, r *http.Request) {
 	if status == "any" {
 		status = ""
 	}
-	sessions := d.summaries(ctxOf(r), limit, source, status)
+	sessions := d.summaries(ctxOf(r), 500, source, status)
 	if query.Get("include_empty") != "1" {
 		kept := sessions[:0]
 		for _, session := range sessions {
@@ -451,10 +536,43 @@ func (d *Deps) handleSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		sessions = kept
 	}
+	if query.Get("zone") == "earlier" {
+		home := d.buildHome(r)
+		excluded := map[string]bool{}
+		for _, item := range home.Attention {
+			excluded[item.Session.Source+":"+item.Session.SessionID] = true
+		}
+		for _, summary := range home.Resume {
+			excluded[summary.Source+":"+summary.SessionID] = true
+		}
+		kept := sessions[:0]
+		for _, session := range sessions {
+			if !excluded[session.Source+":"+session.SessionID] {
+				kept = append(kept, session)
+			}
+		}
+		sessions = kept
+	}
+	offset := 0
+	if raw := strings.TrimSpace(query.Get("cursor")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			offset = parsed
+		}
+	}
+	if offset >= len(sessions) {
+		sessions = []Summary{}
+	} else {
+		sessions = sessions[offset:]
+	}
+	nextCursor := any(nil)
+	if len(sessions) > limit {
+		nextCursor = strconv.Itoa(offset + limit)
+		sessions = sessions[:limit]
+	}
 	WriteJSON(w, http.StatusOK, map[string]any{
 		"sessions":     sessions,
 		"count":        len(sessions),
-		"next_cursor":  nil,
+		"next_cursor":  nextCursor,
 		"generated_at": nowISO(),
 	})
 }
@@ -479,13 +597,27 @@ func (d *Deps) handlePatchSession(w http.ResponseWriter, r *http.Request) {
 	}
 	body := readBody(r)
 	patch := map[string]bool{}
-	for _, field := range []string{"read", "pinned", "muted", "archived"} {
+	for _, field := range []string{"read", "pinned", "muted", "archived", "remind_on_done"} {
 		if value, present := body[field]; present {
 			patch[field] = value == true
 		}
 	}
-	if len(patch) == 0 {
-		WriteJSON(w, http.StatusBadRequest, map[string]any{"error": "body 需含 read / pinned / muted / archived 之一"})
+	var title *string
+	if raw, present := body["title"]; present {
+		value, ok := raw.(string)
+		if !ok {
+			WriteJSON(w, http.StatusBadRequest, map[string]any{"error": "title 必须是字符串"})
+			return
+		}
+		clean := strings.TrimSpace(value)
+		if len([]rune(clean)) > 120 {
+			WriteJSON(w, http.StatusBadRequest, map[string]any{"error": "title 不能超过 120 字"})
+			return
+		}
+		title = &clean
+	}
+	if len(patch) == 0 && title == nil {
+		WriteJSON(w, http.StatusBadRequest, map[string]any{"error": "body 需含 read / pinned / muted / archived / remind_on_done / title 之一"})
 		return
 	}
 	s, ok := d.store()
@@ -495,9 +627,12 @@ func (d *Deps) handlePatchSession(w http.ResponseWriter, r *http.Request) {
 	}
 	source := d.sourceFor(ctxOf(r), sessionID)
 	if source == "" {
+		source = driver.Default().SessionAgent(sessionID)
+	}
+	if source == "" {
 		source = "unknown"
 	}
-	state, err := s.PatchSession(source, sessionID, patch)
+	state, err := s.PatchSessionFields(source, sessionID, patch, title)
 	if err != nil {
 		d.Log.Error("patch session", "session", sessionID, "err", err)
 	}
@@ -522,8 +657,12 @@ func (d *Deps) handleSessionItems(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	limit := clampInt(r.URL.Query().Get("limit"), 200, 1, 1000)
+	limit := clampInt(r.URL.Query().Get("limit"), 200, 1, 2000)
+	includeReasoning := queryBool(r, "include_reasoning")
 	source := d.sourceFor(ctxOf(r), sessionID)
+	if source == "" {
+		source = driver.Default().SessionAgent(sessionID)
+	}
 	if source == "" {
 		WriteJSON(w, http.StatusOK, map[string]any{
 			"session_id": sessionID, "source": nil, "count": 0,
@@ -541,6 +680,20 @@ func (d *Deps) handleSessionItems(w http.ResponseWriter, r *http.Request) {
 	}
 	reader, ok := a.(agent.ItemReader)
 	if !ok {
+		items := driver.Default().Items(sessionID, limit)
+		if len(items) > 0 {
+			items = filterItemsAfter(items, r.URL.Query().Get("after_seq"))
+			items = filterReasoningItems(items, includeReasoning)
+			WriteJSON(w, http.StatusOK, map[string]any{
+				"session_id": sessionID,
+				"source":     source,
+				"count":      len(items),
+				"items":      items,
+				"turns":      []any{},
+				"reason":     nil,
+			})
+			return
+		}
 		WriteJSON(w, http.StatusOK, map[string]any{
 			"session_id": sessionID, "source": source, "count": 0,
 			"items": []any{}, "turns": []any{}, "reason": "该来源的对话条目还没在 Go 版里解析",
@@ -549,11 +702,29 @@ func (d *Deps) handleSessionItems(w http.ResponseWriter, r *http.Request) {
 	}
 	items, err := reader.ReadItems(ctxOf(r), sessionID, limit)
 	if err != nil {
+		fallback := driver.Default().Items(sessionID, limit)
+		if len(fallback) > 0 {
+			fallback = filterItemsAfter(fallback, r.URL.Query().Get("after_seq"))
+			fallback = filterReasoningItems(fallback, includeReasoning)
+			WriteJSON(w, http.StatusOK, map[string]any{
+				"session_id": sessionID, "source": source, "count": len(fallback),
+				"items": fallback, "turns": []any{}, "reason": nil,
+			})
+			return
+		}
 		WriteJSON(w, http.StatusOK, map[string]any{
 			"session_id": sessionID, "source": source, "count": 0,
 			"items": []any{}, "turns": []any{}, "reason": "解析失败",
 		})
 		return
+	}
+	items = mergeDriverItems(items, driver.Default().Items(sessionID, limit))
+	items = filterItemsAfter(items, r.URL.Query().Get("after_seq"))
+	items = filterReasoningItems(items, includeReasoning)
+	if items == nil {
+		// Empty is a valid transcript. Keep the JSON contract an array so
+		// clients do not have to special-case Go's nil-slice encoding.
+		items = []agent.Item{}
 	}
 	WriteJSON(w, http.StatusOK, map[string]any{
 		"session_id": sessionID,
@@ -563,6 +734,74 @@ func (d *Deps) handleSessionItems(w http.ResponseWriter, r *http.Request) {
 		"turns":      []any{},
 		"reason":     nil,
 	})
+}
+
+func mergeDriverItems(native, live []agent.Item) []agent.Item {
+	if len(live) == 0 {
+		return native
+	}
+	seen := make(map[string]bool, len(native))
+	for _, item := range native {
+		if item.ID != "" {
+			seen[item.ID] = true
+		}
+	}
+	out := append([]agent.Item(nil), native...)
+	for _, item := range live {
+		if item.ID == "" || seen[item.ID] {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func filterItemsAfter(items []agent.Item, raw string) []agent.Item {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return items
+	}
+	after, err := strconv.Atoi(raw)
+	if err != nil {
+		return items
+	}
+	kept := make([]agent.Item, 0, len(items))
+	for _, item := range items {
+		if item.Seq > after {
+			kept = append(kept, item)
+		}
+	}
+	return kept
+}
+
+// queryBool accepts the usual explicit opt-in spellings. Anything else,
+// including a missing parameter, keeps the private default.
+func queryBool(r *http.Request, key string) bool {
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func filterReasoningItems(items []agent.Item, include bool) []agent.Item {
+	if include {
+		return items
+	}
+	kept := make([]agent.Item, 0, len(items))
+	for _, item := range items {
+		if itemIsReasoning(item) {
+			continue
+		}
+		kept = append(kept, item)
+	}
+	return kept
+}
+
+func itemIsReasoning(item agent.Item) bool {
+	return strings.EqualFold(item.Type, "reasoning") ||
+		strings.EqualFold(item.Type, "thinking")
 }
 
 // ---- small helpers -------------------------------------------------------

@@ -10,12 +10,13 @@ import (
 	"time"
 
 	"github.com/tomato-hug/homing/internal/agent"
+	"github.com/tomato-hug/homing/internal/driver"
 )
 
 // displayOrder is the order agent cards appear in. It is the Node relay's
 // registry order (relay/scanners/registry.mjs), kept here because the Go
 // compiler, not the import block, decides registration order.
-var displayOrder = []string{"codex", "claude", "workbuddy", "opencode", "zcode"}
+var displayOrder = []string{"codex", "claude", "workbuddy", "kimi", "opencode", "zcode"}
 
 // AgentModel is one selectable model in GET /api/agents. The keys are the Node
 // relay's modelEntry(): label, provider, is_default (and its older alias
@@ -88,18 +89,32 @@ func hookConfigured(relPath, hookPath string) bool {
 
 // AgentInfo is one card of GET /api/agents.
 type AgentInfo struct {
-	Source       string          `json:"source"`
-	DisplayName  string          `json:"display_name"`
-	Available    bool            `json:"available"`
-	Capabilities map[string]bool `json:"capabilities"`
-	Models       []AgentModel    `json:"models"`
-	DefaultModel *string         `json:"default_model"`
-	Icon         string          `json:"icon"`
-	Installed    bool            `json:"installed"`
-	Version      *string         `json:"version"`
-	PushSignal   string          `json:"push_signal"`
-	Status       string          `json:"status"`
-	LastEventAt  *string         `json:"last_event_at"`
+	Source          string          `json:"source"`
+	DisplayName     string          `json:"display_name"`
+	Available       bool            `json:"available"`
+	Capabilities    map[string]bool `json:"capabilities"`
+	Models          []AgentModel    `json:"models"`
+	DefaultModel    *string         `json:"default_model"`
+	Icon            string          `json:"icon"`
+	Installed       bool            `json:"installed"`
+	Version         *string         `json:"version"`
+	PushSignal      string          `json:"push_signal"`
+	Status          string          `json:"status"`
+	LastEventAt     *string         `json:"last_event_at"`
+	PermissionModes []string        `json:"permission_modes"`
+	Driver          *AgentDriver    `json:"driver,omitempty"`
+}
+
+// AgentDriver reports how the generic drive layer sees one integration. It is
+// additive; older clients can ignore it.
+type AgentDriver struct {
+	Kind         string `json:"kind"`
+	Command      string `json:"command,omitempty"`
+	Installed    bool   `json:"installed"`
+	Ready        bool   `json:"ready"`
+	Detail       string `json:"detail,omitempty"`
+	Experimental bool   `json:"experimental,omitempty"`
+	Verified     bool   `json:"verified"`
 }
 
 func init() {
@@ -148,28 +163,35 @@ func (d *Deps) handleAgents(w http.ResponseWriter, r *http.Request) {
 	agents := make([]AgentInfo, 0, len(displayOrder))
 	for _, a := range sortedAgents(ctx) {
 		det := a.Detect(ctx)
-		caps := a.Capabilities()
-		_, canReply := a.(agent.Replier)
+		caps := agent.EffectiveCapabilities(a)
+		var driverInfo *AgentDriver
+		if spec, ok := driver.SpecFor(a.ID()); ok {
+			readiness := driver.CheckReadiness(spec)
+			caps = withDriverCapabilities(caps, spec, readiness)
+			driverInfo = &AgentDriver{
+				Kind:         "acp",
+				Command:      spec.CommandString(),
+				Installed:    readiness.Installed,
+				Ready:        readiness.Ready,
+				Detail:       readiness.Detail,
+				Experimental: spec.Experimental,
+				Verified:     spec.Verified,
+			}
+		}
 
 		info := AgentInfo{
-			Source:      a.ID(),
-			DisplayName: a.Name(),
-			Available:   det.Installed,
-			Capabilities: map[string]bool{
-				"reply":        caps.Reply,
-				"new_session":  newSessionFor(a.ID(), det.Installed),
-				"switch_model": switchModelFor(a.ID()),
-				"effort":       a.ID() == "codex",
-				"stop":         canReply,
-				"approve":      approveFor(a.ID()),
-				"live":         a.PushSignal() != agent.PushPoll,
-			},
-			Models:      []AgentModel{},
-			Icon:        a.Icon(),
-			Installed:   det.Installed,
-			Version:     det.Version,
-			PushSignal:  string(a.PushSignal()),
-			LastEventAt: nil,
+			Source:          a.ID(),
+			DisplayName:     a.Name(),
+			Available:       det.Installed,
+			Capabilities:    capabilityMap(a, caps, det.Installed),
+			Models:          []AgentModel{},
+			Icon:            a.Icon(),
+			Installed:       det.Installed,
+			Version:         det.Version,
+			PushSignal:      string(a.PushSignal()),
+			LastEventAt:     nil,
+			PermissionModes: append([]string{}, caps.PermissionModes...),
+			Driver:          driverInfo,
 		}
 
 		if a.ID() == "workbuddy" {
@@ -177,30 +199,30 @@ func (d *Deps) handleAgents(w http.ResponseWriter, r *http.Request) {
 			info.Available = workbuddyRunning(ctx)
 		}
 
-		if !coreAgent(a.ID()) {
-			// Node 对注册表里的扫描型 agent（opencode / zcode …）只给 reply + sessions 两个能力位，
-			// 不列模型、没有默认模型。
-			info.Capabilities = map[string]bool{"reply": caps.Reply, "sessions": true}
-		} else if lister, ok := a.(agent.ModelLister); ok {
-			models, def, err := lister.Models(ctx)
-			if err == nil {
-				for _, m := range models {
-					isDefault := def != "" && m.ID == def
-					efforts := []string{}
-					if a.ID() == "codex" {
-						efforts = codexEfforts
+		// Node 对注册表里的扫描型 agent（opencode / zcode …）不列模型；
+		// 能力位仍来自 Agent 自己的能力表。
+		if caps.Core {
+			if lister, ok := a.(agent.ModelLister); ok {
+				models, def, err := lister.Models(ctx)
+				if err == nil {
+					for _, m := range models {
+						isDefault := def != "" && m.ID == def
+						efforts := []string{}
+						if a.ID() == "codex" {
+							efforts = codexEfforts
+						}
+						info.Models = append(info.Models, AgentModel{
+							ID:        m.ID,
+							Label:     modelLabel(m.ID),
+							Provider:  modelProvider(a.ID(), m.ID),
+							IsDefault: isDefault,
+							Default:   isDefault,
+							Efforts:   efforts,
+						})
 					}
-					info.Models = append(info.Models, AgentModel{
-						ID:        m.ID,
-						Label:     modelLabel(m.ID),
-						Provider:  modelProvider(a.ID(), m.ID),
-						IsDefault: isDefault,
-						Default:   isDefault,
-						Efforts:   efforts,
-					})
-				}
-				if def != "" {
-					info.DefaultModel = &def
+					if def != "" {
+						info.DefaultModel = &def
+					}
 				}
 			}
 		}
@@ -223,7 +245,7 @@ func (d *Deps) handleAgents(w http.ResponseWriter, r *http.Request) {
 			info.Status = "missing"
 		}
 
-		if !coreAgent(a.ID()) {
+		if !caps.Core {
 			// Node's registry-only agents (opencode, zcode, …): installed means connected.
 			if det.Installed {
 				info.Status = "connected"
@@ -237,43 +259,72 @@ func (d *Deps) handleAgents(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, map[string]any{"agents": agents, "generated_at": nowISO()})
 }
 
-// newSessionFor / switchModelFor 对 Node 中继的 capability 位：
-// relay/server.mjs 的 listAgents() 里每家是写死的（codex/claude 看 bin 是否可用，
-// workbuddy 恒为 true；switch_model 只有 codex/claude 有，effort 只有 codex 有）。
-func newSessionFor(id string, installed bool) bool {
-	switch id {
-	case "codex", "claude":
-		return installed
-	case "workbuddy":
-		return true
+// withDriverCapabilities overlays a verified ACP launch path on top of the
+// scanner's static capability table. A configured but unusable drive must not
+// leave new_session/stop/dispatch true: the UI would offer a button that fails
+// only after the user pressed it.
+func withDriverCapabilities(caps agent.Capabilities, spec driver.Spec, readiness driver.Readiness) agent.Capabilities {
+	if !spec.Dispatch {
+		return caps
 	}
-	return false
+	ready := readiness.Ready && readiness.Installed
+	caps.NewSession = ready
+	caps.Stop = ready
+	caps.Approve = ready
+	caps.Live = ready
+	caps.Dispatch = ready
+	return caps
 }
 
-func switchModelFor(id string) bool {
-	switch id {
-	case "codex", "claude":
-		return true
+func capabilityMap(a agent.Agent, caps agent.Capabilities, installed bool) map[string]bool {
+	newSessionReady := caps.NewSession && (installed || caps.NewSessionAny)
+	out := map[string]bool{
+		"reply":             caps.Reply,
+		"new_session":       newSessionReady,
+		"new_session_ready": newSessionReady,
+		"dispatch":          caps.Dispatch && installed,
+		"switch_model":      caps.SwitchModel,
+		"effort":            caps.Effort,
+		"stop":              caps.Stop,
+		"approve":           caps.Approve,
+		"live":              caps.Live,
 	}
-	return false
+	if !caps.Core {
+		// A drive-only ACP manifest has no verified transcript source. Keep the
+		// additive sessions flag truthful instead of treating every non-core
+		// integration as readable.
+		out["sessions"] = caps.Sessions
+	}
+	if hook, ok := a.(agent.HookApprover); ok {
+		settingsPath, endpoint := hook.ApprovalHook()
+		out["approve"] = hookConfigured(settingsPath, endpoint)
+	}
+	return out
 }
 
-func coreAgent(id string) bool {
-	switch id {
-	case "codex", "claude", "workbuddy":
-		return true
+// PermissionModesFor returns a copy of the modes an agent accepts in
+// /api/reply and /api/sessions/new. Callers must reject anything else rather
+// than passing an arbitrary string through to the vendor CLI.
+func PermissionModesFor(id string) []string {
+	a, ok := agent.Get(context.Background(), strings.ToLower(strings.TrimSpace(id)))
+	if !ok {
+		return nil
 	}
-	return false
+	caps := agent.EffectiveCapabilities(a)
+	return append([]string(nil), caps.PermissionModes...)
 }
 
-// approveFor: Codex and Claude can approve from the phone once their hook file
-// sends PermissionRequest here; WorkBuddy has no such hook.
-func approveFor(id string) bool {
-	switch id {
-	case "codex":
-		return hookConfigured(filepath.Join(".codex", "hooks.json"), "/hook/codex")
-	case "claude":
-		return hookConfigured(filepath.Join(".claude", "settings.json"), "/hook/claude")
+// PermissionModeAllowed reports whether mode is a documented capability of the
+// agent. The empty string means "use the agent's default" and is always valid.
+func PermissionModeAllowed(id, mode string) bool {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		return true
+	}
+	for _, allowed := range PermissionModesFor(id) {
+		if mode == allowed {
+			return true
+		}
 	}
 	return false
 }

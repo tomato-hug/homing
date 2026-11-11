@@ -1,0 +1,20 @@
+# CodeBuddy Code（腾讯）— 官方示例清单
+# 会话与 Claude Code 同族：一行一条 JSONL，标题来自 custom-title / ai-title / summary。
+id: codebuddy
+name: CodeBuddy Code
+icon: codebuddy
+
+detect:
+  bin: [codebuddy, cbc, codebuddy-code]
+  paths:
+    - ~/.codebuddy
+
+sessions:
+  source: jsonl
+  glob: ~/.codebuddy/projects/*/*.jsonl
+  format: claude-code
+
+push: poll
+
+models:
+  file: ~/.codebuddy/settings.json

@@ -28,8 +28,11 @@ const (
 
 var (
 	p0Kinds = map[string]bool{"permission": true, "error": true, "approval": true}
-	p1Kinds = map[string]bool{"needs_input": true, "question": true, "awaiting_input": true}
-	p2Kinds = map[string]bool{"reply": true, "done": true, "stop": true, "turn_complete": true, "completed": true}
+	p1Kinds = map[string]bool{
+		"needs_input": true, "question": true, "awaiting_input": true, "collab_result": true,
+	}
+	p2Kinds         = map[string]bool{"reply": true, "done": true, "stop": true, "turn_complete": true, "completed": true}
+	completionKinds = map[string]bool{"done": true, "turn_complete": true, "completed": true}
 )
 
 // LevelOf maps an event kind to P0 / P1 / P2, or "" when it deserves no push.
@@ -47,30 +50,33 @@ func LevelOf(kind string) string {
 
 // Event is what the notifier needs from one stored event.
 type Event struct {
-	ID        int64
-	Source    string
-	SessionID string
-	Kind      string
-	Title     string
-	Text      string
-	Cwd       string
-	Ts        string
+	ID         int64
+	Source     string
+	SessionID  string
+	Kind       string
+	DispatchID string
+	Title      string
+	Text       string
+	Cwd        string
+	Ts         string
 }
 
 // Payload is one push body, ready for the transport.
 type Payload struct {
-	Type      string           `json:"type"`
-	Level     string           `json:"level"`
-	Source    string           `json:"source,omitempty"`
-	SessionID string           `json:"session_id,omitempty"`
-	EventID   int64            `json:"event_id,omitempty"`
-	Title     string           `json:"title"`
-	Summary   string           `json:"summary,omitempty"`
-	At        string           `json:"at"`
-	Temp      bool             `json:"temp"`
-	Merged    bool             `json:"merged"`
-	Count     int              `json:"count"`
-	Sessions  []PayloadSession `json:"sessions,omitempty"`
+	Type       string           `json:"type"`
+	Level      string           `json:"level"`
+	Kind       string           `json:"kind,omitempty"`
+	Source     string           `json:"source,omitempty"`
+	SessionID  string           `json:"session_id,omitempty"`
+	DispatchID string           `json:"dispatch_id,omitempty"`
+	EventID    int64            `json:"event_id,omitempty"`
+	Title      string           `json:"title"`
+	Summary    string           `json:"summary,omitempty"`
+	At         string           `json:"at"`
+	Temp       bool             `json:"temp"`
+	Merged     bool             `json:"merged"`
+	Count      int              `json:"count"`
+	Sessions   []PayloadSession `json:"sessions,omitempty"`
 }
 
 // PayloadSession is one line of a merged P2 summary.
@@ -85,7 +91,12 @@ type Options struct {
 	Sink   func(Payload) // where a finished payload goes
 	Muted  func(source, sessionID string) bool
 	Paused func() bool
-	Log    func(string, ...any)
+	Away   func() bool
+	// Reminder consumes a one-shot "notify me when this session finishes"
+	// request. It is checked only after paused and muted filtering so a
+	// suppressed event does not burn the reminder.
+	Reminder func(source, sessionID string) bool
+	Log      func(string, ...any)
 }
 
 // Notifier merges events into pushes. Safe for concurrent use.
@@ -134,6 +145,18 @@ func (n *Notifier) OnEvent(event Event) {
 	if n.opts.Muted != nil && n.opts.Muted(event.Source, event.SessionID) {
 		n.opts.Log("notify: %s muted，跳过", keyOf(event))
 		return
+	}
+	// While the user is away, a finished task is exactly the message they are
+	// waiting for. An explicit per-session reminder has the same effect even
+	// when the user is not in away mode.
+	if level == "P2" && completionKinds[event.Kind] {
+		if n.opts.Away != nil && n.opts.Away() {
+			level = "P1"
+		} else if n.opts.Reminder != nil &&
+			n.opts.Reminder(event.Source, event.SessionID) {
+			level = "P1"
+			n.opts.Log("notify: %s 已提升为完成提醒", keyOf(event))
+		}
 	}
 
 	key := keyOf(event)
@@ -224,6 +247,7 @@ func (n *Notifier) FlushP2() {
 	merged := Payload{
 		Type:    "notify",
 		Level:   "P2",
+		Kind:    "done",
 		Title:   itoa(len(items)) + " 个会话已完成",
 		Summary: summary,
 		At:      time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
@@ -272,15 +296,17 @@ func basePayload(event Event, level string) Payload {
 		at = time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
 	}
 	return Payload{
-		Type:      "notify",
-		Level:     level,
-		Source:    event.Source,
-		SessionID: event.SessionID,
-		EventID:   event.ID,
-		Title:     title,
-		Summary:   scanlib.Truncate(collapse(event.Text), 160),
-		At:        at,
-		Temp:      scanlib.TempCwd(event.Cwd),
+		Type:       "notify",
+		Level:      level,
+		Kind:       event.Kind,
+		Source:     event.Source,
+		SessionID:  event.SessionID,
+		DispatchID: event.DispatchID,
+		EventID:    event.ID,
+		Title:      title,
+		Summary:    scanlib.Truncate(collapse(event.Text), 160),
+		At:         at,
+		Temp:       scanlib.TempCwd(event.Cwd),
 	}
 }
 

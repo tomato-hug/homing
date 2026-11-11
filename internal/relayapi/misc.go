@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/tomato-hug/homing/internal/api"
+	"github.com/tomato-hug/homing/internal/awayauto"
 	filepaths "github.com/tomato-hug/homing/internal/files"
 	"github.com/tomato-hug/homing/internal/platform"
 	"github.com/tomato-hug/homing/internal/store"
@@ -25,7 +27,14 @@ func awayGET(d *api.Deps, w http.ResponseWriter, _ *http.Request) {
 		api.WriteJSON(w, http.StatusInternalServerError, map[string]any{"error": "数据目录不可用"})
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"enabled": s.Away()})
+	payload := map[string]any{"enabled": s.Away()}
+	if current, ok := s.CurrentAwayPeriod(); ok {
+		payload["current"] = current
+	}
+	if last, ok := s.LastAwayPeriod(); ok {
+		payload["last"] = last
+	}
+	api.WriteJSON(w, http.StatusOK, payload)
 }
 
 func awayPOST(d *api.Deps, w http.ResponseWriter, r *http.Request) {
@@ -44,14 +53,120 @@ func awayPOST(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 		api.WriteJSON(w, http.StatusInternalServerError, map[string]any{"error": "数据目录不可用"})
 		return
 	}
-	if err := s.SetAway(enabled); err != nil {
+	var (
+		period   store.AwayPeriod
+		okPeriod bool
+	)
+	if enabled {
+		source := strings.TrimSpace(stringField(body, "source"))
+		if source == "" {
+			source = "manual"
+		}
+		deviceID := strings.TrimSpace(stringField(body, "device_id"))
+		period, err = s.StartAway(source, deviceID)
+		okPeriod = err == nil
+	} else {
+		period, okPeriod, err = s.EndAway()
+	}
+	if err != nil {
 		api.WriteJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存离开模式失败"})
 		return
 	}
 	if !enabled {
 		releaseStopHolds()
 	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "enabled": enabled})
+	payload := map[string]any{"ok": true, "enabled": enabled}
+	if okPeriod {
+		payload["period"] = period
+		if enabled {
+			payload["current"] = period
+		} else {
+			payload["last"] = period
+		}
+	}
+	api.WriteJSON(w, http.StatusOK, payload)
+}
+
+func awaySettingsGET(d *api.Deps, w http.ResponseWriter, _ *http.Request) {
+	s, err := d.Store()
+	if err != nil {
+		api.WriteJSON(w, http.StatusInternalServerError, map[string]any{"error": "数据目录不可用"})
+		return
+	}
+	enabled, minutes := s.AutoAwaySettings()
+	api.WriteJSON(w, http.StatusOK, map[string]any{
+		"enabled":      enabled,
+		"idle_minutes": minutes,
+		"available":    autoAwayAvailable(),
+	})
+}
+
+func awaySettingsPATCH(d *api.Deps, w http.ResponseWriter, r *http.Request) {
+	body, _, err := readJSON(r)
+	if err != nil {
+		api.WriteJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	enabled, ok := boolField(body, "enabled")
+	if !ok {
+		api.WriteJSON(w, http.StatusBadRequest, map[string]any{"error": "enabled 必须是布尔值"})
+		return
+	}
+	if enabled && !autoAwayAvailable() {
+		api.WriteJSON(w, http.StatusConflict, map[string]any{
+			"error": "這個平台尚未提供自動離開探測", "code": "auto_away_unavailable",
+		})
+		return
+	}
+	minutes := 5
+	if raw, present := body["idle_minutes"]; present {
+		value, numeric := raw.(float64)
+		if !numeric || value < 1 || value != math.Trunc(value) {
+			api.WriteJSON(w, http.StatusBadRequest, map[string]any{"error": "idle_minutes 必須是正整數"})
+			return
+		}
+		minutes = int(value)
+	}
+	s, err := d.Store()
+	if err != nil {
+		api.WriteJSON(w, http.StatusInternalServerError, map[string]any{"error": "数据目录不可用"})
+		return
+	}
+	if err := s.SetAutoAway(enabled, minutes); err != nil {
+		api.WriteJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存设置失败"})
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "enabled": enabled, "idle_minutes": minutes,
+	})
+}
+
+func autoAwayAvailable() bool { return awayauto.Available() }
+
+func clearAwayPeriod(d *api.Deps, w http.ResponseWriter, r *http.Request) {
+	s, err := d.Store()
+	if err != nil {
+		api.WriteJSON(w, http.StatusInternalServerError, map[string]any{"error": "数据目录不可用"})
+		return
+	}
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		api.WriteJSON(w, http.StatusBadRequest, map[string]any{"error": "离开时段 id 不能为空"})
+		return
+	}
+	period, found, err := s.ClearAwayPeriod(id)
+	if err != nil {
+		api.WriteJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存离开时段失败"})
+		return
+	}
+	if !found {
+		api.WriteJSON(w, http.StatusNotFound, map[string]any{"error": "离开时段不存在"})
+		return
+	}
+	if err := s.MarkAllSeen(); err != nil {
+		d.Log.Error("mark all seen after away clear", "err", err)
+	}
+	api.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "period": period})
 }
 
 func uploadHandler(d *api.Deps, w http.ResponseWriter, r *http.Request) {
@@ -366,15 +481,16 @@ func capabilityQueryValid(dataDir string, u *url.URL) bool {
 }
 
 type publicDevice struct {
-	DeviceID   string  `json:"device_id"`
-	Name       string  `json:"name"`
-	Platform   string  `json:"platform"`
-	AppVersion *string `json:"app_version"`
-	CreatedAt  *string `json:"created_at"`
-	LastSeenAt *string `json:"last_seen_at"`
-	Online     bool    `json:"online"`
-	PairedVia  string  `json:"paired_via"`
-	LastIP     *string `json:"last_ip"`
+	DeviceID   string   `json:"device_id"`
+	Name       string   `json:"name"`
+	Platform   string   `json:"platform"`
+	AppVersion *string  `json:"app_version"`
+	CreatedAt  *string  `json:"created_at"`
+	LastSeenAt *string  `json:"last_seen_at"`
+	Online     bool     `json:"online"`
+	PairedVia  string   `json:"paired_via"`
+	LastIP     *string  `json:"last_ip"`
+	Scopes     []string `json:"scopes"`
 }
 
 func listDevices(d *api.Deps, w http.ResponseWriter, _ *http.Request) {
@@ -451,6 +567,14 @@ func renameDevice(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 		api.WriteJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "没有这台设备"})
 		return
 	}
+	if _, present := body["scopes"]; present {
+		scoped, saved := s.SetDeviceScopes(id, stringList(body["scopes"]))
+		if !saved {
+			api.WriteJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "没有这台设备"})
+			return
+		}
+		device = scoped
+	}
 	api.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "device": publicDeviceOf(device)})
 }
 
@@ -496,6 +620,10 @@ func publicDeviceOf(device store.Device) publicDevice {
 	if device.LastIP != "" {
 		value := device.LastIP
 		out.LastIP = &value
+	}
+	out.Scopes = append([]string(nil), device.Scopes...)
+	if len(out.Scopes) == 0 {
+		out.Scopes = []string{"read", "reply", "drive"}
 	}
 	return out
 }

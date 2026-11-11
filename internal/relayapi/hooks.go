@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/tomato-hug/homing/internal/agent"
 	"github.com/tomato-hug/homing/internal/agent/scanlib"
 	"github.com/tomato-hug/homing/internal/api"
 	filepaths "github.com/tomato-hug/homing/internal/files"
@@ -20,7 +21,8 @@ var sourceLabels = map[string]string{
 }
 
 var validKinds = map[string]bool{
-	"reply": true, "needs_input": true, "permission": true, "error": true,
+	"reply": true, "done": true, "needs_input": true, "permission": true,
+	"needs_reply": true, "approval": true, "error": true, "message": true,
 }
 
 func hookRoute(d *api.Deps, fixedSource string) http.HandlerFunc {
@@ -50,7 +52,7 @@ func hookRoute(d *api.Deps, fixedSource string) http.HandlerFunc {
 		case "codex":
 			payload, err = handleCodexHook(r.Context(), d, body)
 		default:
-			payload, err = handleGenericHook(d, body)
+			payload, err = handleGenericHook(r, d, body)
 		}
 		if err != nil {
 			api.WriteJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -87,6 +89,7 @@ func handleAgentHook(ctx context.Context, d *api.Deps, source string, body map[s
 			return nil, err
 		}
 		claimLaunch(d, event)
+		trackDispatchLifecycle(d, event)
 		return resumeFromPhone(ctx, d, event), nil
 
 	case "PermissionRequest":
@@ -106,6 +109,7 @@ func handleAgentHook(ctx context.Context, d *api.Deps, source string, body map[s
 			return nil, err
 		}
 		claimLaunch(d, event)
+		trackDispatchLifecycle(d, event)
 		return holdApproval(ctx, event), nil
 
 	case "Notification":
@@ -121,6 +125,7 @@ func handleAgentHook(ctx context.Context, d *api.Deps, source string, body map[s
 			return nil, err
 		}
 		claimLaunch(d, event)
+		trackDispatchLifecycle(d, event)
 		if kind == "permission" {
 			return holdApproval(ctx, event), nil
 		}
@@ -145,40 +150,111 @@ func handleCodexHook(ctx context.Context, d *api.Deps, body map[string]any) (map
 		return nil, err
 	}
 	claimLaunch(d, event)
+	trackDispatchLifecycle(d, event)
 	return map[string]any{}, nil
 }
 
-func handleGenericHook(d *api.Deps, body map[string]any) (map[string]any, error) {
-	source := strings.TrimSpace(stringField(body, "source"))
-	if _, ok := sourceLabels[source]; !ok {
-		return nil, errText("source 只能是 claude、codex 或 workbuddy")
+func handleGenericHook(r *http.Request, d *api.Deps, body map[string]any) (map[string]any, error) {
+	source := strings.TrimSpace(firstNonEmpty(
+		stringField(body, "source"),
+		stringField(body, "agent"),
+		r.Header.Get("X-Homing-Agent"),
+	))
+	if !validHookSource(source) {
+		return nil, errText("source 必须是 1–64 位小写字母、数字、点、下划线或连字符")
 	}
-	kind := strings.TrimSpace(stringField(body, "kind"))
+	kind := strings.TrimSpace(firstNonEmpty(
+		stringField(body, "kind"),
+		r.Header.Get("X-Homing-Kind"),
+		genericKindFromEvent(body),
+	))
+	if kind == "" {
+		kind = "message"
+	}
 	if !validKinds[kind] {
-		return nil, errText("kind 只能是 reply、needs_input、permission 或 error")
+		return nil, errText("kind 只能是 reply、done、needs_input、needs_reply、permission、approval、error 或 message")
 	}
-	sessionID := stringField(body, "session_id")
+	sessionID := firstNonEmpty(
+		stringField(body, "session_id"),
+		stringField(body, "sessionId"),
+		stringField(body, "thread_id"),
+		stringField(body, "thread-id"),
+		stringField(body, "conversation_id"),
+		stringField(body, "conversationId"),
+		stringField(body, "id"),
+	)
 	if sessionID == "" {
 		return nil, errText("session_id 不能为空")
 	}
-	event, err := ingestEvent(d, source, kind, sessionID, stringField(body, "cwd"),
-		stringField(body, "title"), stringField(body, "text"))
+	cwd := firstNonEmpty(
+		stringField(body, "cwd"),
+		stringField(body, "workdir"),
+		stringField(body, "working_directory"),
+		stringField(body, "project_dir"),
+	)
+	title := firstNonEmpty(stringField(body, "title"), stringField(body, "name"))
+	text := firstNonEmpty(
+		stringField(body, "text"),
+		stringField(body, "message"),
+		stringField(body, "last_assistant_message"),
+		stringField(body, "last-assistant-message"),
+		stringField(body, "output"),
+	)
+	event, err := ingestEvent(d, source, kind, sessionID, cwd, title, text)
 	if err != nil {
 		return nil, err
 	}
 	claimLaunch(d, event)
+	trackDispatchLifecycle(d, event)
 	return map[string]any{}, nil
 }
 
+// genericKindFromEvent recognises the hook_event_name/type fields emitted by
+// common coding agents. Unknown events stay "message" so they enter the inbox
+// without being misgraded as a completion or permission request.
+func genericKindFromEvent(body map[string]any) string {
+	event := strings.ToLower(strings.TrimSpace(firstNonEmpty(
+		stringField(body, "hook_event_name"),
+		stringField(body, "event"),
+		stringField(body, "type"),
+	)))
+	switch event {
+	case "stop", "agent-turn-complete", "turn-complete", "turn_complete":
+		return "reply"
+	case "permissionrequest", "permission_request", "approval", "approval_request":
+		return "permission"
+	case "notification", "needsinput", "needs_input", "needsreply", "needs_reply":
+		return "needs_input"
+	case "error", "failed", "failure":
+		return "error"
+	case "done", "completed", "complete":
+		return "done"
+	default:
+		return ""
+	}
+}
+
 func ingestEvent(d *api.Deps, source, kind, sessionID, cwd, title, text string) (store.Event, error) {
+	return ingestEventWithMeta(d, source, kind, sessionID, cwd, title, text, nil)
+}
+
+func ingestEventWithMeta(
+	d *api.Deps,
+	source, kind, sessionID, cwd, title, text string,
+	meta map[string]any,
+) (store.Event, error) {
 	svc := service.Start(d)
 	if svc == nil {
 		return store.Event{}, errText("事件管道不可用")
 	}
+	kind = agent.CanonicalEventKind(kind)
 	text = truncateRunes(text, 4000)
 	title = truncateRunes(title, 200)
 	if title == "" {
 		title = sourceLabels[source]
+		if title == "" {
+			title = source
+		}
 	}
 	attachments := filepaths.ManagerFor(d.DataDir).Build(text, cwd)
 	asAny := make([]any, 0, len(attachments))
@@ -193,7 +269,26 @@ func ingestEvent(d *api.Deps, source, kind, sessionID, cwd, title, text string) 
 		Title:       title,
 		Text:        text,
 		Attachments: &asAny,
+		SessionMeta: meta,
 	})
+}
+
+func validHookSource(source string) bool {
+	if len(source) == 0 || len(source) > 64 {
+		return false
+	}
+	for i, r := range source {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+		case r == '.' || r == '_' || r == '-':
+			if i == 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func shortJSON(value any, limit int) string {

@@ -1,0 +1,39 @@
+# DRAFT ONLY. This filename ends in .draft.yaml, so Homing does not load it.
+# Verify the real session layout first, then rename to {{.ID}}.yaml and move it
+# to ~/.homing/agents/.
+id: {{printf "%q" .ID}}
+name: {{printf "%q" .Name}}
+icon: {{printf "%q" .ID}}
+
+detect:
+  bin: []
+{{- if .DetectPath}}
+  paths:
+    - {{printf "%q" .DetectPath}}
+{{- else}}
+  paths: []
+{{- end}}
+
+# Change source/glob/format after inspecting one real local session file.
+# Supported: jsonl | json | sqlite | http
+# Formats: generic-jsonl | generic-json | claude-code | codex | gemini-cli | custom
+{{- if .DetectPath}}
+sessions:
+  source: jsonl
+  glob: {{printf "%q" (printf "%s/sessions/*.jsonl" .DetectPath)}}
+  format: generic-jsonl
+  format_options:
+    session_id: session_id
+    cwd: cwd
+    time: timestamp
+    role: role
+    text: content
+    user_values: [user, human]
+    assistant_values: [assistant, agent]
+{{- else}}
+# No verified session path is known yet. Fill this in only after inspecting a
+# real local copy under /tmp.
+sessions: null
+{{- end}}
+
+push: poll

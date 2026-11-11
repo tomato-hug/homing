@@ -67,6 +67,11 @@ type Paths struct {
 	SessionState string
 	Events       string
 	Replies      string
+	Dispatches   string
+	AwayPeriods  string
+	Audit        string
+	History      string
+	Index        string
 	Log          string
 	App          string
 }
@@ -84,6 +89,11 @@ func NewPaths(dataDir string) Paths {
 		SessionState: filepath.Join(dataDir, "session-state.json"),
 		Events:       filepath.Join(dataDir, "events.jsonl"),
 		Replies:      filepath.Join(dataDir, "replies.jsonl"),
+		Dispatches:   filepath.Join(dataDir, "dispatches.jsonl"),
+		AwayPeriods:  filepath.Join(dataDir, "away-periods.jsonl"),
+		Audit:        filepath.Join(dataDir, "audit.jsonl"),
+		History:      filepath.Join(dataDir, "history.db"),
+		Index:        filepath.Join(dataDir, "index.db"),
 		App:          filepath.Join(dataDir, "app.json"),
 	}
 	p.Log = os.Getenv("HOMING_LOG_PATH")
@@ -118,27 +128,7 @@ func WriteJSON(file string, v any) error {
 
 // WriteFile writes raw bytes atomically.
 func WriteFile(file string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(file), filepath.Base(file)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	defer os.Remove(name)
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(name, file)
+	return WriteFileWithMode(file, data, 0o600)
 }
 
 // HostName is shown on the phone under "add a computer".
@@ -163,8 +153,9 @@ func PlatformLabel() string {
 }
 
 // LANAddresses returns this machine's IPv4 addresses, best candidate first.
-// 198.18.0.0/15 is what proxy TUN interfaces hand out (phones can't reach it)
-// and 169.254.x.x means DHCP failed; both sort last.
+// 198.18.0.0/15 is what proxy TUN interfaces hand out (phones can't reach it);
+// like the Node relay, those addresses are omitted. 169.254.x.x means DHCP
+// failed and sorts last.
 func LANAddresses() []string {
 	ifaces, err := net.Interfaces()
 	if err != nil {
@@ -189,6 +180,9 @@ func LANAddresses() []string {
 				continue
 			}
 			ip := ipnet.IP.To4().String()
+			if strings.HasPrefix(ip, "198.18.") || strings.HasPrefix(ip, "198.19.") {
+				continue
+			}
 			found = append(found, candidate{ip, rankOf(ip)})
 		}
 	}
@@ -200,7 +194,7 @@ func LANAddresses() []string {
 	return out
 }
 
-// rankOf scores an IPv4 address: home / office ranges first, TUN and link-local last.
+// rankOf scores an IPv4 address: home / office ranges first, link-local last.
 func rankOf(ip string) int {
 	home := []string{"192.168.", "10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.2", "172.30.", "172.31."}
 	for _, prefix := range home {
@@ -208,11 +202,8 @@ func rankOf(ip string) int {
 			return 0
 		}
 	}
-	if strings.HasPrefix(ip, "198.18.") || strings.HasPrefix(ip, "198.19.") {
-		return 2
-	}
 	if strings.HasPrefix(ip, "169.254.") {
-		return 3
+		return 2
 	}
 	return 1
 }
@@ -243,6 +234,7 @@ var agentHomes = map[string]agentHome{
 	"codex":     {"Codex", []string{".codex"}, []string{".codex/session_index.jsonl", ".codex/sessions", ".codex/hooks.json"}},
 	"claude":    {"Claude Code", []string{".claude"}, []string{".claude/projects", ".claude/settings.json"}},
 	"workbuddy": {"WorkBuddy", []string{".workbuddy"}, []string{".workbuddy"}},
+	"kimi":      {"Kimi Code", []string{".kimi-code"}, []string{".kimi-code/sessions", ".kimi-code/config.toml"}},
 	"opencode":  {"OpenCode", []string{".local/share/opencode"}, []string{".local/share/opencode/opencode.db"}},
 	"zcode":     {"ZCode", []string{".zcode"}, []string{".zcode/cli/db/db.sqlite"}},
 }

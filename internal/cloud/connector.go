@@ -212,6 +212,9 @@ func (c *Connector) runSession(parent context.Context) (bool, error) {
 	heartbeatCtx, stopHeartbeat := context.WithCancel(parent)
 	defer stopHeartbeat()
 	go c.heartbeat(heartbeatCtx, ws)
+	bridgeCtx, stopBridge := context.WithCancel(parent)
+	defer stopBridge()
+	go c.bridgeEvents(bridgeCtx)
 
 	c.log.Info("cloud relay connected", "server", c.serverURL, "device_id", c.identity.DeviceID())
 	err = c.readLoop(parent, ws)
@@ -321,6 +324,18 @@ func (c *Connector) handleEnvelope(ctx context.Context, ws *websocket.Conn, mess
 	if err := json.Unmarshal(plaintext, &header); err != nil {
 		return err
 	}
+	if payloads, handled := dispatchFilePayload(ctx, c.handler, peer.DeviceID, plaintext); handled {
+		for _, payload := range payloads {
+			response, err := sealPayload(c.identity, peer, payload)
+			if err != nil {
+				return err
+			}
+			if err := c.writeJSON(ctx, ws, envelopeMap(response)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	switch header.Type {
 	case "rpc":
 		result := dispatchRPC(ctx, c.handler, plaintext)
@@ -394,7 +409,10 @@ func (c *Connector) Accept(ctx context.Context, clientID string) error {
 	if !ok {
 		return errors.New("cloud: no such pairing request")
 	}
-	if err := c.send(ctx, map[string]any{"t": "pair.accept", "client_id": clientID}); err != nil {
+	if err := c.send(ctx, map[string]any{
+		"t": "pair.accept", "client_id": clientID,
+		"lan_urls": LANWebSocketURLs(),
+	}); err != nil {
 		return err
 	}
 	if err := c.peers.Add(Peer{

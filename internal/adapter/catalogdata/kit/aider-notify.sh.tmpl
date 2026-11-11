@@ -1,0 +1,13 @@
+#!/bin/sh
+# Aider --notifications-command does not reliably provide a JSON body, so this
+# script sends a small fixed event and exits successfully.
+set -u
+
+BASE_URL="${HOMING_HOOK_URL:-http://127.0.0.1:18788/hook/generic}"
+curl --connect-timeout 1 --max-time 2 -fsS -X POST "$BASE_URL" \
+  -H 'Content-Type: application/json' \
+  -H 'X-Homing-Agent: aider' \
+  -H 'X-Homing-Kind: reply' \
+  --data-binary '{"source":"aider","session_id":"aider","kind":"reply","title":"Aider 生成了新回复"}' \
+  >/dev/null 2>&1 || true
+exit 0

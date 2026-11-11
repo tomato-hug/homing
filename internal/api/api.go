@@ -8,12 +8,15 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"sort"
+	"strconv"
 	"sync"
 
+	"github.com/tomato-hug/homing/internal/searchindex"
 	"github.com/tomato-hug/homing/internal/store"
 )
 
@@ -24,11 +27,18 @@ type Deps struct {
 	DataDir string
 	Version string
 
+	cloudStatusMu sync.RWMutex
+	cloudStatusFn func() CloudStatus
+
 	// The store is opened on first use: DataDir is enough to build a Deps, and
 	// a test that mounts one route group never touches the rest of the files.
 	storeOnce  sync.Once
 	storeValue *store.Store
 	storeErr   error
+
+	searchMu    sync.Mutex
+	searchValue *searchindex.Index
+	searchErr   error
 }
 
 // RouteFunc mounts routes on mux. Use Go 1.22 patterns, e.g. "GET /api/agents".
@@ -69,9 +79,16 @@ func NewMux(d *Deps) *http.ServeMux {
 
 // WriteJSON writes v with the given status.
 func WriteJSON(w http.ResponseWriter, status int, v any) {
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	if err := encoder.Encode(v); err != nil {
+		http.Error(w, `{"error":"encode response"}`, http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(buf.Len()))
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	_, _ = w.Write(buf.Bytes())
 }
 
 func init() {

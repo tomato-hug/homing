@@ -58,3 +58,19 @@ func TestExtractFileItemsLimit(t *testing.T) {
 		t.Fatalf("limit=2 应留下最后两条，实际最后一条是 %q", items[len(items)-1].ID)
 	}
 }
+
+func TestFileMetaTracksLastUserTurn(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "demo-session-3.jsonl")
+	if err := os.WriteFile(file, []byte(demoTranscript), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stat, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := fileMetaFor(fileEntry{path: file, sessionID: "demo-session-3", size: stat.Size(), mtime: stat.ModTime()})
+	if meta.lastUserTS != "2026-01-01T00:00:01Z" {
+		t.Fatalf("lastUserTS = %q, want the first real user turn", meta.lastUserTS)
+	}
+}

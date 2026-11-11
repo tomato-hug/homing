@@ -13,6 +13,7 @@ package builtin
 import (
 	_ "github.com/tomato-hug/homing/internal/agent/claude"
 	_ "github.com/tomato-hug/homing/internal/agent/codex"
+	_ "github.com/tomato-hug/homing/internal/agent/kimi"
 	_ "github.com/tomato-hug/homing/internal/agent/opencode"
 	_ "github.com/tomato-hug/homing/internal/agent/workbuddy"
 	_ "github.com/tomato-hug/homing/internal/agent/zcode"

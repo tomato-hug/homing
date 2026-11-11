@@ -48,6 +48,7 @@ var waits = struct {
 }
 
 func init() {
+	api.RegisterAwayEndHook(func() { releaseStopHolds() })
 	api.SetReplyInterceptor(func(
 		_ *http.Request,
 		reply store.Reply,
@@ -205,6 +206,9 @@ func holdApproval(ctx context.Context, event store.Event) map[string]any {
 }
 
 func resolveApproval(d *api.Deps, w http.ResponseWriter, r *http.Request) {
+	if !d.RequireScope(w, r, "reply") {
+		return
+	}
 	eventID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil || eventID <= 0 {
 		api.WriteJSON(w, http.StatusBadRequest, map[string]any{"error": "event_id 非法"})
@@ -220,6 +224,10 @@ func resolveApproval(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 		api.WriteJSON(w, http.StatusBadRequest, map[string]any{"error": "decision 只能是 allow 或 deny"})
 		return
 	}
+	d.Audit(r, "approval", map[string]any{
+		"event_id": eventID,
+		"decision": decision,
+	})
 
 	waits.mu.Lock()
 	hold := waits.approvals[eventID]
@@ -237,11 +245,22 @@ func resolveApproval(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 	if decision == "deny" {
 		reason = "手机拒绝"
 	}
-	hold.ch <- map[string]any{"decision": decision, "reason": reason}
+	answer := map[string]any{"decision": decision, "reason": reason}
+	if optionID := strings.TrimSpace(stringField(body, "option_id")); optionID != "" {
+		answer["option_id"] = optionID
+	}
+	hold.ch <- answer
 	if s, err := d.Store(); err == nil {
 		s.MarkRead([]int64{eventID})
+		for _, event := range s.Events() {
+			if event.ID == eventID {
+				_ = s.AdvanceSeen(event.Source, event.SessionID, event.ID)
+				break
+			}
+		}
 	}
 	api.WriteJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "event_id": eventID, "decision": decision,
+		"option_id": strings.TrimSpace(stringField(body, "option_id")),
 	})
 }

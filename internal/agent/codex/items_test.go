@@ -1,6 +1,8 @@
 package codex
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -147,5 +149,79 @@ func TestDeveloperMessagesAreSkipped(t *testing.T) {
 	}))
 	if len(agents) != 0 {
 		t.Fatalf("AGENTS.md instructions were shown: %+v", agents)
+	}
+}
+
+func TestRolloutMetaTracksLastUserTurn(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "rollout-demo.jsonl")
+	rows := strings.Join([]string{
+		`{"timestamp":"2026-01-01T00:00:01Z","type":"session_meta","payload":{"cwd":"/tmp/demo-project"}}`,
+		`{"timestamp":"2026-01-01T00:00:02Z","payload":{"type":"message","role":"user","content":"demo user request"}}`,
+		`{"timestamp":"2026-01-01T00:00:03Z","payload":{"type":"message","role":"assistant","content":"demo answer"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(file, []byte(rows), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	meta := readRolloutMeta(file)
+	if meta.lastUserTS != "2026-01-01T00:00:02Z" {
+		t.Fatalf("lastUserTS = %q, want the user turn", meta.lastUserTS)
+	}
+	if meta.lastTs != "2026-01-01T00:00:03Z" {
+		t.Fatalf("lastTs = %q, want the assistant turn", meta.lastTs)
+	}
+}
+
+func TestRolloutMetaCacheInvalidatesOnFileChange(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "rollout-demo-cache.jsonl")
+	firstRows := strings.Join([]string{
+		`{"timestamp":"2026-01-01T00:00:01Z","type":"session_meta","payload":{"cwd":"/tmp/demo-project"}}`,
+		`{"timestamp":"2026-01-01T00:00:02Z","payload":{"type":"message","role":"assistant","content":"first answer"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(file, []byte(firstRows), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readRolloutMetaCached(file); got.lastPreview != "first answer" {
+		t.Fatalf("first preview = %q", got.lastPreview)
+	}
+
+	secondRows := firstRows +
+		`{"timestamp":"2026-01-01T00:00:03Z","payload":{"type":"message","role":"assistant","content":"second answer"}}` + "\n"
+	if err := os.WriteFile(file, []byte(secondRows), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readRolloutMetaCached(file); got.lastPreview != "second answer" {
+		t.Fatalf("cached preview did not invalidate: %q", got.lastPreview)
+	}
+}
+
+func TestTitleIndexCacheInvalidatesOnFileChange(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	indexDir := filepath.Join(root, ".codex")
+	if err := os.MkdirAll(indexDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	index := filepath.Join(indexDir, "session_index.jsonl")
+	first := `{"id":"demo-thread-1","thread_name":"first title","updated_at":"2026-01-01T00:00:00Z"}` + "\n"
+	if err := os.WriteFile(index, []byte(first), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	titleIndexCache.Lock()
+	titleIndexCache.entry = titleIndexEntry{}
+	titleIndexCache.Unlock()
+
+	titles, _ := titleIndexFull()
+	if titles["demo-thread-1"] != "first title" {
+		t.Fatalf("first titles = %#v", titles)
+	}
+	second := `{"id":"demo-thread-2","thread_name":"second title","updated_at":"2026-01-02T00:00:00Z"}` + "\n"
+	if err := os.WriteFile(index, []byte(second), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	titles, _ = titleIndexFull()
+	if titles["demo-thread-2"] != "second title" {
+		t.Fatalf("cached title index did not invalidate: %#v", titles)
 	}
 }

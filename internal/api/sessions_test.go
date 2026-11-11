@@ -2,12 +2,15 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
+	"github.com/tomato-hug/homing/internal/agent"
 	"github.com/tomato-hug/homing/internal/platform"
 )
 
@@ -86,11 +89,39 @@ func TestInboxBuckets(t *testing.T) {
 		t.Fatalf("waiting = %d, want 2 (needs_reply + approval)", len(inbox.Waiting))
 	}
 	kinds := map[string]bool{}
+	var approval *InboxItem
 	for _, item := range inbox.Waiting {
 		kinds[item.Kind] = true
+		if item.Kind == "approval" {
+			candidate := item
+			approval = &candidate
+		}
 	}
 	if !kinds["needs_reply"] || !kinds["approval"] {
 		t.Fatalf("waiting kinds = %v, want needs_reply and approval", kinds)
+	}
+	if approval == nil || approval.Approval == nil || len(approval.Approval.Options) != 2 {
+		t.Fatalf("approval payload = %+v, want the legacy allow/deny pair", approval)
+	}
+}
+
+func TestInboxCarriesACPPermissionOptions(t *testing.T) {
+	events := `{"id":1,"ts":"2026-01-01T10:00:00.000Z","source":"hermes","kind":"permission","session_id":"demo-session-acp","cwd":"/tmp/demo-project","project":"demo-project","title":"请求授权","text":"写入文件","session_meta":{"acp":{"options":[{"id":"allow_once","label":"仅此次","kind":"allow_once"},{"id":"allow_always","label":"总是允许","kind":"allow_always"},{"id":"reject_once","label":"拒绝","kind":"reject_once"}]}}}
+`
+	d := writeStore(t, events, `{"version":1,"sessions":{}}`)
+	inbox := d.buildInbox(httptest.NewRequest(http.MethodGet, "/api/inbox", nil))
+	if len(inbox.Waiting) != 1 {
+		t.Fatalf("waiting = %+v, want one approval", inbox.Waiting)
+	}
+	approval := inbox.Waiting[0].Approval
+	if approval == nil || len(approval.Options) != 3 {
+		t.Fatalf("approval = %+v, want three ACP options", approval)
+	}
+	if approval.Options[1]["id"] != "allow_always" || approval.Options[1]["decision"] != "allow" {
+		t.Fatalf("allow_always option = %+v", approval.Options[1])
+	}
+	if approval.Options[2]["id"] != "reject_once" || approval.Options[2]["decision"] != "deny" {
+		t.Fatalf("reject_once option = %+v", approval.Options[2])
 	}
 }
 
@@ -123,5 +154,107 @@ func TestPathsAreInsideDataDir(t *testing.T) {
 	paths := platform.NewPaths(dir)
 	if filepath.Dir(paths.Events) != dir {
 		t.Fatalf("events path %q is not inside %q", paths.Events, dir)
+	}
+}
+
+type nilItemsDemoAgent struct{}
+
+func (nilItemsDemoAgent) ID() string                   { return "api-null-items" }
+func (nilItemsDemoAgent) Name() string                 { return "Null Items Demo" }
+func (nilItemsDemoAgent) Icon() string                 { return "" }
+func (nilItemsDemoAgent) PushSignal() agent.PushSignal { return agent.PushPoll }
+func (nilItemsDemoAgent) Capabilities() agent.Capabilities {
+	return agent.Capabilities{Sessions: true}
+}
+func (nilItemsDemoAgent) Detect(context.Context) agent.Detection {
+	return agent.Detection{Installed: true}
+}
+func (nilItemsDemoAgent) ListSessions(context.Context, int) ([]agent.Session, error) {
+	return []agent.Session{{
+		SessionID: "demo-null-items",
+		Source:    "api-null-items",
+		Title:     "空正文测试",
+	}}, nil
+}
+func (nilItemsDemoAgent) Meta(string, string) agent.Meta { return agent.Meta{} }
+func (nilItemsDemoAgent) ReadItems(context.Context, string, int) ([]agent.Item, error) {
+	return nil, nil
+}
+
+var nilItemsDemoOnce sync.Once
+
+func TestSessionItemsEncodesEmptyArrayInsteadOfNull(t *testing.T) {
+	nilItemsDemoOnce.Do(func() {
+		agent.RegisterProvider("api-null-items-test", func(context.Context) []agent.Agent {
+			return []agent.Agent{nilItemsDemoAgent{}}
+		})
+	})
+	d := writeStore(t, ``, `{"version":1,"sessions":{}}`)
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/api/sessions/demo-null-items/items?limit=10",
+		nil,
+	)
+	request.SetPathValue("id", "demo-null-items")
+	recorder := httptest.NewRecorder()
+	d.handleSessionItems(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", recorder.Code, recorder.Body.String())
+	}
+	var payload struct {
+		Items []agent.Item `json:"items"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Items == nil {
+		t.Fatalf("items encoded as null: %s", recorder.Body.String())
+	}
+}
+
+func TestSessionItemsHidesReasoningUnlessExplicitlyRequested(t *testing.T) {
+	fake := installSSEDemoAgent(t)
+	fake.setItems([]agent.Item{
+		{ID: "demo-user", Seq: 1, Type: "message", Role: "user", Text: "做一個示範"},
+		{ID: "demo-reasoning", Seq: 2, Type: "reasoning", Role: "assistant", Text: "內部推理"},
+		{ID: "demo-answer", Seq: 3, Type: "message", Role: "assistant", Text: "完成"},
+	})
+	d := writeStore(t, sseDemoEvent, `{"version":1,"sessions":{}}`)
+
+	read := func(query string) []agent.Item {
+		t.Helper()
+		request := httptest.NewRequest(
+			http.MethodGet,
+			"/api/sessions/demo-sse-1/items?"+query,
+			nil,
+		)
+		request.SetPathValue("id", "demo-sse-1")
+		recorder := httptest.NewRecorder()
+		d.handleSessionItems(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d body = %s", recorder.Code, recorder.Body.String())
+		}
+		var payload struct {
+			Items []agent.Item `json:"items"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		return payload.Items
+	}
+
+	defaultItems := read("limit=10")
+	if len(defaultItems) != 2 {
+		t.Fatalf("default items = %+v, want user + final answer", defaultItems)
+	}
+	for _, item := range defaultItems {
+		if item.Type == "reasoning" {
+			t.Fatalf("reasoning leaked without opt-in: %+v", item)
+		}
+	}
+
+	optedIn := read("limit=10&include_reasoning=1")
+	if len(optedIn) != 3 || optedIn[1].Type != "reasoning" {
+		t.Fatalf("opted-in items = %+v, want all three with reasoning", optedIn)
 	}
 }

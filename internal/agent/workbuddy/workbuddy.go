@@ -39,7 +39,18 @@ func (Agent) Name() string                 { return "WorkBuddy" }
 func (Agent) Icon() string                 { return Icon }
 func (Agent) PushSignal() agent.PushSignal { return agent.PushHook }
 func (Agent) Capabilities() agent.Capabilities {
-	return agent.Capabilities{Reply: true, Sessions: true}
+	return agent.Capabilities{
+		Core:     true,
+		Reply:    true,
+		Sessions: true,
+		// WorkBuddy 5.9+ 的 app-server 不再暴露旧 /api/v1/acp/connect 桥。
+		// 旧桥的 session/new 也会复用当前活跃会话，不能作为独立新会话。
+		NewSession:      false,
+		Stop:            false,
+		Live:            true,
+		SwitchModel:     false,
+		PermissionModes: []string{"default"},
+	}
 }
 func (Agent) Meta(sessionID, cwdHint string) agent.Meta { return metaFor(sessionID, cwdHint) }
 

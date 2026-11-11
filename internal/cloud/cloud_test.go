@@ -1,8 +1,10 @@
 package cloud
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -19,6 +21,7 @@ import (
 	"github.com/tomato-hug/homing/internal/api"
 	"github.com/tomato-hug/homing/internal/protocol"
 	"github.com/tomato-hug/homing/internal/server"
+	"github.com/tomato-hug/homing/internal/store"
 )
 
 const (
@@ -164,6 +167,16 @@ func testMux() *http.ServeMux {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "body": body})
 	})
+	mux.HandleFunc("POST /api/upload", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"size":         len(body),
+			"name":         r.URL.Query().Get("name"),
+			"content_type": r.Header.Get("Content-Type"),
+		})
+	})
 	return mux
 }
 
@@ -196,6 +209,75 @@ func decodeHostPublicKey(t *testing.T, value any) ed25519.PublicKey {
 		t.Fatalf("host public key: %v", err)
 	}
 	return ed25519.PublicKey(raw)
+}
+
+func TestDispatchRPCCloudUpload(t *testing.T) {
+	content := []byte("demo cloud upload\n")
+	body, _ := json.Marshal(map[string]any{
+		"data_base64":  base64.StdEncoding.EncodeToString(content),
+		"content_type": "text/plain",
+	})
+	payload, _ := json.Marshal(rpcRequest{
+		Type:   "rpc",
+		RID:    "upload-1",
+		Method: http.MethodPost,
+		Path:   "/api/upload?event_id=1&name=demo.txt",
+		Body:   body,
+	})
+	raw := dispatchRPC(context.Background(), testMux(), payload)
+	var result rpcResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	bodyMap, _ := result.Body.(map[string]any)
+	if result.Status != http.StatusOK || bodyMap["size"] != float64(len(content)) ||
+		bodyMap["content_type"] != "text/plain" || bodyMap["name"] != "demo.txt" {
+		t.Fatalf("upload result = %#v body=%#v", result, result.Body)
+	}
+
+	oversized, _ := json.Marshal(map[string]any{
+		"data_base64": base64.StdEncoding.EncodeToString(
+			make([]byte, maxCloudUploadBytes+1),
+		),
+	})
+	payload, _ = json.Marshal(rpcRequest{
+		Type:   "rpc",
+		RID:    "upload-2",
+		Method: http.MethodPost,
+		Path:   "/api/upload?event_id=1&name=demo.bin",
+		Body:   oversized,
+	})
+	raw = dispatchRPC(context.Background(), testMux(), payload)
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode oversized result: %v", err)
+	}
+	if result.Status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized status = %d, want 413", result.Status)
+	}
+}
+
+func TestDispatchRPCReachesGuardedLocalAPI(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	mux := api.NewMux(&api.Deps{
+		DataDir: dir,
+		Log:     testLogger(),
+		Version: "test",
+	})
+	if hub, ok := HubFor(dir); ok {
+		t.Cleanup(hub.Close)
+	}
+
+	raw := dispatchRPC(context.Background(), mux, []byte(
+		`{"type":"rpc","rid":"guarded-1","method":"GET","path":"/api/stats"}`,
+	))
+	var result rpcResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if result.Status != http.StatusOK {
+		t.Fatalf("guarded RPC status = %d body=%#v", result.Status, result.Body)
+	}
 }
 
 func TestIdentityPersists(t *testing.T) {
@@ -556,12 +638,70 @@ func TestConnectorPairsThroughRelayAndRunsRPC(t *testing.T) {
 		t.Fatalf("event = %#v", event)
 	}
 
+	api.PublishNamed("item", "demo-cloud-session", map[string]any{
+		"session_id": "demo-cloud-session",
+		"item": map[string]any{
+			"id": "item-demo-live", "seq": 8, "type": "message", "role": "assistant",
+			"text": "云端实时条目",
+		},
+	})
+	itemMessage := client.next(t, func(message map[string]any) bool {
+		return message["t"] == "msg"
+	}, 3*time.Second)
+	itemPlaintext := openClientEnvelope(t, itemMessage, client.keys, hostPub)
+	var itemEvent struct {
+		Type string         `json:"type"`
+		Name string         `json:"name"`
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(itemPlaintext, &itemEvent); err != nil {
+		t.Fatalf("item event: %v", err)
+	}
+	if itemEvent.Type != "event" || itemEvent.Name != "item" ||
+		itemEvent.Data["session_id"] != "demo-cloud-session" {
+		t.Fatalf("item event = %#v", itemEvent)
+	}
+
+	api.Publish(store.Event{
+		ID: 91, Source: "codex", Kind: "reply",
+		SessionID: "demo-cloud-session", Title: "云端持久事件", Text: "demo",
+	})
+	messageMessage := client.next(t, func(message map[string]any) bool {
+		return message["t"] == "msg"
+	}, 3*time.Second)
+	messagePlaintext := openClientEnvelope(t, messageMessage, client.keys, hostPub)
+	var durableEvent struct {
+		Type string         `json:"type"`
+		Name string         `json:"name"`
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(messagePlaintext, &durableEvent); err != nil {
+		t.Fatalf("durable event: %v", err)
+	}
+	if durableEvent.Type != "event" || durableEvent.Name != "message" ||
+		durableEvent.Data["session_id"] != "demo-cloud-session" {
+		t.Fatalf("durable event = %#v", durableEvent)
+	}
+
 	reloaded, err := LoadPeerStore(dir)
 	if err != nil {
 		t.Fatalf("reload peers: %v", err)
 	}
 	if _, ok := reloaded.Get(client.deviceID); !ok {
 		t.Fatal("accepted peer was not persisted")
+	}
+}
+
+func TestCloudSSEEventFilterExcludesNotifications(t *testing.T) {
+	for _, name := range []string{
+		"message", "reply_status", "item", "turn", "session", "dispatch", "collab_result",
+	} {
+		if !cloudSSEEvents[name] {
+			t.Errorf("%s should be bridged to the cloud", name)
+		}
+	}
+	if cloudSSEEvents["notify"] {
+		t.Fatal("notify must keep its separate delivery path")
 	}
 }
 
@@ -575,4 +715,96 @@ func eventually(t *testing.T, timeout time.Duration, condition func() bool, mess
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatalf("timed out: %s", message)
+}
+
+func TestFileChunksUploadAndDownload(t *testing.T) {
+	clearFileAssemblies()
+	content := bytes.Repeat([]byte("Homing chunk test\n"), 5000)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/upload", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":   true,
+			"size": len(body),
+			"name": r.URL.Query().Get("name"),
+		})
+	})
+	mux.HandleFunc("GET /f/demo-token/demo.bin", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write(content)
+	})
+
+	lastSeq := (len(content) - 1) / maxCloudFileChunkBytes
+	for seq, offset := 0, 0; offset < len(content); seq++ {
+		end := offset + maxCloudFileChunkBytes
+		if end > len(content) {
+			end = len(content)
+		}
+		chunk := map[string]any{
+			"type": "file.chunk",
+			"fid":  "file-demo-1",
+			"seq":  seq,
+			"last": end == len(content),
+			"data": base64.StdEncoding.EncodeToString(content[offset:end]),
+		}
+		if seq == 0 {
+			chunk["path"] = "/api/upload?event_id=1&name=demo.bin"
+			chunk["content_type"] = "application/octet-stream"
+		}
+		raw, _ := json.Marshal(chunk)
+		responses, handled := dispatchFilePayload(context.Background(), mux, "demo-peer", raw)
+		if !handled {
+			t.Fatal("upload chunk was not handled")
+		}
+		if seq < lastSeq && len(responses) != 0 {
+			t.Fatalf("early upload response = %#v", responses)
+		}
+		if seq == lastSeq {
+			if len(responses) != 1 {
+				t.Fatalf("final upload responses = %#v", responses)
+			}
+			encoded, _ := json.Marshal(responses[0])
+			var result cloudFileResult
+			if err := json.Unmarshal(encoded, &result); err != nil {
+				t.Fatalf("decode upload result: %v", err)
+			}
+			body, _ := result.Body.(map[string]any)
+			if result.Status != http.StatusOK || body["size"] != float64(len(content)) {
+				t.Fatalf("upload result = %#v body=%#v", result, result.Body)
+			}
+		}
+		offset = end
+	}
+
+	request, _ := json.Marshal(map[string]any{
+		"type": "file.request",
+		"fid":  "file-demo-2",
+		"path": "/f/demo-token/demo.bin",
+	})
+	responses, handled := dispatchFilePayload(context.Background(), mux, "demo-peer", request)
+	if !handled || len(responses) == 0 {
+		t.Fatalf("download responses = %#v handled=%v", responses, handled)
+	}
+	var downloaded []byte
+	for index, response := range responses {
+		encoded, _ := json.Marshal(response)
+		var chunk cloudFileChunk
+		if err := json.Unmarshal(encoded, &chunk); err != nil {
+			t.Fatalf("decode download chunk: %v", err)
+		}
+		if chunk.Seq != index {
+			t.Fatalf("download seq = %d, want %d", chunk.Seq, index)
+		}
+		part, err := base64.StdEncoding.DecodeString(chunk.Data)
+		if err != nil {
+			t.Fatalf("decode download data: %v", err)
+		}
+		downloaded = append(downloaded, part...)
+		if chunk.Last != (index == len(responses)-1) {
+			t.Fatalf("download last flag = %v at %d", chunk.Last, index)
+		}
+	}
+	if !bytes.Equal(downloaded, content) {
+		t.Fatalf("downloaded bytes = %d, want %d", len(downloaded), len(content))
+	}
 }

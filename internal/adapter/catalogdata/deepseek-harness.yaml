@@ -1,0 +1,20 @@
+# DeepSeek Harness（dsh）— 官方示例清单
+# 会话是 zstd 压缩的 JSONL：<sessions>/<slug>/session-<id>/session.v4.jsonl.zstd
+# 首行是 session 头 {type:"session", id, createdAt, cwd}；正文是嵌套的
+# user/message / assistant/message，session/title 记录带 AI 生成的标题。
+# format: dsh 是专用解析器，会跳过 runtime-context / skill-catalog 这类注入消息。
+id: dsh
+name: DeepSeek Harness
+icon: dsh
+
+detect:
+  bin: [dsh]
+  paths:
+    - ~/.dsh
+
+sessions:
+  source: jsonl
+  glob: ~/.dsh/sessions/*/session-*/session.v4.jsonl.zstd
+  format: dsh
+
+push: poll

@@ -1,0 +1,76 @@
+# {{.Name}} 的 Homing 接入套件
+
+- Agent：`{{.Name}}`（`{{.ID}}`，{{.Category}}）
+- 目录：`~/.homing/integrations/{{.ID}}/`
+{{- if .DetectPath}}
+- 已知探测路径：`{{.DetectPath}}`
+{{- else}}
+- 已知探测路径：尚未核实（插件骨架默认留空）
+{{- end}}
+- 配置文件：`{{.ConfigFile}}`
+- 目录来源：{{.SourceLabel}}
+{{- if .Homepage}}
+- 官方页面：{{.Homepage}}
+{{- end}}
+{{- if .SourceURL}}
+- 元数据来源：{{.SourceURL}}
+{{- end}}
+
+这个套件不会修改 {{.Name}} 自己的配置。Homing 默认只提供以下三条路：
+
+## 1. 事件钩子（现在可用）
+
+如果 {{.Name}} 支持调用外部命令：
+
+```sh
+~/.homing/integrations/{{.ID}}/hook.sh
+```
+
+需要 JSON 字段归一化时用：
+
+```sh
+node ~/.homing/integrations/{{.ID}}/hook.mjs
+```
+
+两者都从 stdin 读取一个 JSON 对象；空输入也会发一条通用通知。设置
+`HOMING_HOOK_URL` 可以改服务地址，默认是
+`http://127.0.0.1:18788/hook/generic`。
+
+{{- if .HookHint}}
+
+这家 agent 的原生挂法：{{.HookHint}}
+{{- end}}
+
+## 2. 命令包装器（CLI 可用）
+
+```sh
+~/.homing/integrations/{{.ID}}/homing-run.sh <原命令和参数>
+```
+
+命令结束时发送 `done` 或 `error`。它不会解析对话内容，也不伪装成会话读取。
+
+## 3. 会话插件骨架（需要核实）
+
+- `manifest.draft.yaml`：确认本地文件格式后，改 glob/format，再移到
+  `~/.homing/agents/{{.ID}}.yaml`
+- `adapter.draft.mjs`：格式特殊时补 `listSessions` / `readItems`，再移到
+  `~/.homing/adapters/{{.ID}}.mjs`
+
+两个文件都刻意不放在 Homing 会自动加载的目录里。未经核实的格式不会在
+Agent 页冒充“已支持会话”。
+
+## 通用 JSON
+
+```json
+{
+  "source": "{{.ID}}",
+  "session_id": "demo-session-1",
+  "kind": "needs_reply",
+  "title": "等待确认",
+  "text": "要现在继续吗？",
+  "cwd": "/tmp/demo-project"
+}
+```
+
+`kind` 可用 `reply`、`done`、`needs_reply`、`needs_input`、`permission`、
+`approval`、`error`、`message`。测试数据请明显写成 demo。

@@ -39,8 +39,21 @@ type Manifest struct {
 		Command []string `yaml:"command"`
 	} `yaml:"models"`
 
+	Drive *DriveSpec `yaml:"drive"`
+
 	// SourceFile is filled by the loader, not the YAML.
 	SourceFile string `yaml:"-"`
+}
+
+// DriveSpec opts a user manifest into the generic process driver. Only ACP is
+// accepted today; command is an argv vector and never passes through a shell.
+type DriveSpec struct {
+	Kind      string            `yaml:"kind"`
+	Command   []string          `yaml:"command"`
+	Env       map[string]string `yaml:"env"`
+	Dispatch  *bool             `yaml:"dispatch"`
+	Check     []string          `yaml:"check"`
+	CheckFail []string          `yaml:"check_fail"`
 }
 
 // SessionSpec says where one agent keeps its sessions and how to read them.
@@ -102,8 +115,11 @@ func expandHome(p string) string {
 var validFormats = map[string]bool{
 	"claude-code":   true,
 	"codex":         true,
+	"dsh":           true,
 	"gemini-cli":    true,
+	"generic-json":  true,
 	"generic-jsonl": true,
+	"openclaw":      true,
 	"custom":        true,
 }
 
@@ -133,7 +149,12 @@ func (m *Manifest) Validate() []string {
 			errs = append(errs, "sessions 需要 url")
 		}
 	case "":
-		errs = append(errs, "缺少 sessions")
+		// A drive-only manifest is valid: ACP can create and control sessions
+		// even when Homing has no verified local transcript format yet. The
+		// capability table must still report sessions=false.
+		if m.Drive == nil {
+			errs = append(errs, "缺少 sessions")
+		}
 	default:
 		errs = append(errs, fmt.Sprintf("sessions.source 必须是 jsonl | json | sqlite | http（收到 %s）", src))
 	}
@@ -152,6 +173,17 @@ func (m *Manifest) Validate() []string {
 	if m.Reply != nil {
 		if len(m.Reply.Command) == 0 {
 			errs = append(errs, "reply.command 必须是参数数组（不给 shell 拼串）")
+		}
+	}
+	if m.Drive != nil {
+		if strings.ToLower(strings.TrimSpace(m.Drive.Kind)) != "acp" {
+			errs = append(errs, "drive.kind 目前只支持 acp")
+		}
+		if len(m.Drive.Command) == 0 {
+			errs = append(errs, "drive.command 必须是非空参数数组（不给 shell 拼串）")
+		}
+		if len(m.Drive.Check) > 0 && strings.TrimSpace(m.Drive.Check[0]) == "" {
+			errs = append(errs, "drive.check 必须是参数数组")
 		}
 	}
 	return errs
@@ -240,3 +272,6 @@ var ErrNoAgentData = errors.New("adapter: no agent data")
 
 // yamlUnmarshal is a thin wrapper so callers outside this file do not import yaml.
 func yamlUnmarshal(raw []byte, v any) error { return yaml.Unmarshal(raw, v) }
+
+// yamlMarshal is the matching wrapper for console-created manifests.
+func yamlMarshal(v any) ([]byte, error) { return yaml.Marshal(v) }

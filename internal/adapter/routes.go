@@ -9,13 +9,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/tomato-hug/homing/internal/agent"
 	"github.com/tomato-hug/homing/internal/api"
+	"github.com/tomato-hug/homing/internal/driver"
 )
 
 // EventSink receives the events custom agents push to /api/ingest. The store and
@@ -64,7 +64,51 @@ func refresh() {
 	}
 	manifests, manErrs = LoadManifests(ManifestDir())
 	scripts, scrErrs = LoadScripts(ScriptDir())
+	syncDriveSpecs(manifests)
 	runtimeAt = time.Now()
+}
+
+func syncDriveSpecs(manifests []*ManifestAgent) {
+	specs := make([]driver.Spec, 0)
+	for _, agent := range manifests {
+		manifest := agent.Manifest()
+		if manifest == nil || manifest.Drive == nil {
+			continue
+		}
+		if _, builtin := driver.BuiltinSpecFor(manifest.ID); builtin {
+			// The catalog can persist enabled state for an id that already has
+			// a verified built-in ACP command. The manifest still makes the
+			// capability visible, but the built-in command remains authoritative.
+			continue
+		}
+		dispatch := true
+		if manifest.Drive.Dispatch != nil {
+			dispatch = *manifest.Drive.Dispatch
+		}
+		specs = append(specs, driver.Spec{
+			ID:        manifest.ID,
+			Label:     firstNonEmptyValue(manifest.Name, manifest.ID),
+			Command:   append([]string(nil), manifest.Drive.Command...),
+			Env:       manifest.Drive.Env,
+			Dispatch:  dispatch,
+			Verified:  true,
+			Check:     append([]string(nil), manifest.Drive.Check...),
+			CheckFail: append([]string(nil), manifest.Drive.CheckFail...),
+			Notes:     "由 " + manifest.SourceFile + " 的 drive 段啟用",
+		})
+	}
+	if err := driver.ReplaceDynamicSpecs(specs); err != nil {
+		manErrs = append(manErrs, ManifestError{ID: "drive", Problems: []string{err.Error()}})
+	}
+}
+
+func firstNonEmptyValue(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func invalidate() {
@@ -110,31 +154,39 @@ func mount(mux *http.ServeMux, d *api.Deps) {
 	ingestOnce.Do(func() {
 		ingest = NewIngestStore(d.DataDir)
 	})
+	registerIngestReplyTransport()
+	mountCatalogRoutes(mux, d)
 
 	// GET /api/adapters
 	mux.HandleFunc("GET /api/adapters", func(w http.ResponseWriter, r *http.Request) {
-		api.WriteJSON(w, http.StatusOK, listAdapters(r.Context()))
+		if !adapterAuthorized(d, w, r) {
+			return
+		}
+		api.WriteJSON(w, http.StatusOK, consoleAdapterPayload(d))
 	})
 
 	// POST /api/adapters —— 保存清单
 	mux.HandleFunc("POST /api/adapters", func(w http.ResponseWriter, r *http.Request) {
+		if !adapterAuthorized(d, w, r) {
+			return
+		}
 		body, err := readJSONBody(r)
 		if err != nil {
 			api.WriteJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
-		yamlText, _ := body["yaml"].(string)
-		if strings.TrimSpace(yamlText) == "" {
-			api.WriteJSON(w, http.StatusBadRequest, map[string]any{"error": "yaml 不能为空"})
+		yamlText, err := manifestYAMLFromRequest(body)
+		if err != nil {
+			api.WriteJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
 		m, problems, err := LoadManifestFromString(yamlText)
 		if err != nil {
-			api.WriteJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			api.WriteJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
 		if len(problems) > 0 {
-			api.WriteJSON(w, http.StatusBadRequest, map[string]any{"error": "清单校验未通过", "errors": problems})
+			api.WriteJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "清单校验未通过", "errors": problems})
 			return
 		}
 		dir := ManifestDir()
@@ -153,17 +205,31 @@ func mount(mux *http.ServeMux, d *api.Deps) {
 			return
 		}
 		invalidate()
-		api.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "id": m.ID, "file": file, "backup": backup})
+		api.WriteJSON(w, http.StatusOK, map[string]any{
+			"ok": true, "id": m.ID, "file": file, "backup": backup,
+		})
 	})
 
 	// POST /api/adapters/test —— 试读
 	mux.HandleFunc("POST /api/adapters/test", func(w http.ResponseWriter, r *http.Request) {
+		if !adapterAuthorized(d, w, r) {
+			return
+		}
 		body, err := readJSONBody(r)
 		if err != nil {
 			api.WriteJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
 		yamlText, _ := body["yaml"].(string)
+		if strings.TrimSpace(yamlText) == "" {
+			path, _ := body["path"].(string)
+			format, _ := body["format"].(string)
+			if format == "" {
+				format = "jsonl"
+			}
+			api.WriteJSON(w, http.StatusOK, adapterTestRead(path, format))
+			return
+		}
 		m, problems, err := LoadManifestFromString(yamlText)
 		if err != nil {
 			api.WriteJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -191,7 +257,14 @@ func mount(mux *http.ServeMux, d *api.Deps) {
 
 	// DELETE /api/adapters/{id}
 	mux.HandleFunc("DELETE /api/adapters/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if !adapterAuthorized(d, w, r) {
+			return
+		}
 		id := r.PathValue("id")
+		if !validID(id) {
+			api.WriteJSON(w, http.StatusBadRequest, map[string]any{"error": "adapter id 不合法"})
+			return
+		}
 		var removed []map[string]string
 		for _, dir := range []string{ManifestDir(), ScriptDir()} {
 			for _, name := range []string{id + ".yaml", id + ".yml", id + ".mjs"} {
@@ -251,7 +324,7 @@ func mount(mux *http.ServeMux, d *api.Deps) {
 		ev := agent.Event{
 			Source:    body.Agent,
 			SessionID: body.SessionID,
-			Kind:      body.Kind,
+			Kind:      agent.CanonicalEventKind(body.Kind),
 			Title:     body.Title,
 			Text:      body.Text,
 			At:        time.Now().UTC(),
@@ -266,6 +339,9 @@ func mount(mux *http.ServeMux, d *api.Deps) {
 
 	// POST /api/ingest/tokens
 	mux.HandleFunc("POST /api/ingest/tokens", func(w http.ResponseWriter, r *http.Request) {
+		if !adapterAuthorized(d, w, r) {
+			return
+		}
 		body, err := readJSONBody(r)
 		if err != nil {
 			api.WriteJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -287,6 +363,9 @@ func mount(mux *http.ServeMux, d *api.Deps) {
 
 	// DELETE /api/ingest/tokens
 	mux.HandleFunc("DELETE /api/ingest/tokens", func(w http.ResponseWriter, r *http.Request) {
+		if !adapterAuthorized(d, w, r) {
+			return
+		}
 		body, err := readJSONBody(r)
 		if err != nil {
 			api.WriteJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -307,66 +386,12 @@ func mount(mux *http.ServeMux, d *api.Deps) {
 
 // ---- 辅助 ---------------------------------------------------------------
 
-func listAdapters(ctx context.Context) map[string]any {
-	refresh()
-	runtimeMu.Lock()
-	ma := append([]*ManifestAgent(nil), manifests...)
-	sa := append([]*ScriptAgent(nil), scripts...)
-	merrs := append([]ManifestError(nil), manErrs...)
-	serrs := append([]ManifestError(nil), scrErrs...)
-	runtimeMu.Unlock()
-
-	items := []map[string]any{}
-	for _, m := range ma {
-		items = append(items, map[string]any{
-			"kind": "manifest", "id": m.ID(), "name": m.Name(), "icon": m.Icon(),
-			"push_signal": string(m.PushSignal()), "status": "ok", "file": m.m.SourceFile,
-		})
+func adapterAuthorized(d *api.Deps, w http.ResponseWriter, r *http.Request) bool {
+	if d.Authorized(r) {
+		return true
 	}
-	for _, e := range merrs {
-		items = append(items, map[string]any{
-			"kind": "manifest", "id": e.ID, "name": e.ID, "icon": "generic",
-			"push_signal": "poll", "status": "error", "error": strings.Join(e.Problems, "; "), "file": e.File,
-		})
-	}
-	for _, s := range sa {
-		items = append(items, map[string]any{
-			"kind": "script", "id": s.ID(), "name": s.Name(), "icon": s.Icon(),
-			"push_signal": string(s.PushSignal()), "status": "ok", "file": s.file,
-		})
-	}
-	for _, e := range serrs {
-		items = append(items, map[string]any{
-			"kind": "script", "id": e.ID, "name": e.ID, "icon": "generic",
-			"push_signal": "poll", "status": "error", "error": strings.Join(e.Problems, "; "), "file": e.File,
-		})
-	}
-	sort.SliceStable(items, func(i, j int) bool {
-		return fmt.Sprint(items[i]["id"]) < fmt.Sprint(items[j]["id"])
-	})
-
-	resp := map[string]any{
-		"items": items,
-		"dirs": map[string]string{
-			"manifests": ManifestDir(),
-			"scripts":   ScriptDir(),
-		},
-		"counts": map[string]int{
-			"manifest": len(ma),
-			"script":   len(sa),
-			"errors":   len(merrs) + len(serrs),
-		},
-		"generated_at": time.Now().UTC().Format(time.RFC3339),
-	}
-	if ingest != nil {
-		resp["ingest"] = ingest.List()
-	}
-	if bin, err := RunnerAvailable(); err != nil {
-		resp["runner"] = map[string]any{"ok": false, "error": err.Error()}
-	} else {
-		resp["runner"] = map[string]any{"ok": true, "bin": bin}
-	}
-	return resp
+	api.WriteJSON(w, http.StatusUnauthorized, map[string]any{"error": "Unauthorized"})
+	return false
 }
 
 // LoadManifestFromString validates YAML text without touching disk (used by

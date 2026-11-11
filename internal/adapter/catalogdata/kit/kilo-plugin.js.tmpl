@@ -1,0 +1,65 @@
+// Kilo Code / OpenCode-compatible Homing plugin.
+// Copy this file to ~/.config/kilo/plugin/homing.js and restart Kilo.
+// It forwards only lifecycle/notification events; prompts and file contents are
+// not uploaded.
+
+import { request } from "node:http";
+
+const agent = "{{.ID}}";
+const endpoint = new URL(
+  process.env.HOMING_HOOK_URL || "http://127.0.0.1:18788/hook/generic",
+);
+
+function eventKind(type) {
+  if (!type) return "";
+  if (type === "session.idle" || type === "session.completed") return "reply";
+  if (type === "session.error" || type === "error") return "error";
+  if (type.startsWith("permission.") || type === "approval") return "permission";
+  if (type.startsWith("notification.")) return "needs_input";
+  return "";
+}
+
+function post(payload) {
+  try {
+    const body = Buffer.from(JSON.stringify(payload), "utf8");
+    const target = request(
+      {
+        protocol: endpoint.protocol,
+        hostname: endpoint.hostname,
+        port: endpoint.port || 80,
+        path: `${endpoint.pathname}${endpoint.search}`,
+        method: "POST",
+        timeout: 1500,
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": body.length,
+          "X-Homing-Agent": agent,
+        },
+      },
+      (response) => response.resume(),
+    );
+    target.on("timeout", () => target.destroy());
+    target.on("error", () => {});
+    target.end(body);
+  } catch {
+    // A hook must not interfere with the agent.
+  }
+}
+
+export const HomingPlugin = async ({ directory }) => ({
+  event: async ({ event }) => {
+    const kind = eventKind(event?.type);
+    if (!kind) return;
+    const props = event?.properties || {};
+    const sessionID = props.sessionID || props.sessionId || props.id || "";
+    if (!sessionID) return;
+    post({
+      source: agent,
+      session_id: sessionID,
+      kind,
+      title: props.title || "Kilo Code 会话更新",
+      text: props.message || props.error || "",
+      cwd: props.directory || directory || "",
+    });
+  },
+});

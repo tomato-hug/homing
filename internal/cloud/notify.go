@@ -25,6 +25,9 @@ func AttachPush(deps *api.Deps, setPush func(func(notify.Payload))) {
 	if log == nil {
 		log = slog.Default()
 	}
+	api.SetTestPushSink(func(ctx context.Context, payload notify.Payload) (int, error) {
+		return DeliverNotification(ctx, deps.DataDir, payload)
+	})
 	setPush(func(payload notify.Payload) {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()

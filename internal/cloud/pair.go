@@ -30,7 +30,7 @@ func init() {
 
 func runPair(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("pair", flag.ContinueOnError)
-	serve := fs.String("serve", envOr("HOMING_SERVE", "http://127.0.0.1:18788"),
+	serve := fs.String("serve", envOr("HOMING_SERVE", "http://127.0.0.1:18787"),
 		"running `homing serve` base URL")
 	server := fs.String("server", "", "WebSocket URL the phone should use (default: LAN address)")
 	lanIP := fs.String("lan-ip", "", "LAN IPv4 address to put in the QR code")
@@ -56,7 +56,7 @@ func runPair(ctx context.Context, args []string) error {
 	var started pairStartResponse
 	if err := callJSON(ctx, http.MethodPost, serveURL+"/api/cloud/pair/start",
 		map[string]string{"server": wsServer}, &started); err != nil {
-		return fmt.Errorf("连接 homing serve 失败（先运行 `homing serve --addr 0.0.0.0:18788`）: %w", err)
+		return fmt.Errorf("连接 homing serve 失败（先运行 `homing serve`）: %w", err)
 	}
 	mode := "局域网直连"
 	if started.Mode == "cloud" {
@@ -85,7 +85,7 @@ func runPair(ctx context.Context, args []string) error {
 	fmt.Printf("电脑指纹: %s\n", started.Fingerprint)
 	fmt.Printf("配对 URI: %s\n", started.URI)
 	if started.Mode == "lan" {
-		fmt.Println("提示: 手机需要能访问上面的 ws:// 地址；若 serve 只监听 127.0.0.1，请改用 --addr 0.0.0.0:18788。")
+		fmt.Println("提示: 手机需要能访问上面的 ws:// 地址；若 serve 只监听 127.0.0.1，请改用 --addr 0.0.0.0:18787。")
 	}
 	fmt.Println("\n在手机 Homing 中扫码或输入配对码；下面会显示四个校验词。")
 

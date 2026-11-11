@@ -77,7 +77,11 @@ func Start(d *api.Deps) *Service {
 		Sink:   svc.deliver,
 		Muted:  func(source, sessionID string) bool { return st.SessionState(source, sessionID).Muted },
 		Paused: func() bool { return platform.IsPaused(svc.paths) },
-		Log:    func(format string, args ...any) { d.Log.Debug("notify: "+format, args...) },
+		Away:   st.Away,
+		Reminder: func(source, sessionID string) bool {
+			return st.ConsumeRemindOnDone(source, sessionID)
+		},
+		Log: func(format string, args ...any) { d.Log.Debug("notify: "+format, args...) },
 	})
 	services[d] = svc
 	cloud.AttachPush(d, svc.SetPush)
@@ -123,20 +127,32 @@ func (s *Service) Ingest(ev agent.Event) {
 		return
 	}
 	api.Publish(stored)
+	for _, reply := range s.store.ConfirmQueuedRepliesForAgentEvent(stored) {
+		api.PublishReplyStatus(reply)
+	}
 	s.notifier.OnEvent(notify.Event{
-		ID:        stored.ID,
-		Source:    stored.Source,
-		SessionID: stored.SessionID,
-		Kind:      stored.Kind,
-		Title:     stored.Title,
-		Text:      stored.Text,
-		Cwd:       stored.Cwd,
-		Ts:        stored.Ts,
+		ID:         stored.ID,
+		Source:     stored.Source,
+		SessionID:  stored.SessionID,
+		Kind:       stored.Kind,
+		DispatchID: sessionMetaString(stored.SessionMeta, "dispatch_id"),
+		Title:      stored.Title,
+		Text:       stored.Text,
+		Cwd:        stored.Cwd,
+		Ts:         stored.Ts,
 	})
+}
+
+func sessionMetaString(meta map[string]any, key string) string {
+	value, _ := meta[key].(string)
+	return value
 }
 
 // deliver hands a finished notification to the push transport.
 func (s *Service) deliver(payload notify.Payload) {
+	// The local SSE stream carries the same notify event name as the cloud
+	// channel, so the phone has one handler for both transports.
+	api.PublishNamed("notify", payload.SessionID, payload)
 	s.mu.RLock()
 	push := s.push
 	s.mu.RUnlock()

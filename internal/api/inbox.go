@@ -24,14 +24,15 @@ type InboxSession struct {
 
 // InboxItem is one row of waiting / running / recent_done.
 type InboxItem struct {
-	Session InboxSession `json:"session"`
-	EventID int64        `json:"event_id"`
-	Kind    string       `json:"kind"`
-	Title   string       `json:"title"`
-	Summary string       `json:"summary"`
-	At      string       `json:"at"`
-	Pinned  bool         `json:"pinned"`
-	Read    bool         `json:"read"`
+	Session  InboxSession  `json:"session"`
+	EventID  int64         `json:"event_id"`
+	Kind     string        `json:"kind"`
+	Title    string        `json:"title"`
+	Summary  string        `json:"summary"`
+	At       string        `json:"at"`
+	Pinned   bool          `json:"pinned"`
+	Read     bool          `json:"read"`
+	Approval *HomeApproval `json:"approval,omitempty"`
 }
 
 // Inbox is the GET /api/inbox payload.
@@ -107,6 +108,7 @@ func (d *Deps) buildInbox(r *http.Request) Inbox {
 			switch event.Kind {
 			case "permission":
 				item.Kind = "approval"
+				item.Approval = approvalFor(event)
 			case "needs_input":
 				item.Kind = "needs_reply"
 			}

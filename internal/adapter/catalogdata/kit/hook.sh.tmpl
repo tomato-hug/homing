@@ -1,0 +1,21 @@
+#!/bin/sh
+# {{.Name}} -> Homing. Reads one JSON object from stdin (or sends a generic
+# notification when the hook provides no body) and never blocks the agent.
+set -u
+
+BASE_URL="${HOMING_HOOK_URL:-http://127.0.0.1:18788/hook/generic}"
+AGENT="{{.ID}}"
+KIND="${HOMING_KIND:-message}"
+payload="$(cat)"
+
+if [ -z "$payload" ]; then
+  payload="{\"source\":\"$AGENT\",\"session_id\":\"$AGENT\",\"kind\":\"$KIND\",\"title\":\"{{.Name}} 发来一条通知\"}"
+fi
+
+curl --connect-timeout 1 --max-time 2 -fsS -X POST "$BASE_URL" \
+  -H 'Content-Type: application/json' \
+  -H "X-Homing-Agent: $AGENT" \
+  -H "X-Homing-Kind: $KIND" \
+  --data-binary "$payload" >/dev/null 2>&1 || true
+
+exit 0

@@ -1,0 +1,31 @@
+// DRAFT ONLY. This file is not under ~/.homing/adapters, so it cannot appear
+// as a working integration until you verify the data and move/rename it.
+//
+// 1. Change meta.reads and the parser below to the real local format.
+// 2. Test with a copied session under /tmp.
+// 3. Move to ~/.homing/adapters/{{.ID}}.mjs, then refresh the console.
+
+export const meta = {
+  reads: [{{if .DetectPath}}{{printf "%q" .DetectPath}}{{end}}],
+  draft: true,
+};
+export const id = "{{.ID}}";
+export const name = "{{.Name}}";
+export const icon = "{{.ID}}";
+export const pushSignal = "poll";
+export const capabilities = { sessions: true, reply: false };
+
+export async function detect() {
+  return { installed: true, version: null, detail: "{{.Name}} draft adapter" };
+}
+
+export async function listSessions(_context) {
+  // Return [{ session_id, title, last_ts, cwd, model }].
+  // Keep this empty until a real parser is implemented.
+  return [];
+}
+
+export async function readItems(_sessionId, _context) {
+  // Return [{ role, text, at }].
+  return [];
+}

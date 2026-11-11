@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "dispatchable_agents": ["claude", "codex"],
+  "cases": [
+    {
+      "name": "parent text and two agents",
+      "input": "先修正登录按钮\n@claude 检查登录流程\n@codex 跑完整测试",
+      "message": "先修正登录按钮",
+      "mentions": [
+        {"agent": "claude", "preset": "ask", "text": "检查登录流程", "dispatchable": true},
+        {"agent": "codex", "preset": "ask", "text": "跑完整测试", "dispatchable": true}
+      ]
+    },
+    {
+      "name": "dispatch only leaves parent reply empty",
+      "input": "@Claude 检查登录流程",
+      "message": "",
+      "mentions": [
+        {"agent": "claude", "preset": "ask", "text": "检查登录流程", "dispatchable": true}
+      ]
+    },
+    {
+      "name": "preset is captured",
+      "input": "@claude:review 审查这次改动，补测试",
+      "message": "",
+      "mentions": [
+        {"agent": "claude", "preset": "review", "text": "审查这次改动，补测试", "dispatchable": true}
+      ]
+    },
+    {
+      "name": "email is not a mention",
+      "input": "发到 dev@example.com，说明一下",
+      "message": "发到 dev@example.com，说明一下",
+      "mentions": []
+    },
+    {
+      "name": "inline code is not a mention",
+      "input": "把 `@claude` 当作文本，不要派发",
+      "message": "把 `@claude` 当作文本，不要派发",
+      "mentions": []
+    },
+    {
+      "name": "fenced code is not a mention",
+      "input": "看这段：\n```\n@claude 不应被解析\n```\n结束",
+      "message": "看这段：\n```\n@claude 不应被解析\n```\n结束",
+      "mentions": []
+    },
+    {
+      "name": "unknown agent is kept for a 409",
+      "input": "@unknown-agent 帮我看一下",
+      "message": "",
+      "mentions": [
+        {"agent": "unknown-agent", "preset": "ask", "text": "帮我看一下", "dispatchable": false}
+      ]
+    },
+    {
+      "name": "empty task is kept for validation",
+      "input": "先看这里\n@claude",
+      "message": "先看这里",
+      "mentions": [
+        {"agent": "claude", "preset": "ask", "text": "", "dispatchable": true}
+      ]
+    }
+  ]
+}

@@ -7,19 +7,20 @@ import (
 	"strings"
 
 	"github.com/tomato-hug/homing/internal/cli"
+	"github.com/tomato-hug/homing/internal/driver"
 )
 
 func init() {
 	cli.Register(cli.Command{
 		Name:    "agents",
-		Summary: "检查自定义 agent 清单（homing agents test <清单>）",
+		Summary: "检查清单或验证 ACP 驱动（homing agents test / drive-test）",
 		Run:     runAgents,
 	})
 }
 
 func runAgents(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("用法: homing agents test <清单路径>")
+		return errors.New("用法: homing agents <test|drive-test> ...")
 	}
 	switch args[0] {
 	case "test":
@@ -27,8 +28,10 @@ func runAgents(ctx context.Context, args []string) error {
 			return errors.New("用法: homing agents test <清单路径>")
 		}
 		return testManifest(ctx, args[1])
+	case "drive-test":
+		return driver.RunDriveTest(ctx, args[1:])
 	default:
-		return fmt.Errorf("不认识的 agents 子命令 %q（可用: test）", args[0])
+		return fmt.Errorf("不认识的 agents 子命令 %q（可用: test, drive-test）", args[0])
 	}
 }
 

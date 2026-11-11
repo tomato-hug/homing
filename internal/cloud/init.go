@@ -34,6 +34,10 @@ func init() {
 		}
 		mux.Handle("GET /v1/ws", hub)
 		mountPairControl(mux, dataDir, hub)
+		mountConfig(mux, dataDir, hub, deps)
+		deps.SetCloudStatusProvider(func() api.CloudStatus {
+			return StatusFor(dataDir, hub)
+		})
 
 		// A configured relay address means the user already paired this computer
 		// with a cloud/self-hosted server; keep it connected in the background.
@@ -123,4 +127,39 @@ func ConnectorFor(dataDir string) (*Connector, bool) {
 	defer registry.Unlock()
 	connector, ok := registry.connectors[dataDir]
 	return connector, ok
+}
+
+// StatusFor reports the live relay connector state for one data directory.
+func StatusFor(dataDir string, hub *Hub) api.CloudStatus {
+	status := api.CloudStatus{}
+	if hub != nil {
+		status.Server = hub.Peers().Server()
+		status.Configured = status.Server != ""
+		status.Peers = len(hub.Peers().List())
+	}
+	if connector, ok := ConnectorFor(dataDir); ok && connector != nil {
+		status.Connected = connector.Connected()
+	}
+	return status
+}
+
+func installConnector(dataDir string, connector *Connector) {
+	registry.Lock()
+	old := registry.connectors[dataDir]
+	registry.connectors[dataDir] = connector
+	registry.Unlock()
+	if old != nil && old != connector {
+		old.Close()
+	}
+	go connector.Run(context.Background())
+}
+
+func removeConnector(dataDir string) {
+	registry.Lock()
+	connector := registry.connectors[dataDir]
+	delete(registry.connectors, dataDir)
+	registry.Unlock()
+	if connector != nil {
+		connector.Close()
+	}
 }

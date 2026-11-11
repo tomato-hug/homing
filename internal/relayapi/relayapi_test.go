@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/tomato-hug/homing/internal/agent/scanlib"
+	_ "github.com/tomato-hug/homing/internal/agent/workbuddy"
 	"github.com/tomato-hug/homing/internal/api"
 	filepaths "github.com/tomato-hug/homing/internal/files"
 	"github.com/tomato-hug/homing/internal/notify"
@@ -37,6 +38,7 @@ type testRelay struct {
 
 func newTestRelay(t *testing.T, configure func(string)) *testRelay {
 	t.Helper()
+	installFakeCodex(t)
 	dir := t.TempDir()
 	if configure != nil {
 		configure(dir)
@@ -66,6 +68,19 @@ func newTestRelay(t *testing.T, configure func(string)) *testRelay {
 			},
 		},
 	}
+}
+
+// installFakeCodex keeps relay tests from sending demo-session replies through
+// the developer's real Codex app-server. The queue path is covered separately
+// in internal/agent/codex with argument-level assertions.
+func installFakeCodex(t *testing.T) {
+	t.Helper()
+	binDir := t.TempDir()
+	script := "#!/bin/sh\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, "codex"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 func (r *testRelay) do(t *testing.T, method, path string, body []byte, auth bool) (*http.Response, []byte) {
@@ -173,6 +188,134 @@ func TestHooksRejectNonLoopback(t *testing.T) {
 	}
 }
 
+func TestGenericHookAcceptsCustomAgent(t *testing.T) {
+	relay := newTestRelay(t, nil)
+	cwd := demoCwd(t)
+	response, body := relay.do(t, http.MethodPost, "/hook/generic", []byte(`{
+		"agent":"my-agent",
+		"kind":"done",
+		"session_id":"demo-custom-agent",
+		"workdir":"`+cwd+`",
+		"title":"示例：自定义 agent 完成",
+		"text":"示例：构建完成"
+	}`), false)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+
+	eventsResponse, eventsBody := relay.do(t, http.MethodGet, "/api/events?since=0", nil, true)
+	if eventsResponse.StatusCode != http.StatusOK {
+		t.Fatalf("events status=%d", eventsResponse.StatusCode)
+	}
+	var events []store.Event
+	if err := json.Unmarshal(eventsBody, &events); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Source != "my-agent" || events[0].Kind != "done" {
+		t.Fatalf("events=%+v", events)
+	}
+}
+
+func TestGenericHookRejectsInvalidSource(t *testing.T) {
+	relay := newTestRelay(t, nil)
+	response, _ := relay.do(t, http.MethodPost, "/hook/generic", []byte(`{
+		"source":"../bad",
+		"kind":"done",
+		"session_id":"demo-custom-agent"
+	}`), false)
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", response.StatusCode)
+	}
+}
+
+func TestGenericHookAcceptsCommonAgentPayload(t *testing.T) {
+	relay := newTestRelay(t, nil)
+	cwd := demoCwd(t)
+	request, err := http.NewRequest(http.MethodPost, relay.server.URL+"/hook/generic", strings.NewReader(`{
+		"hook_event_name":"Stop",
+		"thread-id":"demo-common-hook",
+		"cwd":"`+cwd+`",
+		"last_assistant_message":"示例：通用钩子完成"
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Homing-Agent", "demo-cli")
+	response, err := relay.client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, _ := io.ReadAll(response.Body)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+
+	eventsResponse, eventsBody := relay.do(t, http.MethodGet, "/api/events?since=0", nil, true)
+	if eventsResponse.StatusCode != http.StatusOK {
+		t.Fatalf("events status=%d", eventsResponse.StatusCode)
+	}
+	var events []store.Event
+	if err := json.Unmarshal(eventsBody, &events); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events=%d, want 1", len(events))
+	}
+	got := events[0]
+	if got.Source != "demo-cli" || got.Kind != "reply" ||
+		got.SessionID != "demo-common-hook" || got.Cwd != cwd ||
+		got.Text != "示例：通用钩子完成" {
+		t.Fatalf("event=%+v", got)
+	}
+}
+
+func TestGenericHookCanonicalizesWaitingKinds(t *testing.T) {
+	relay := newTestRelay(t, nil)
+	for _, payload := range []string{
+		`{"source":"demo-agent","kind":"needs_reply","session_id":"demo-needs-reply","text":"示例：等待回复"}`,
+		`{"source":"demo-agent","kind":"approval","session_id":"demo-approval","text":"示例：等待授权"}`,
+	} {
+		response, body := relay.do(t, http.MethodPost, "/hook/generic", []byte(payload), false)
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("status=%d body=%s", response.StatusCode, body)
+		}
+	}
+
+	eventsResponse, eventsBody := relay.do(t, http.MethodGet, "/api/events?since=0", nil, true)
+	if eventsResponse.StatusCode != http.StatusOK {
+		t.Fatalf("events status=%d", eventsResponse.StatusCode)
+	}
+	var events []store.Event
+	if err := json.Unmarshal(eventsBody, &events); err != nil {
+		t.Fatal(err)
+	}
+	kinds := map[string]bool{}
+	for _, event := range events {
+		kinds[event.Kind] = true
+	}
+	if !kinds["needs_input"] || !kinds["permission"] || kinds["needs_reply"] || kinds["approval"] {
+		t.Fatalf("stored kinds = %v", kinds)
+	}
+
+	inboxResponse, inboxBody := relay.do(t, http.MethodGet, "/api/inbox", nil, true)
+	if inboxResponse.StatusCode != http.StatusOK {
+		t.Fatalf("inbox status=%d", inboxResponse.StatusCode)
+	}
+	var inbox api.Inbox
+	if err := json.Unmarshal(inboxBody, &inbox); err != nil {
+		t.Fatal(err)
+	}
+	waiting := map[string]bool{}
+	for _, item := range inbox.Waiting {
+		waiting[item.Kind] = true
+	}
+	if !waiting["needs_reply"] || !waiting["approval"] {
+		t.Fatalf("inbox waiting kinds = %v", waiting)
+	}
+}
+
 func TestHookEventReachesNotifyPush(t *testing.T) {
 	relay := newTestRelay(t, nil)
 	svc := service.Start(relay.deps)
@@ -206,6 +349,38 @@ func TestHookEventReachesNotifyPush(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("hook event did not reach the push sink")
+	}
+}
+
+func TestNeedsReplyHookBecomesP1Push(t *testing.T) {
+	relay := newTestRelay(t, nil)
+	svc := service.Start(relay.deps)
+	if svc == nil {
+		t.Fatal("service pipeline did not start")
+	}
+	pushes := make(chan notify.Payload, 1)
+	svc.SetPush(func(payload notify.Payload) { pushes <- payload })
+
+	response, body := relay.do(t, http.MethodPost, "/hook/generic", []byte(`{
+		"source":"demo-agent",
+		"kind":"needs_reply",
+		"session_id":"demo-needs-reply-push",
+		"title":"示例：等你确认",
+		"text":"示例：要继续吗？"
+	}`), false)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("hook status=%d body=%s", response.StatusCode, body)
+	}
+	service.Flush(relay.deps)
+
+	select {
+	case payload := <-pushes:
+		if payload.Level != "P1" || payload.SessionID != "demo-needs-reply-push" ||
+			payload.Title != "示例：等你确认" {
+			t.Fatalf("payload=%+v", payload)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("needs_reply hook did not become a P1 push")
 	}
 }
 
@@ -412,6 +587,59 @@ func TestDevicesListHeartbeatRenameRevoke(t *testing.T) {
 	}
 }
 
+func TestDeviceScopesBlockDriveButAllowReply(t *testing.T) {
+	relay := newTestRelay(t, nil)
+	deviceToken := "hm_demo-scoped-device"
+	sum := sha256.Sum256([]byte(deviceToken))
+	device := store.Device{
+		ID:          "0123456789ac",
+		Name:        "只读手机",
+		Platform:    "android",
+		CreatedAt:   "2026-11-09T00:00:00.000Z",
+		PairedVia:   "qr",
+		TokenSHA256: hex.EncodeToString(sum[:]),
+		Scopes:      []string{"read"},
+	}
+	if err := relay.store.SaveDevices([]store.Device{device}, nil); err != nil {
+		t.Fatal(err)
+	}
+	doDevice := func(method, path, body string) (*http.Response, []byte) {
+		request, _ := http.NewRequest(method, relay.server.URL+path, strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer "+deviceToken)
+		request.Header.Set("Content-Type", "application/json")
+		response, err := relay.client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		raw, _ := io.ReadAll(response.Body)
+		return response, raw
+	}
+
+	response, body := doDevice(http.MethodPost, "/api/compose", `{"session_id":"demo","text":"@claude hi"}`)
+	if response.StatusCode != http.StatusForbidden || !bytes.Contains(body, []byte(`"scope_denied"`)) {
+		t.Fatalf("compose status=%d body=%s", response.StatusCode, body)
+	}
+
+	response, _ = relay.do(t, http.MethodPatch, "/api/devices/0123456789ac",
+		[]byte(`{"scopes":["read","reply"]}`), true)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("patch scopes status=%d", response.StatusCode)
+	}
+	response, body = relay.do(t, http.MethodGet, "/api/devices", nil, true)
+	if response.StatusCode != http.StatusOK || !bytes.Contains(body, []byte(`"scopes":["read","reply"]`)) {
+		t.Fatalf("devices body=%s", body)
+	}
+	response, body = doDevice(http.MethodPost, "/api/approvals/1", `{"decision":"allow"}`)
+	if response.StatusCode == http.StatusForbidden {
+		t.Fatalf("reply scope should not be forbidden: %s", body)
+	}
+	response, _ = doDevice(http.MethodPost, "/api/compose", `{"session_id":"demo","text":"@claude hi"}`)
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("compose should still require drive: %d", response.StatusCode)
+	}
+}
+
 func TestNewSessionValidation(t *testing.T) {
 	relay := newTestRelay(t, nil)
 	cases := []string{
@@ -424,6 +652,18 @@ func TestNewSessionValidation(t *testing.T) {
 		if response.StatusCode != http.StatusBadRequest {
 			t.Fatalf("body=%s status=%d raw=%s", body, response.StatusCode, raw)
 		}
+	}
+}
+
+func TestNewSessionRejectsWorkBuddyWithoutIndependentSession(t *testing.T) {
+	relay := newTestRelay(t, nil)
+	body := `{"source":"workbuddy","cwd":"` + t.TempDir() + `","text":"示例任务"}`
+	response, raw := relay.do(t, http.MethodPost, "/api/sessions/new", []byte(body), true)
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("status=%d body=%s", response.StatusCode, raw)
+	}
+	if !bytes.Contains(raw, []byte(`"code":"agent_not_driveable"`)) {
+		t.Fatalf("body=%s", raw)
 	}
 }
 

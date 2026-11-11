@@ -1,0 +1,31 @@
+#!/bin/sh
+# Wrap a CLI command with Homing lifecycle events.
+# Usage: ~/.homing/integrations/{{.ID}}/homing-run.sh your-agent [args...]
+set -u
+
+if [ "$#" -eq 0 ]; then
+  echo "usage: $0 <command> [args...]" >&2
+  exit 64
+fi
+
+hook="$(dirname "$0")/hook.mjs"
+agent="{{.ID}}"
+
+if command -v node >/dev/null 2>&1; then
+  send() {
+    printf '%s' "$1" | node "$hook" >/dev/null 2>&1 || true
+  }
+else
+  send() {
+    printf '%s' "$1" | "$(dirname "$0")/hook.sh" >/dev/null 2>&1 || true
+  }
+fi
+
+"$@"
+status=$?
+if [ "$status" -eq 0 ]; then
+  send "{\"source\":\"$agent\",\"session_id\":\"$agent\",\"kind\":\"done\",\"title\":\"{{.Name}} 命令已结束\",\"text\":\"退出码 0\"}"
+else
+  send "{\"source\":\"$agent\",\"session_id\":\"$agent\",\"kind\":\"error\",\"title\":\"{{.Name}} 命令失败\",\"text\":\"退出码 $status\"}"
+fi
+exit "$status"

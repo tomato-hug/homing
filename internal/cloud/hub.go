@@ -237,6 +237,7 @@ func (h *Hub) Approve(clientID string) error {
 		"host_id":   h.identity.DeviceID(),
 		"host_pub":  h.identity.PublicKeyBase64(),
 		"client_id": request.ClientID,
+		"lan_urls":  LANWebSocketURLs(),
 	})
 	return nil
 }
@@ -558,6 +559,16 @@ func (h *Hub) handleEnvelope(conn *hostConn, message map[string]any) error {
 	plaintext, err := openPayload(h.identity, peerPublicKey, envelope)
 	if err != nil {
 		conn.sendError(h.ctx, "decrypt_failed", "消息解密失败")
+		return nil
+	}
+	if payloads, handled := dispatchFilePayload(h.ctx, h.handler, peer.DeviceID, plaintext); handled {
+		for _, payload := range payloads {
+			response, err := sealPayload(h.identity, peer, payload)
+			if err != nil {
+				return err
+			}
+			conn.send(h.ctx, envelopeMap(response))
+		}
 		return nil
 	}
 	result := dispatchRPC(h.ctx, h.handler, plaintext)

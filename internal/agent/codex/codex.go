@@ -1,17 +1,21 @@
 // Package codex reads Codex CLI sessions: ~/.codex/sessions/<年>/<月>/<日>/rollout-*.jsonl
 // plus the title index ~/.codex/session_index.jsonl.
 //
-// Ported from relay/scanners/codex.mjs. Reply injection runs
-// `codex exec resume` in a child process (argument array, never a shell string),
-// one turn at a time per thread.
+// Ported from relay/scanners/codex.mjs. Reply injection prefers Codex's native
+// `codex queue` command so it can coexist with the desktop app's thread writer.
+// Older CLIs fall back to `codex exec resume`.
 //
 // Owner: WorkBuddy.
 package codex
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,13 +30,20 @@ import (
 	"github.com/tomato-hug/homing/internal/platform"
 )
 
+var sessionProcs = struct {
+	sync.Mutex
+	byID map[string]*exec.Cmd
+}{byID: map[string]*exec.Cmd{}}
+
 const id = "codex"
 
 // Icon is the monochrome 16×16 glyph shared with the console.
 const Icon = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M8 1.8 13.4 4.9v6.2L8 14.2 2.6 11.1V4.9z"/><path d="M5.2 6.4 8 8l2.8-1.6M8 8v3.6"/></svg>`
 
-// ReplyTimeout kills a runaway `codex exec resume` after 10 minutes.
+// ReplyTimeout kills a runaway legacy `codex exec resume` after 10 minutes.
 const ReplyTimeout = 10 * time.Minute
+
+const injectionTailMax = 4000
 
 func init() { agent.Register(Agent{}) }
 
@@ -44,10 +55,141 @@ func (Agent) Name() string                 { return "Codex" }
 func (Agent) Icon() string                 { return Icon }
 func (Agent) PushSignal() agent.PushSignal { return agent.PushHook }
 func (Agent) Capabilities() agent.Capabilities {
-	return agent.Capabilities{Reply: true, Sessions: true}
+	return agent.Capabilities{
+		Core:            true,
+		Reply:           true,
+		Sessions:        true,
+		NewSession:      true,
+		Stop:            true,
+		Approve:         true,
+		Live:            true,
+		Dispatch:        true,
+		SwitchModel:     true,
+		Effort:          true,
+		PermissionModes: []string{"default", "read_only"},
+	}
 }
 func (Agent) home() string                              { return filepath.Join(platform.Home(), ".codex") }
 func (Agent) Meta(sessionID, cwdHint string) agent.Meta { return metaFor(sessionID, cwdHint) }
+
+// ApprovalHook points the API at the settings file that routes permission
+// requests to Homing. The file is never modified here.
+func (Agent) ApprovalHook() (string, string) {
+	return filepath.Join(".codex", "hooks.json"), "/hook/codex"
+}
+
+// StartSession launches a fresh `codex exec` thread and returns as soon as the
+// CLI announces its thread id. The process stays attached to the returned id so
+// /api/sessions/{id}/stop and dispatch cancellation can stop this turn.
+func (Agent) StartSession(ctx context.Context, req agent.StartRequest) (agent.StartResult, error) {
+	binary := codexBinary()
+	if binary == "" {
+		return agent.StartResult{}, errors.New("本机没有 codex 命令")
+	}
+	cwd := strings.TrimSpace(req.Cwd)
+	text := strings.TrimSpace(req.Text)
+	if cwd == "" || text == "" {
+		return agent.StartResult{}, errors.New("cwd 和 text 不能为空")
+	}
+	args := []string{"exec", "--json", "--skip-git-repo-check", "-C", cwd}
+	if req.Model != "" {
+		args = append(args, "--model", req.Model)
+	}
+	if req.Effort != "" {
+		args = append(args, "-c", `model_reasoning_effort="`+req.Effort+`"`)
+	}
+	if req.PermissionMode == "read_only" || req.PermissionMode == "plan" {
+		args = append(args, "--sandbox", "read-only")
+	}
+	args = append(args, text)
+
+	cmd := exec.Command(binary, args...)
+	cmd.Dir = cwd
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return agent.StartResult{}, fmt.Errorf("无法读取 codex 输出：%w", err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return agent.StartResult{}, fmt.Errorf("无法启动 codex：%w", err)
+	}
+
+	idCh := make(chan string, 1)
+	done := make(chan error, 1)
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+			var payload map[string]any
+			if json.Unmarshal([]byte(line), &payload) != nil {
+				continue
+			}
+			if stringValue(payload["type"]) != "thread.started" {
+				continue
+			}
+			if id := firstNonEmpty(
+				stringValue(payload["thread_id"]),
+				stringValue(payload["thread-id"]),
+			); id != "" {
+				select {
+				case idCh <- id:
+				default:
+				}
+				sessionProcs.Lock()
+				sessionProcs.byID[id] = cmd
+				sessionProcs.Unlock()
+			}
+		}
+	}()
+	go func() {
+		done <- cmd.Wait()
+		sessionProcs.Lock()
+		for id, candidate := range sessionProcs.byID {
+			if candidate == cmd {
+				delete(sessionProcs.byID, id)
+			}
+		}
+		sessionProcs.Unlock()
+	}()
+
+	select {
+	case id := <-idCh:
+		return agent.StartResult{SessionID: id, Status: "started"}, nil
+	case err := <-done:
+		message := strings.TrimSpace(stderr.String())
+		if message == "" && err != nil {
+			message = err.Error()
+		}
+		if message == "" {
+			message = "codex 未返回 thread id"
+		}
+		return agent.StartResult{}, errors.New(truncateOneLine(message, 300))
+	case <-ctx.Done():
+		_ = cmd.Process.Kill()
+		return agent.StartResult{}, ctx.Err()
+	}
+}
+
+// StopSession stops a thread launched by StartSession.
+func (Agent) StopSession(_ context.Context, sessionID string) error {
+	sessionProcs.Lock()
+	cmd := sessionProcs.byID[strings.TrimSpace(sessionID)]
+	if cmd != nil {
+		delete(sessionProcs.byID, strings.TrimSpace(sessionID))
+	}
+	sessionProcs.Unlock()
+	if cmd == nil || cmd.Process == nil {
+		return agent.ErrUnsupported
+	}
+	_ = cmd.Process.Signal(os.Interrupt)
+	_ = cmd.Process.Kill()
+	return nil
+}
 
 // Detect reports ~/.codex plus the version file Codex keeps there.
 func (a Agent) Detect(context.Context) agent.Detection {
@@ -108,6 +250,7 @@ func (Agent) ListSessions(_ context.Context, limit int) ([]agent.Session, error)
 			continue
 		}
 		seen[sessionID] = true
+		rememberRolloutPath(sessionID, file)
 		title, titleSource := "", "first_prompt"
 		if name, ok := titles[sessionID]; ok && name != "" {
 			title, titleSource = name, "agent"
@@ -120,6 +263,7 @@ func (Agent) ListSessions(_ context.Context, limit int) ([]agent.Session, error)
 				sortTime = parsed
 			}
 		}
+		meta := readRolloutMetaCached(file)
 		rows = append(rows, row{
 			session: agent.Session{
 				SessionID:   sessionID,
@@ -127,7 +271,8 @@ func (Agent) ListSessions(_ context.Context, limit int) ([]agent.Session, error)
 				Title:       title,
 				TitleSource: titleSource,
 				LastTS:      lastTS,
-				LastPreview: readRolloutMeta(file).lastPreview,
+				LastUserTS:  meta.lastUserTS,
+				LastPreview: meta.lastPreview,
 			},
 			mtime: sortTime,
 		})
@@ -170,6 +315,43 @@ func (Agent) ListSessions(_ context.Context, limit int) ([]agent.Session, error)
 
 var rolloutName = regexp.MustCompile(`([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$`)
 
+type rolloutPathEntry struct {
+	at   time.Time
+	byID map[string]string
+}
+
+var rolloutPaths = struct {
+	sync.Mutex
+	entry rolloutPathEntry
+}{}
+
+type titleIndexEntry struct {
+	at      time.Time
+	size    int64
+	modTime time.Time
+	titles  map[string]string
+	updated map[string]string
+}
+
+var titleIndexCache = struct {
+	sync.Mutex
+	entry titleIndexEntry
+}{}
+
+type rolloutMetaEntry struct {
+	at      time.Time
+	size    int64
+	modTime time.Time
+	meta    rolloutMeta
+}
+
+var rolloutMetaCache = struct {
+	sync.Mutex
+	byFile map[string]rolloutMetaEntry
+}{
+	byFile: map[string]rolloutMetaEntry{},
+}
+
 type rolloutMeta struct {
 	cwd            string
 	branch         string
@@ -179,6 +361,7 @@ type rolloutMeta struct {
 	firstPrompt    string
 	lastPreview    string
 	lastTs         string
+	lastUserTS     string
 	contextUsed    int
 	contextLimit   int
 	// hasConversation is set when the rollout holds a user or assistant turn.
@@ -197,7 +380,7 @@ func metaFor(sessionID, cwdHint string) agent.Meta {
 		}
 		return out
 	}
-	m := readRolloutMeta(file)
+	m := readRolloutMetaCached(file)
 	out.Cwd = firstNonEmpty(out.Cwd, m.cwd)
 	out.Branch = m.branch
 	out.Model = m.model
@@ -205,6 +388,7 @@ func metaFor(sessionID, cwdHint string) agent.Meta {
 	out.PermissionMode = m.permissionMode
 	out.FirstPrompt = m.firstPrompt
 	out.NativeTitle = title
+	out.LastUserTS = m.lastUserTS
 	return out
 }
 
@@ -217,6 +401,22 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func stringValue(value any) string {
+	if text, ok := value.(string); ok {
+		return text
+	}
+	return ""
+}
+
+func truncateOneLine(text string, limit int) string {
+	text = strings.Join(strings.Fields(text), " ")
+	runes := []rune(text)
+	if limit > 0 && len(runes) > limit {
+		return string(runes[:limit]) + "…"
+	}
+	return text
+}
+
 // titleIndex maps thread id -> thread_name from session_index.jsonl (last write wins).
 func titleIndex() map[string]string {
 	titles, _ := titleIndexFull()
@@ -226,9 +426,25 @@ func titleIndex() map[string]string {
 // titleIndexFull is titleIndex plus each thread's updated_at, which the list
 // uses as last_ts for threads whose rollout file is gone.
 func titleIndexFull() (map[string]string, map[string]string) {
+	file := filepath.Join(platform.Home(), ".codex", "session_index.jsonl")
+	stat, err := os.Stat(file)
+	now := time.Now()
+	titleIndexCache.Lock()
+	if err == nil {
+		hit := titleIndexCache.entry
+		if !hit.at.IsZero() &&
+			time.Since(hit.at) < scanlib.MetaTTL &&
+			hit.size == stat.Size() &&
+			hit.modTime.Equal(stat.ModTime()) {
+			titleIndexCache.Unlock()
+			return hit.titles, hit.updated
+		}
+	}
+	titleIndexCache.Unlock()
+
 	out := map[string]string{}
 	updated := map[string]string{}
-	for _, row := range scanlib.ReadJSONLines(filepath.Join(platform.Home(), ".codex", "session_index.jsonl")) {
+	for _, row := range scanlib.ReadJSONLines(file) {
 		sessionID, _ := row["id"].(string)
 		if sessionID == "" {
 			continue
@@ -241,6 +457,17 @@ func titleIndexFull() (map[string]string, map[string]string) {
 		out[sessionID] = name
 		updated[sessionID] = ts
 	}
+	titleIndexCache.Lock()
+	entry := titleIndexEntry{at: now, titles: out, updated: updated}
+	if err == nil {
+		entry.size = stat.Size()
+		entry.modTime = stat.ModTime()
+	} else {
+		// A missing index is a valid empty answer; retry after the TTL.
+		entry.size = -1
+	}
+	titleIndexCache.entry = entry
+	titleIndexCache.Unlock()
 	return out, updated
 }
 
@@ -305,12 +532,47 @@ func rolloutFiles(limitDays int) []string {
 
 // rolloutPathFor finds the transcript of one thread id.
 func rolloutPathFor(sessionID string) string {
+	now := time.Now()
+	rolloutPaths.Lock()
+	if !rolloutPaths.entry.at.IsZero() && time.Since(rolloutPaths.entry.at) < 30*time.Second {
+		// A fresh index is authoritative for misses too. Rebuilding it for every
+		// session whose rollout was pruned made one /api/sessions call walk the
+		// whole Codex directory hundreds of times.
+		file := rolloutPaths.entry.byID[sessionID]
+		rolloutPaths.Unlock()
+		return file
+	}
+	rolloutPaths.Unlock()
+
+	byID := map[string]string{}
 	for _, file := range rolloutFiles(0) {
-		if strings.Contains(filepath.Base(file), sessionID) {
-			return file
+		match := rolloutName.FindStringSubmatch(filepath.Base(file))
+		if len(match) < 2 {
+			continue
+		}
+		// rolloutFiles is newest-first. A resumed thread can have multiple
+		// files; the newest one is the live transcript.
+		if byID[match[1]] == "" {
+			byID[match[1]] = file
 		}
 	}
-	return ""
+	rolloutPaths.Lock()
+	rolloutPaths.entry = rolloutPathEntry{at: now, byID: byID}
+	rolloutPaths.Unlock()
+	return byID[sessionID]
+}
+
+// rememberRolloutPath keeps the id -> file index current when ListSessions finds
+// a transcript that appeared after the last directory walk.
+func rememberRolloutPath(sessionID, file string) {
+	if sessionID == "" || file == "" {
+		return
+	}
+	rolloutPaths.Lock()
+	if !rolloutPaths.entry.at.IsZero() && rolloutPaths.entry.byID != nil {
+		rolloutPaths.entry.byID[sessionID] = file
+	}
+	rolloutPaths.Unlock()
 }
 
 func readRolloutMeta(file string) rolloutMeta {
@@ -411,6 +673,13 @@ func readRolloutMeta(file string) rolloutMeta {
 				m.lastPreview = scanlib.FirstLine(text, 120)
 			}
 		}
+		if payload["type"] == "message" && payload["role"] == "user" {
+			if text := strings.TrimSpace(scanlib.NormalizeContent(payload["content"])); text != "" && !codexNoise(text) {
+				if ts, ok := row["timestamp"].(string); ok && ts != "" {
+					m.lastUserTS = ts
+				}
+			}
+		}
 		if item, ok := payload["item"].(map[string]any); ok {
 			if item["type"] == "agent_message" {
 				if text, ok := item["text"].(string); ok && strings.TrimSpace(text) != "" {
@@ -419,6 +688,43 @@ func readRolloutMeta(file string) rolloutMeta {
 			}
 		}
 	}
+	return m
+}
+
+// readRolloutMetaCached avoids parsing the same rollout three times while one
+// session list is built (Meta, ContextUsage and IsEmptySession all ask for it).
+// File size and mtime invalidate the entry; the one-minute TTL bounds the
+// per-file bookkeeping for long-running servers.
+func readRolloutMetaCached(file string) rolloutMeta {
+	stat, err := os.Stat(file)
+	if err != nil {
+		return rolloutMeta{}
+	}
+	now := time.Now()
+	rolloutMetaCache.Lock()
+	if hit, ok := rolloutMetaCache.byFile[file]; ok &&
+		time.Since(hit.at) < scanlib.MetaTTL &&
+		hit.size == stat.Size() &&
+		hit.modTime.Equal(stat.ModTime()) {
+		rolloutMetaCache.Unlock()
+		return hit.meta
+	}
+	rolloutMetaCache.Unlock()
+
+	m := readRolloutMeta(file)
+	rolloutMetaCache.Lock()
+	if len(rolloutMetaCache.byFile) >= 4096 {
+		cutoff := now.Add(-scanlib.MetaTTL)
+		for candidate, entry := range rolloutMetaCache.byFile {
+			if entry.at.Before(cutoff) {
+				delete(rolloutMetaCache.byFile, candidate)
+			}
+		}
+	}
+	rolloutMetaCache.byFile[file] = rolloutMetaEntry{
+		at: now, size: stat.Size(), modTime: stat.ModTime(), meta: m,
+	}
+	rolloutMetaCache.Unlock()
 	return m
 }
 
@@ -446,7 +752,7 @@ func (Agent) ContextUsage(sessionID string) (used int, limit int, ok bool) {
 	if file == "" {
 		return 0, 0, false
 	}
-	m := readRolloutMeta(file)
+	m := readRolloutMetaCached(file)
 	if m.contextUsed <= 0 {
 		return 0, 0, false
 	}
@@ -471,7 +777,7 @@ func (Agent) IsEmptySession(sessionID string) bool {
 	if file == "" {
 		return true
 	}
-	return !readRolloutMeta(file).hasConversation
+	return !readRolloutMetaCached(file).hasConversation
 }
 
 // ---- reply injection -----------------------------------------------------
@@ -487,16 +793,44 @@ type threadState struct {
 }
 
 type queuedReply struct {
-	sessionID string
-	text      string
-	model     string
+	sessionID      string
+	text           string
+	model          string
+	permissionMode string
+	replyID        int64
 }
 
 // Reply injects one message into an existing Codex thread.
 //
-// Only one `codex exec resume` runs per thread at a time; the rest queue up so
-// two answers never interleave inside the same conversation.
+// Newer Codex versions expose `codex queue`, which writes through the same
+// thread store as the desktop app without opening a second writer. If the
+// installed CLI predates that command, fall back to one serialized
+// `codex exec resume` per thread.
 func (a Agent) Reply(ctx context.Context, sessionID, text string, opts agent.ReplyOpts) error {
+	sessionID = strings.TrimSpace(sessionID)
+	text = strings.TrimSpace(text)
+	if sessionID == "" {
+		return errors.New("Codex thread id 不能为空")
+	}
+	if text == "" {
+		return errors.New("回复内容不能为空")
+	}
+	binary := codexBinary()
+	if binary == "" {
+		return errors.New("本机没有 codex 命令")
+	}
+
+	queued, err := startCodexQueue(binary, sessionID, text)
+	if err == nil {
+		if queued {
+			return fmt.Errorf("%w: 已排入 Codex 原生队列，等待 Codex 恢复该会话", agent.ErrQueued)
+		}
+		return nil
+	}
+	if !codexQueueUnsupported(err) {
+		return err
+	}
+
 	threadMu.Lock()
 	state, ok := threads[sessionID]
 	if !ok {
@@ -504,18 +838,136 @@ func (a Agent) Reply(ctx context.Context, sessionID, text string, opts agent.Rep
 		threads[sessionID] = state
 	}
 	if state.running {
-		state.queue = append(state.queue, queuedReply{sessionID: sessionID, text: text, model: opts.Model})
+		state.queue = append(state.queue, queuedReply{
+			sessionID:      sessionID,
+			text:           text,
+			model:          opts.Model,
+			permissionMode: opts.PermissionMode,
+			replyID:        opts.ReplyID,
+		})
 		threadMu.Unlock()
-		return errors.New("该 thread 正在执行上一轮注入，已排队")
+		return fmt.Errorf("%w: 该 thread 正在执行上一轮注入，已排队", agent.ErrQueued)
 	}
 	state.running = true
 	threadMu.Unlock()
 
-	go runInjection(state, sessionID, text, opts.Model)
+	go runInjection(state, sessionID, text, opts.Model, opts.PermissionMode)
 	return nil
 }
 
-func runInjection(state *threadState, sessionID, text, model string) {
+// startCodexQueue uses the app-server-backed queue command. With a live daemon
+// the CLI keeps running for the duration of the resumed turn, so this waits
+// only long enough to catch an immediate error and then lets it finish in the
+// background. queued=true means the item was stored but resume was refused.
+func startCodexQueue(binary, sessionID, text string) (queued bool, err error) {
+	ensureCodexDaemon(binary)
+
+	ctx, cancel := context.WithTimeout(context.Background(), ReplyTimeout)
+
+	dir := sessionDir(sessionID)
+	args := []string{
+		"queue",
+		"--thread", sessionID,
+		"--message", text,
+		"--resume",
+	}
+	if dir != "" {
+		args = append(args, "-C", dir)
+	}
+	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.Dir = dir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if runErr := cmd.Start(); runErr != nil {
+		cancel()
+		return false, fmt.Errorf("codex queue 无法启动：%w", runErr)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+		cancel()
+	}()
+
+	select {
+	case runErr := <-done:
+		return inspectCodexQueueResult(strings.TrimSpace(stdout.String()+"\n"+stderr.String()), runErr)
+	case <-time.After(800 * time.Millisecond):
+		// The message has been handed to Codex; keep the child attached to the
+		// process so a long reasoning turn is not killed.
+		return false, nil
+	}
+}
+
+func inspectCodexQueueResult(output string, runErr error) (queued bool, err error) {
+	detail := strings.TrimSpace(output)
+	if len(detail) > injectionTailMax {
+		detail = detail[len(detail)-injectionTailMax:]
+	}
+	if runErr == nil {
+		lower := strings.ToLower(detail)
+		return strings.Contains(lower, "failed to resume") ||
+			strings.Contains(lower, "warning:"), nil
+	}
+	if detail == "" {
+		detail = runErr.Error()
+	}
+	return false, fmt.Errorf("codex queue 注入失败：%s", truncateOneLine(detail, 500))
+}
+
+// ensureCodexDaemon makes `codex queue --resume` able to actually start the
+// thread. Without a daemon the CLI only stores the queue item and prints a
+// warning, which looks successful but never runs.
+func ensureCodexDaemon(binary string) {
+	checkCtx, checkCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer checkCancel()
+	check := exec.CommandContext(checkCtx, binary, "app-server", "daemon", "version")
+	check.Stdout = io.Discard
+	check.Stderr = io.Discard
+	if check.Run() == nil {
+		return
+	}
+
+	startCtx, startCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer startCancel()
+	start := exec.CommandContext(startCtx, binary, "app-server", "daemon", "start")
+	start.Stdout = io.Discard
+	start.Stderr = io.Discard
+	_ = start.Run()
+}
+
+func codexQueueUnsupported(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "unrecognized subcommand") ||
+		strings.Contains(message, "unknown command") ||
+		strings.Contains(message, "unexpected argument") ||
+		strings.Contains(message, "unrecognized command")
+}
+
+// CancelQueuedReply removes one accepted reply before runInjection starts it.
+// A reply that is already running is intentionally not cancellable here; the
+// caller should use the session stop endpoint instead.
+func (Agent) CancelQueuedReply(_ context.Context, sessionID string, replyID int64) error {
+	if replyID <= 0 {
+		return agent.ErrNotQueued
+	}
+	threadMu.Lock()
+	defer threadMu.Unlock()
+	state, ok := threads[sessionID]
+	if !ok {
+		return agent.ErrNotQueued
+	}
+	for index, queued := range state.queue {
+		if queued.replyID != replyID {
+			continue
+		}
+		state.queue = append(state.queue[:index], state.queue[index+1:]...)
+		return nil
+	}
+	return agent.ErrNotQueued
+}
+
+func runInjection(state *threadState, sessionID, text, model, permissionMode string) {
 	threadMu.Lock()
 	binary := codexBinary()
 	if binary == "" {
@@ -523,7 +975,7 @@ func runInjection(state *threadState, sessionID, text, model string) {
 		next, hasNext := pop(state)
 		threadMu.Unlock()
 		if hasNext {
-			go runInjection(state, next.sessionID, next.text, next.model)
+			go runInjection(state, next.sessionID, next.text, next.model, next.permissionMode)
 		}
 		return
 	}
@@ -532,6 +984,9 @@ func runInjection(state *threadState, sessionID, text, model string) {
 	args := []string{"exec", "resume", "--skip-git-repo-check"}
 	if model != "" {
 		args = append(args, "-m", model)
+	}
+	if permissionMode == "read_only" || permissionMode == "plan" {
+		args = append(args, "--sandbox", "read-only")
 	}
 	args = append(args, "--all", sessionID, text)
 
@@ -557,7 +1012,7 @@ func runInjection(state *threadState, sessionID, text, model string) {
 	next, hasNext := pop(state)
 	threadMu.Unlock()
 	if hasNext {
-		go runInjection(state, next.sessionID, next.text, next.model)
+		go runInjection(state, next.sessionID, next.text, next.model, next.permissionMode)
 	}
 }
 

@@ -1,0 +1,19 @@
+# OpenClaw — 官方示例清单
+# 会话：~/.openclaw/agents/<agent>/sessions/<uuid>.jsonl（另有 .reset / .deleted 变体，glob 只取主文件）
+# 首行是会话头 {type, version, id, timestamp, cwd}；message 记录把 role 和
+# content 放在 message 对象里，thinking 块需要跳过。format: openclaw 是专用解析器。
+id: openclaw
+name: OpenClaw
+icon: openclaw
+
+detect:
+  bin: [openclaw]
+  paths:
+    - ~/.openclaw
+
+sessions:
+  source: jsonl
+  glob: ~/.openclaw/agents/*/sessions/*.jsonl
+  format: openclaw
+
+push: poll

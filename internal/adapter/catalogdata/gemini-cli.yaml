@@ -1,0 +1,18 @@
+# Gemini CLI — 官方示例清单
+# 一个会话一个 JSON 文件：~/.gemini/tmp/<project>/chats/*.json
+# 本机目录存在但没有任何 chats（没跑过会话），所以实测会话数为 0。
+id: gemini-cli
+name: Gemini CLI
+icon: gemini
+
+detect:
+  bin: [gemini]
+  paths:
+    - ~/.gemini
+
+sessions:
+  source: json
+  glob: ~/.gemini/tmp/*/chats/*.json
+  format: gemini-cli
+
+push: poll

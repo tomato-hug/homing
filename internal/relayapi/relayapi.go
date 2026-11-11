@@ -26,6 +26,7 @@ var errBodyTooLarge = errors.New("请求体过大")
 
 func init() {
 	api.Register("relay-compat", 60, func(mux *http.ServeMux, d *api.Deps) {
+		installACPObserver(d)
 		mux.HandleFunc("POST /hook/claude", hookRoute(d, "claude"))
 		mux.HandleFunc("POST /hook/workbuddy", hookRoute(d, "workbuddy"))
 		mux.HandleFunc("POST /hook/codex", hookRoute(d, "codex"))
@@ -34,8 +35,18 @@ func init() {
 		mux.HandleFunc("POST /api/upload", guarded(d, uploadHandler))
 		mux.HandleFunc("GET /api/away", guarded(d, awayGET))
 		mux.HandleFunc("POST /api/away", guarded(d, awayPOST))
+		mux.HandleFunc("GET /api/away/settings", guarded(d, awaySettingsGET))
+		mux.HandleFunc("PATCH /api/away/settings", guarded(d, awaySettingsPATCH))
+		mux.HandleFunc("POST /api/away/periods/{id}/clear", guarded(d, clearAwayPeriod))
 		mux.HandleFunc("POST /api/sessions/new", guarded(d, newSession))
 		mux.HandleFunc("POST /api/sessions/{id}/stop", guarded(d, stopSession))
+		mux.HandleFunc("POST /api/dispatch", guarded(d, dispatchAgent))
+		mux.HandleFunc("GET /api/dispatches", guarded(d, listDispatches))
+		mux.HandleFunc("POST /api/compose", guarded(d, composeAgent))
+		mux.HandleFunc("POST /api/dispatches/{id}/forward", guarded(d, forwardDispatch))
+		mux.HandleFunc("POST /api/dispatches/{id}/reply", guarded(d, replyDispatch))
+		mux.HandleFunc("POST /api/dispatches/{id}/cancel", guarded(d, cancelDispatch))
+		mux.HandleFunc("POST /api/dispatches/{id}/discard", guarded(d, discardDispatchWorktree))
 		mux.HandleFunc("POST /api/approvals/{id}", guarded(d, resolveApproval))
 
 		mux.HandleFunc("GET /api/devices", guarded(d, listDevices))
@@ -62,8 +73,18 @@ func guarded(d *api.Deps, fn handlerFunc) http.HandlerFunc {
 			api.WriteJSON(w, http.StatusUnauthorized, map[string]any{"error": "Unauthorized"})
 			return
 		}
+		if !d.HasScope(r, "read") {
+			api.WriteJSON(w, http.StatusForbidden, map[string]any{
+				"error": "该设备没有 read 权限", "code": "scope_denied",
+			})
+			return
+		}
 		fn(d, w, r)
 	}
+}
+
+func requireDrive(d *api.Deps, w http.ResponseWriter, r *http.Request) bool {
+	return d.RequireScope(w, r, "drive")
 }
 
 func requirePOST(w http.ResponseWriter, r *http.Request) bool {

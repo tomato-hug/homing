@@ -11,6 +11,8 @@ package claude
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,9 +51,26 @@ func (Agent) Name() string                 { return "Claude Code" }
 func (Agent) Icon() string                 { return Icon }
 func (Agent) PushSignal() agent.PushSignal { return agent.PushHook }
 func (Agent) Capabilities() agent.Capabilities {
-	return agent.Capabilities{Reply: true, Sessions: true}
+	return agent.Capabilities{
+		Core:            true,
+		Reply:           true,
+		Sessions:        true,
+		NewSession:      true,
+		Stop:            true,
+		Approve:         true,
+		Live:            true,
+		Dispatch:        true,
+		SwitchModel:     true,
+		PermissionModes: []string{"default", "plan", "accept_edits", "read_only"},
+	}
 }
 func (Agent) Meta(sessionID, cwdHint string) agent.Meta { return metaFor(sessionID, cwdHint) }
+
+// ApprovalHook points the API at the Claude settings file used for permission
+// events. Homing never edits it from this method.
+func (Agent) ApprovalHook() (string, string) {
+	return filepath.Join(".claude", "settings.json"), "/hook/claude"
+}
 
 func home() string { return filepath.Join(platform.Home(), ".claude") }
 
@@ -173,6 +192,7 @@ type fileMeta struct {
 	firstPrompt    string
 	lastTs         string
 	lastPreview    string
+	lastUserTS     string
 	// hasConversation is set when the transcript holds a user or assistant row,
 	// which is the Node relay's rule for "not an empty session".
 	hasConversation bool
@@ -272,6 +292,11 @@ func (m *fileMeta) apply(line string, fromHead bool) {
 	if fromHead && m.firstPrompt == "" && role == "user" && text != "" && !scanlib.Noise.MatchString(text) {
 		m.firstPrompt = text
 	}
+	if role == "user" && text != "" && !scanlib.Noise.MatchString(text) {
+		if ts, ok := row["timestamp"].(string); ok && ts != "" {
+			m.lastUserTS = ts
+		}
+	}
 	if !fromHead && role == "assistant" && text != "" {
 		m.lastPreview = scanlib.FirstLine(text, 120)
 	}
@@ -302,6 +327,7 @@ func metaFor(sessionID, cwdHint string) agent.Meta {
 		out.Effort = m.effort
 		out.PermissionMode = m.permissionMode
 		out.FirstPrompt = m.firstPrompt
+		out.LastUserTS = m.lastUserTS
 		switch {
 		case m.customTitle != "":
 			out.NativeTitle, out.TitleSource = m.customTitle, "custom"
@@ -320,6 +346,7 @@ func metaFor(sessionID, cwdHint string) agent.Meta {
 			out.Effort = firstNonEmpty(out.Effort, m.effort)
 			out.PermissionMode = firstNonEmpty(out.PermissionMode, m.permissionMode)
 			out.FirstPrompt = firstNonEmpty(out.FirstPrompt, m.firstPrompt)
+			out.LastUserTS = firstNonEmpty(out.LastUserTS, m.lastUserTS)
 			if out.NativeTitle == "" {
 				out.NativeTitle = firstNonEmpty(m.customTitle, m.aiTitle, m.summary)
 				if m.customTitle != "" {
@@ -420,6 +447,7 @@ func (Agent) ListSessions(_ context.Context, limit int) ([]agent.Session, error)
 			Title:       title,
 			TitleSource: source,
 			LastTS:      scanlib.ISO(e.mtime),
+			LastUserTS:  m.lastUserTS,
 			LastPreview: m.lastPreview,
 		})
 	}
@@ -432,6 +460,99 @@ var (
 	procMu sync.Mutex
 	procs  = map[string]*exec.Cmd{}
 )
+
+var sessionIDSupport sync.Map
+
+// StartSession launches a fresh Claude Code process. Recent CLIs accept a
+// caller-provided --session-id, so the phone gets an id immediately; older
+// builds return an empty id and the hook binding path takes over.
+func (Agent) StartSession(ctx context.Context, req agent.StartRequest) (agent.StartResult, error) {
+	if err := ctx.Err(); err != nil {
+		return agent.StartResult{}, err
+	}
+	binary := scanlib.ResolveBinary("claude")
+	if binary == "" {
+		return agent.StartResult{}, errors.New("本机没有 claude 命令")
+	}
+	cwd := strings.TrimSpace(req.Cwd)
+	text := strings.TrimSpace(req.Text)
+	if cwd == "" || text == "" {
+		return agent.StartResult{}, errors.New("cwd 和 text 不能为空")
+	}
+	sessionID := ""
+	args := []string{"-p"}
+	if supportsSessionID(binary) {
+		sessionID = newUUID()
+		args = append(args, "--session-id", sessionID)
+	}
+	if req.Model != "" {
+		args = append(args, "--model", req.Model)
+	}
+	if req.Effort != "" {
+		args = append(args, "--effort", req.Effort)
+	}
+	switch strings.ToLower(strings.TrimSpace(req.PermissionMode)) {
+	case "plan", "read_only":
+		args = append(args, "--permission-mode", "plan")
+	case "accept_edits", "accept-edits", "auto":
+		args = append(args, "--permission-mode", "acceptEdits")
+	}
+	args = append(args, text)
+
+	cmd := exec.Command(binary, args...)
+	cmd.Dir = cwd
+	cmd.Stdout, cmd.Stderr = nil, nil
+	if err := cmd.Start(); err != nil {
+		return agent.StartResult{}, fmt.Errorf("无法启动 claude：%w", err)
+	}
+	if sessionID != "" {
+		procMu.Lock()
+		procs[sessionID] = cmd
+		procMu.Unlock()
+	}
+	go func() {
+		_ = cmd.Wait()
+		if sessionID == "" {
+			return
+		}
+		procMu.Lock()
+		if procs[sessionID] == cmd {
+			delete(procs, sessionID)
+		}
+		procMu.Unlock()
+	}()
+	return agent.StartResult{SessionID: sessionID, Status: "started"}, nil
+}
+
+// StopSession stops a session process launched by StartSession.
+func (Agent) StopSession(_ context.Context, sessionID string) error {
+	if Stop(sessionID) {
+		return nil
+	}
+	return agent.ErrUnsupported
+}
+
+func supportsSessionID(binary string) bool {
+	if cached, ok := sessionIDSupport.Load(binary); ok {
+		return cached.(bool)
+	}
+	out, err := exec.Command(binary, "--help").CombinedOutput()
+	if err != nil {
+		return false
+	}
+	supported := strings.Contains(string(out), "--session-id")
+	actual, _ := sessionIDSupport.LoadOrStore(binary, supported)
+	return actual.(bool)
+}
+
+func newUUID() string {
+	var buf [16]byte
+	_, _ = rand.Read(buf[:])
+	buf[6] = (buf[6] & 0x0f) | 0x40
+	buf[8] = (buf[8] & 0x3f) | 0x80
+	raw := hex.EncodeToString(buf[:])
+	return raw[0:8] + "-" + raw[8:12] + "-" + raw[12:16] + "-" + raw[16:20] + "-" + raw[20:32]
+}
 
 // Reply injects one message into an existing Claude Code session.
 //
@@ -452,6 +573,9 @@ func (Agent) Reply(_ context.Context, sessionID, text string, opts agent.ReplyOp
 	args := []string{"-p", text, "--resume", sessionID}
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
+	}
+	if mode := claudePermissionMode(opts.PermissionMode); mode != "" {
+		args = append(args, "--permission-mode", mode)
 	}
 	cmd := exec.Command(binary, args...)
 	cmd.Dir = workDir(sessionID)
@@ -478,6 +602,21 @@ func (Agent) Reply(_ context.Context, sessionID, text string, opts agent.ReplyOp
 		procMu.Unlock()
 	}()
 	return nil
+}
+
+func claudePermissionMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "plan":
+		return "plan"
+	case "accept_edits", "accept-edits", "auto":
+		return "acceptEdits"
+	case "read_only", "readonly":
+		return "plan"
+	case "default", "":
+		return ""
+	default:
+		return ""
+	}
 }
 
 // Stop kills the injection process running for this session, if any.

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/tomato-hug/homing/internal/agent"
+	"github.com/tomato-hug/homing/internal/driver"
 	_ "modernc.org/sqlite"
 )
 
@@ -36,6 +37,9 @@ func NewManifestAgent(m *Manifest) *ManifestAgent {
 }
 
 func (a *ManifestAgent) ID() string { return a.m.ID }
+func (a *ManifestAgent) Manifest() *Manifest {
+	return a.m
+}
 func (a *ManifestAgent) Name() string {
 	if a.m.Name != "" {
 		return a.m.Name
@@ -60,11 +64,42 @@ func (a *ManifestAgent) PushSignal() agent.PushSignal {
 }
 
 func (a *ManifestAgent) Capabilities() agent.Capabilities {
-	return agent.Capabilities{
-		Reply:    a.m.Reply != nil,
-		Sessions: true,
-		Models:   a.m.Models != nil,
+	drive := a.m.Drive != nil
+	dispatch := drive
+	if drive && a.m.Drive.Dispatch != nil {
+		dispatch = *a.m.Drive.Dispatch
 	}
+	return agent.Capabilities{
+		Reply:      a.m.Reply != nil,
+		Sessions:   a.m.Sessions.Source != "",
+		Models:     a.m.Models != nil,
+		NewSession: drive,
+		Stop:       drive,
+		Approve:    drive,
+		Live:       drive,
+		Dispatch:   dispatch,
+	}
+}
+
+// StartSession delegates to the ACP driver registered from this manifest's
+// drive block. The manifest remains data: no per-agent Go switch is needed.
+func (a *ManifestAgent) StartSession(ctx context.Context, req agent.StartRequest) (agent.StartResult, error) {
+	if a.m.Drive == nil {
+		return agent.StartResult{}, agent.ErrUnsupported
+	}
+	sessionID, err := driver.Default().Start(ctx, a.m.ID, req.Cwd, req.Text, nil)
+	if err != nil {
+		return agent.StartResult{}, err
+	}
+	return agent.StartResult{SessionID: sessionID, Status: "started"}, nil
+}
+
+// StopSession stops only sessions owned by the ACP manager.
+func (a *ManifestAgent) StopSession(_ context.Context, sessionID string) error {
+	if driver.Default().Stop(sessionID) {
+		return nil
+	}
+	return agent.ErrUnsupported
 }
 
 // ---- 文件与缓存 ----------------------------------------------------------
@@ -171,6 +206,19 @@ func (a *ManifestAgent) Detect(ctx context.Context) agent.Detection {
 			bits = append(bits, fmt.Sprintf("%d files", n))
 		}
 	}
+	if !installed && a.m.Drive != nil {
+		for _, bin := range a.m.Drive.Command {
+			if strings.TrimSpace(bin) == "" {
+				continue
+			}
+			if path, err := exec.LookPath(bin); err == nil {
+				installed = true
+				bits = append(bits, path)
+			}
+			// Only the executable is looked up; arguments are not commands.
+			break
+		}
+	}
 	d := agent.Detection{Installed: installed}
 	if len(bits) > 0 {
 		d.Detail = strings.Join(bits, " · ")
@@ -181,6 +229,9 @@ func (a *ManifestAgent) Detect(ctx context.Context) agent.Detection {
 func (a *ManifestAgent) ListSessions(ctx context.Context, limit int) ([]agent.Session, error) {
 	if limit <= 0 {
 		limit = 200
+	}
+	if a.m.Sessions.Source == "" {
+		return nil, nil
 	}
 	if a.m.Sessions.Source == "sqlite" {
 		return a.sqliteSessions(limit)
