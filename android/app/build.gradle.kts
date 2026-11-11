@@ -2,6 +2,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("com.google.devtools.ksp")
 }
 
 val homingReleaseStoreFile = providers.environmentVariable("HOMING_RELEASE_STORE_FILE").orNull
@@ -30,8 +31,8 @@ android {
         applicationId = "dev.agentpush.poc"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "0.7.0"
+        versionCode = 10
+        versionName = "0.9.0"
 
         buildConfigField(
             "String",
@@ -153,9 +154,13 @@ dependencies {
     implementation("com.mikepenz:multiplatform-markdown-renderer-m3:0.38.1")
     implementation("com.mikepenz:multiplatform-markdown-renderer-coil3:0.38.1")
     implementation("com.goterl:lazysodium-android:5.1.0@aar")
+    implementation("net.java.dev.jna:jna:5.12.1@aar")
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     implementation("com.google.zxing:core:3.5.3")
     implementation("androidx.appcompat:appcompat:1.7.1")
+    implementation("androidx.room:room-runtime:2.7.2")
+    implementation("androidx.room:room-ktx:2.7.2")
+    ksp("androidx.room:room-compiler:2.7.2")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 

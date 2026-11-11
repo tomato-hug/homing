@@ -10,8 +10,6 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
-import dev.agentpush.poc.protocol.DeviceIdentityStore
-import dev.agentpush.poc.protocol.PairedComputer
 import dev.agentpush.poc.protocol.PairedComputerStore
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -43,10 +41,6 @@ class PushService : Service() {
     @Volatile
     private var forcedDisconnectReason: String? = null
 
-    private val cloudLock = Any()
-    private var cloudClient: CloudNotificationClient? = null
-    private var cloudInitThread: Thread? = null
-
     private var wakeLock: PowerManager.WakeLock? = null
     private var connectivityManager: ConnectivityManager? = null
     private var networkCallbackRegisteredAt = 0L
@@ -62,7 +56,8 @@ class PushService : Service() {
             Log.i(TAG, "Network available, reconnecting now")
             forceReconnect(null)
             ensureCloudClient()
-            cloudClient?.reconnectNow()
+            store.invalidateTransportRoute()
+            CloudLinkManager.get(this@PushService).reconnectNow()
         }
 
         override fun onLost(network: Network) {
@@ -72,6 +67,7 @@ class PushService : Service() {
             val reason = "网络已断开（ConnectivityManager）"
             Log.w(TAG, "Network lost, closing SSE connection")
             store.onConnectionLost(reason)
+            store.invalidateTransportRoute()
             updateServiceNotification("等待网络 · $reason")
             forceReconnect(reason)
         }
@@ -119,8 +115,8 @@ class PushService : Service() {
             reconnectRequested = true
             activeConnection?.disconnect()
             worker?.interrupt()
-            cloudClient?.refreshComputers()
-            cloudClient?.reconnectNow()
+            store.invalidateTransportRoute()
+            CloudLinkManager.get(this).reconnectNow()
         }
         updateServiceNotification(
             if (intent?.action == ACTION_RECONNECT) "正在重新连接 Mac" else "正在连接 Mac",
@@ -147,10 +143,6 @@ class PushService : Service() {
         worker?.interrupt()
         worker = null
         runCatching { connectivityManager?.unregisterNetworkCallback(networkCallback) }
-        cloudClient?.stop()
-        cloudClient = null
-        cloudInitThread?.interrupt()
-        cloudInitThread = null
         releaseWakeLock()
         if (store.state.value.connection == ConnectionState.CONNECTED) {
             store.onConnectionLost("服务已停止")
@@ -172,6 +164,17 @@ class PushService : Service() {
             forcedDisconnectReason = null
             acquireWakeLock()
             try {
+                if (store.state.value.transportKind == TransportKind.CLOUD) {
+                    val cloud = CloudLinkManager.get(this)
+                    cloud.ensureStarted()
+                    if (cloud.connected.value) {
+                        store.onConnectionEstablished()
+                    } else {
+                        store.markConnecting()
+                    }
+                    Thread.sleep(CLOUD_IDLE_POLL_MILLIS)
+                    continue
+                }
                 if (settings.token.isBlank()) {
                     throw IOException("Token 不能为空")
                 }
@@ -283,78 +286,8 @@ class PushService : Service() {
     }
 
     private fun ensureCloudClient() {
-        synchronized(cloudLock) {
-            if (cloudClient != null || cloudInitThread?.isAlive == true) return
-            if (PairedComputerStore(this).load().isEmpty()) return
-            cloudInitThread = Thread({
-                try {
-                    val identity = DeviceIdentityStore(this).loadOrCreate()
-                    val client = CloudNotificationClient(
-                        identity = identity,
-                        computersProvider = { PairedComputerStore(this).load() },
-                        listener = object : CloudNotificationClient.Listener {
-                            override fun onNotification(
-                                computer: PairedComputer,
-                                payload: NotifyPayload,
-                            ): Boolean {
-                                val session = store.session(payload.sessionId)
-                                if (session?.muted == true || session?.archived == true) {
-                                    return true
-                                }
-                                return runCatching {
-                                    NotificationHelper.notifyAgentAlert(
-                                        this@PushService,
-                                        payload,
-                                    )
-                                    true
-                                }.getOrElse {
-                                    Log.e(TAG, "Unable to post encrypted notification", it)
-                                    false
-                                }
-                            }
-
-                            override fun onStateChanged(
-                                server: String,
-                                state: CloudNotificationClient.State,
-                                detail: String?,
-                            ) {
-                                Log.i(
-                                    TAG,
-                                    "Encrypted transport $server: $state" +
-                                        detail?.let { " · $it" }.orEmpty(),
-                                )
-                            }
-                        },
-                        pushTokenProvider = { HomingFirebase.cachedToken(this@PushService) },
-                    )
-                    var accepted = false
-                    synchronized(cloudLock) {
-                        if (running) {
-                            cloudClient = client
-                            accepted = true
-                        }
-                    }
-                    if (accepted) {
-                        client.start()
-                        HomingFirebase.requestToken(this@PushService) {
-                            client.updatePushRegistration()
-                        }
-                    } else {
-                        client.stop()
-                    }
-                } catch (error: Throwable) {
-                    CrashReporter.record(error, origin = "cloud-notification-client")
-                    Log.e(TAG, "Unable to start encrypted notification client", error)
-                } finally {
-                    synchronized(cloudLock) {
-                        cloudInitThread = null
-                    }
-                }
-            }, "homing-cloud-init").apply {
-                isDaemon = true
-                start()
-            }
-        }
+        if (PairedComputerStore(this).load().isEmpty()) return
+        CloudLinkManager.get(this).ensureStarted()
     }
 
     private fun disconnectReason(error: Throwable): String {
@@ -410,20 +343,12 @@ class PushService : Service() {
             }
             return
         }
-        if (eventName == "session") {
-            store.applySessionUpdate(json)
-            return
-        }
-        if (eventName == "item") {
-            store.applyItem(json)
-            return
-        }
-        if (eventName == "turn") {
-            store.applyTurn(json)
+        if (eventName in setOf("session", "item", "turn", "dispatch")) {
+            store.applyLiveEvent(eventName, json)
             return
         }
         if (eventName == "reply_status") {
-            store.applyReplyStatus(json)
+            store.applyLiveEvent(eventName, json)
             val sessionId = json.optString("session_id")
             if (sessionId in notifiedSessions) {
                 store.session(sessionId)?.let { session ->
@@ -491,6 +416,7 @@ class PushService : Service() {
         private const val NOTIFIED_PREFS = "agent_push_notified"
         private const val KEY_NOTIFIED_IDS = "notified_ids"
         private const val WAKE_LOCK_TIMEOUT_MILLIS = 90_000L
+        private const val CLOUD_IDLE_POLL_MILLIS = 2_000L
         private const val NETWORK_CALLBACK_GRACE_MILLIS = 1_500L
 
         fun requestReconnect(context: Context) {

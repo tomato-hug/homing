@@ -5,15 +5,19 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
@@ -23,15 +27,19 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Build
 import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.HourglassEmpty
+import androidx.compose.material.icons.outlined.OpenInFull
 import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.Remove
 import androidx.compose.material.icons.outlined.RadioButtonUnchecked
 import androidx.compose.material.icons.outlined.Security
 import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -42,6 +50,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -54,8 +64,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import dev.agentpush.poc.AgentBrand
 import dev.agentpush.poc.AppSettings
+import dev.agentpush.poc.ApprovalOption
 import dev.agentpush.poc.ItemFileChange
 import dev.agentpush.poc.SessionItem
 import dev.agentpush.poc.SessionItemType
@@ -236,6 +249,7 @@ fun ToolCallItemCard(
     onCopy: () -> Unit,
 ) {
     var expanded by remember(item.id) { mutableStateOf(false) }
+    var outputDialog by remember(item.id) { mutableStateOf(false) }
     val failed = item.isFailed
     val accent = if (failed) MaterialTheme.colorScheme.error else CodexGreen
     val hasOutput = item.tool.outputTail.isNotBlank()
@@ -297,6 +311,17 @@ fun ToolCallItemCard(
                     )
                 }
                 if (hasOutput) {
+                    IconButton(
+                        onClick = { outputDialog = true },
+                        modifier = Modifier.size(36.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.OpenInFull,
+                            contentDescription = "全屏查看工具输出",
+                            modifier = Modifier.size(18.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                     Icon(
                         imageVector = if (expanded) Icons.Outlined.ExpandLess
                         else Icons.Outlined.ExpandMore,
@@ -355,7 +380,22 @@ fun ToolCallItemCard(
                     else MaterialTheme.colorScheme.outline,
                 )
             }
+            if (item.truncated) {
+                Text(
+                    text = "即時預覽已截斷，回合結束後會載入完整輸出",
+                    modifier = Modifier.padding(top = 6.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline,
+                )
+            }
         }
+    }
+    if (outputDialog) {
+        FullScreenCodeDialog(
+            title = "工具输出 · ${item.tool.name.ifBlank { "工具调用" }}",
+            tabs = listOf("" to item.tool.outputTail),
+            onDismiss = { outputDialog = false },
+        )
     }
 }
 
@@ -366,6 +406,7 @@ fun FileChangeItemCard(
     onCopy: () -> Unit,
 ) {
     var expanded by remember(item.id) { mutableStateOf(false) }
+    var diffDialog by remember(item.id) { mutableStateOf(false) }
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -392,6 +433,19 @@ fun FileChangeItemCard(
                         .padding(start = 7.dp),
                     style = MaterialTheme.typography.labelLarge,
                 )
+                if (item.files.any { it.diff.isNotBlank() } || item.text.isNotBlank()) {
+                    IconButton(
+                        onClick = { diffDialog = true },
+                        modifier = Modifier.size(36.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.OpenInFull,
+                            contentDescription = "全屏查看 diff",
+                            modifier = Modifier.size(18.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
                 Icon(
                     imageVector = if (expanded) Icons.Outlined.ExpandLess
                     else Icons.Outlined.ExpandMore,
@@ -420,7 +474,26 @@ fun FileChangeItemCard(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+            if (item.truncated) {
+                Text(
+                    text = "即時預覽已截斷，回合結束後會載入完整 diff",
+                    modifier = Modifier.padding(top = 6.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline,
+                )
+            }
         }
+    }
+    if (diffDialog) {
+        val tabs = item.files
+            .filter { it.diff.isNotBlank() }
+            .map { it.path to it.diff }
+            .ifEmpty { listOf("diff" to item.text) }
+        FullScreenCodeDialog(
+            title = "文件改动",
+            tabs = tabs,
+            onDismiss = { diffDialog = false },
+        )
     }
 }
 
@@ -490,6 +563,163 @@ private fun DiffBlock(diff: String) {
                     softWrap = false,
                     maxLines = 1,
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun FullScreenCodeDialog(
+    title: String,
+    tabs: List<Pair<String, String>>,
+    onDismiss: () -> Unit,
+) {
+    val available = tabs.ifEmpty { listOf("" to "") }
+    var selectedTab by remember(title) { mutableIntStateOf(0) }
+    var fontScale by remember(title) { mutableFloatStateOf(1f) }
+    val selected = available[selectedTab.coerceIn(available.indices)]
+    val vertical = rememberScrollState()
+    val horizontal = rememberScrollState()
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = Color(0xFF0D1117),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .statusBarsPadding()
+                    .navigationBarsPadding(),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 16.dp, end = 6.dp, top = 6.dp, bottom = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = title,
+                            style = MaterialTheme.typography.titleMedium,
+                            color = Color(0xFFE6EDF3),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (selected.first.isNotBlank()) {
+                            Text(
+                                text = selected.first,
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontFamily = HomingMono,
+                                    fontSize = 11.sp,
+                                ),
+                                color = Color(0xFF8B949E),
+                                maxLines = 1,
+                                overflow = TextOverflow.MiddleEllipsis,
+                            )
+                        }
+                    }
+                    IconButton(
+                        onClick = { fontScale = (fontScale - 0.1f).coerceAtLeast(0.7f) },
+                    ) {
+                        Icon(
+                            Icons.Outlined.Remove,
+                            contentDescription = "缩小字号",
+                            tint = Color(0xFFB1BAC4),
+                        )
+                    }
+                    Text(
+                        text = "${(fontScale * 100).toInt()}%",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontFamily = HomingMono,
+                        ),
+                        color = Color(0xFF8B949E),
+                    )
+                    IconButton(
+                        onClick = { fontScale = (fontScale + 0.1f).coerceAtMost(1.8f) },
+                    ) {
+                        Icon(
+                            Icons.Outlined.Add,
+                            contentDescription = "放大字号",
+                            tint = Color(0xFFB1BAC4),
+                        )
+                    }
+                    IconButton(onClick = onDismiss) {
+                        Icon(
+                            Icons.Outlined.Close,
+                            contentDescription = "关闭",
+                            tint = Color(0xFFE6EDF3),
+                        )
+                    }
+                }
+                if (available.size > 1) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(horizontal = 12.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        available.forEachIndexed { index, tab ->
+                            Surface(
+                                onClick = { selectedTab = index },
+                                shape = RoundedCornerShape(8.dp),
+                                color = if (index == selectedTab) {
+                                    Color(0xFF1F6FEB)
+                                } else {
+                                    Color(0xFF161B22)
+                                },
+                            ) {
+                                Text(
+                                    text = tab.first.ifBlank { "diff ${index + 1}" },
+                                    modifier = Modifier.padding(
+                                        horizontal = 10.dp,
+                                        vertical = 7.dp,
+                                    ),
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontFamily = HomingMono,
+                                    ),
+                                    color = if (index == selectedTab) {
+                                        Color.White
+                                    } else {
+                                        Color(0xFFB1BAC4)
+                                    },
+                                    maxLines = 1,
+                                )
+                            }
+                        }
+                    }
+                }
+                SelectionContainer(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .verticalScroll(vertical)
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                ) {
+                    Column(modifier = Modifier.horizontalScroll(horizontal)) {
+                        selected.second.lineSequence().forEach { line ->
+                            Text(
+                                text = line.ifBlank { " " },
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    fontFamily = HomingMono,
+                                    fontSize = (12 * fontScale).sp,
+                                    lineHeight = (18 * fontScale).sp,
+                                ),
+                                color = when {
+                                    line.startsWith("+") -> Color(0xFF7EE2A8)
+                                    line.startsWith("-") -> Color(0xFFFF9A9A)
+                                    line.startsWith("@@") -> Color(0xFF80C7FF)
+                                    else -> Color(0xFFD6DEE8)
+                                },
+                                softWrap = false,
+                            )
+                        }
+                    }
+                }
             }
         }
     }
@@ -571,10 +801,17 @@ fun PlanItemCard(item: SessionItem) {
 fun ApprovalItemCard(
     item: SessionItem,
     canApprove: Boolean,
-    onDecision: (Long?, Boolean) -> Unit,
+    approvalOptions: List<ApprovalOption> = emptyList(),
+    onDecision: (Long?, String, String?) -> Unit,
 ) {
     val status = item.tool.status.lowercase()
     val pending = status.isBlank() || status == "pending"
+    val options = approvalOptions.ifEmpty {
+        listOf(
+            ApprovalOption("allow_once", "允许", "allow"),
+            ApprovalOption("reject_once", "拒绝", "deny"),
+        )
+    }
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = ClaudeOrange.copy(alpha = 0.1f),
@@ -616,27 +853,66 @@ fun ApprovalItemCard(
                 }
             }
             if (canApprove && pending) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 11.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Button(
-                        onClick = { onDecision(item.eventId, true) },
-                        enabled = item.eventId != null,
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(10.dp),
-                    ) {
-                        Text("允许")
+                val buttons: @Composable (Modifier) -> Unit = { modifier ->
+                    options.forEach { option ->
+                        if (option.decision == "deny") {
+                            OutlinedButton(
+                                onClick = {
+                                    onDecision(
+                                        item.eventId,
+                                        option.decision,
+                                        option.id.takeIf { it.isNotBlank() },
+                                    )
+                                },
+                                enabled = item.eventId != null,
+                                modifier = modifier,
+                                shape = RoundedCornerShape(10.dp),
+                            ) {
+                                Text(
+                                    option.label,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        } else {
+                            Button(
+                                onClick = {
+                                    onDecision(
+                                        item.eventId,
+                                        option.decision,
+                                        option.id.takeIf { it.isNotBlank() },
+                                    )
+                                },
+                                enabled = item.eventId != null,
+                                modifier = modifier,
+                                shape = RoundedCornerShape(10.dp),
+                            ) {
+                                Text(
+                                    option.label,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
                     }
-                    OutlinedButton(
-                        onClick = { onDecision(item.eventId, false) },
-                        enabled = item.eventId != null,
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(10.dp),
+                }
+                if (options.size <= 2) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 11.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        Text("拒绝")
+                        buttons(Modifier.weight(1f))
+                    }
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 11.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        buttons(Modifier.fillMaxWidth())
                     }
                 }
             } else {

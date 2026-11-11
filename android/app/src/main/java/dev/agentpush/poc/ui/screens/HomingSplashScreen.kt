@@ -26,6 +26,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.agentpush.poc.ConnectionState
+import dev.agentpush.poc.TransportKind
 import dev.agentpush.poc.ui.HomingPigeon
 import dev.agentpush.poc.ui.PigeonState
 import dev.agentpush.poc.ui.isReducedMotion
@@ -36,6 +37,7 @@ import kotlinx.coroutines.delay
 @Composable
 fun HomingSplashScreen(
     connection: ConnectionState,
+    transportKind: TransportKind = TransportKind.LAN,
     onFinished: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -130,7 +132,7 @@ fun HomingSplashScreen(
                     lineHeight = 18.sp,
                 )
                 androidx.compose.material3.Text(
-                    text = "局域网 · 中继端口 18787",
+                    text = "${transportKind.label} · Homing 中继",
                     color = HomingPalette.Muted,
                     fontFamily = HomingMono,
                     fontSize = 10.5.sp,

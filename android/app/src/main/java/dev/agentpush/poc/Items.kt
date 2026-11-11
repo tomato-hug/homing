@@ -42,6 +42,8 @@ data class SessionItem(
     val ts: String,
     val type: SessionItemType,
     val role: String = "",
+    val partial: Boolean = false,
+    val truncated: Boolean = false,
     val text: String = "",
     val tool: ItemTool = ItemTool(),
     val files: List<ItemFileChange> = emptyList(),
@@ -130,6 +132,8 @@ data class SessionItem(
                     .ifBlank { Instant.now().toString() },
                 type = type,
                 role = role,
+                partial = json.optBoolean("partial", false),
+                truncated = json.optBoolean("truncated", false),
                 text = text,
                 tool = ItemTool(
                     name = toolName,
@@ -264,6 +268,64 @@ data class SessionItem(
     }
 }
 
+internal fun SessionItem.toJson(): JSONObject {
+    val typeName = rawType.ifBlank {
+        when (type) {
+            SessionItemType.USER -> "user"
+            SessionItemType.ASSISTANT -> "assistant"
+            SessionItemType.REASONING -> "reasoning"
+            SessionItemType.TOOL_CALL -> if (isToolResult) "tool_result" else "tool_call"
+            SessionItemType.FILE_CHANGE -> "file_change"
+            SessionItemType.PLAN -> "plan"
+            SessionItemType.APPROVAL -> "permission"
+            SessionItemType.ERROR -> "error"
+            SessionItemType.SYSTEM -> "system"
+            SessionItemType.OTHER -> "other"
+        }
+    }
+    return JSONObject()
+        .put("id", id)
+        .put("ts", ts)
+        .put("type", typeName)
+        .put("role", role)
+        .put("partial", partial)
+        .put("truncated", truncated)
+        .put("text", text)
+        .put(
+            "tool",
+            JSONObject()
+                .put("name", tool.name)
+                .put("input_summary", tool.inputSummary)
+                .put("output_tail", tool.outputTail)
+                .put("exit_code", tool.exitCode ?: JSONObject.NULL)
+                .put("status", tool.status),
+        )
+        .put(
+            "files",
+            JSONArray().apply {
+                files.forEach { file ->
+                    put(
+                        JSONObject()
+                            .put("path", file.path)
+                            .put("added", file.added)
+                            .put("removed", file.removed)
+                            .put("diff", file.diff),
+                    )
+                }
+            },
+        )
+        .put(
+            "plan",
+            JSONArray().apply {
+                plan.forEach { step ->
+                    put(JSONObject().put("step", step.step).put("status", step.status))
+                }
+            },
+        )
+        .put("model", model)
+        .put("event_id", eventId ?: JSONObject.NULL)
+}
+
 data class SessionTurn(
     val state: String,
     val ts: String = "",
@@ -290,6 +352,7 @@ data class SessionItemsState(
     val loadedAt: Long = 0L,
     val running: Boolean = false,
     val runningSince: String = "",
+    val includeReasoning: Boolean = false,
 ) {
     val lastItem: SessionItem?
         get() = items.lastOrNull()
@@ -366,12 +429,17 @@ fun appendSessionItem(
 ): SessionItemsState {
     if (item.isNoise()) return state
     val index = state.items.indexOfFirst { it.id == item.id }
+    val nextItem = if (index >= 0) {
+        mergeSessionItem(state.items[index], item)
+    } else {
+        item
+    }
     val merged = if (index >= 0) {
         state.items.filterNot { it.id == item.id }.toMutableList().also {
-            it.add(index.coerceAtMost(it.size), item)
+            it.add(index.coerceAtMost(it.size), nextItem)
         }
     } else {
-        state.items + item
+        state.items + nextItem
     }
     return state.copy(
         items = normalizeSessionItems(merged),
@@ -379,6 +447,36 @@ fun appendSessionItem(
         running = true,
         runningSince = state.runningSince.ifBlank { item.ts },
         loadedAt = System.currentTimeMillis(),
+    )
+}
+
+private fun mergeSessionItem(existing: SessionItem, incoming: SessionItem): SessionItem {
+    if (!incoming.truncated) {
+        if (!incoming.partial || incoming.text.length >= existing.text.length) {
+            return incoming
+        }
+        return incoming.copy(text = existing.text)
+    }
+    return incoming.copy(
+        text = if (existing.text.length > incoming.text.length) existing.text else incoming.text,
+        tool = incoming.tool.copy(
+            name = incoming.tool.name.ifBlank { existing.tool.name },
+            inputSummary = if (existing.tool.inputSummary.length > incoming.tool.inputSummary.length) {
+                existing.tool.inputSummary
+            } else {
+                incoming.tool.inputSummary
+            },
+            outputTail = if (existing.tool.outputTail.length > incoming.tool.outputTail.length) {
+                existing.tool.outputTail
+            } else {
+                incoming.tool.outputTail
+            },
+            exitCode = incoming.tool.exitCode ?: existing.tool.exitCode,
+            status = incoming.tool.status.ifBlank { existing.tool.status },
+        ),
+        files = if (existing.files.isNotEmpty()) existing.files else incoming.files,
+        plan = if (incoming.plan.isNotEmpty()) incoming.plan else existing.plan,
+        truncated = existing.truncated,
     )
 }
 

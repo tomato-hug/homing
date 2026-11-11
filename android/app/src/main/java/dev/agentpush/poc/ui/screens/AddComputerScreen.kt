@@ -38,6 +38,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -51,6 +52,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
+import dev.agentpush.poc.AgentStore
 import dev.agentpush.poc.protocol.DeviceIdentityStore
 import dev.agentpush.poc.protocol.PairedComputer
 import dev.agentpush.poc.protocol.PairedComputerStore
@@ -60,6 +62,7 @@ import dev.agentpush.poc.PushService
 import dev.agentpush.poc.ui.HomingCard
 import dev.agentpush.poc.ui.theme.HomingMono
 import dev.agentpush.poc.ui.theme.HomingPalette
+import kotlinx.coroutines.launch
 
 private sealed interface PairingUiState {
     data object Idle : PairingUiState
@@ -83,6 +86,7 @@ fun AddComputerScreen(
         context.getSharedPreferences("homing_cloud_pairing", Context.MODE_PRIVATE)
     }
     val identity = remember { DeviceIdentityStore(context).loadOrCreate() }
+    val scope = rememberCoroutineScope()
     val words = remember {
         context.assets.open("bip39-chinese-simplified.txt")
             .bufferedReader()
@@ -132,6 +136,11 @@ fun AddComputerScreen(
 
                 override fun onAccepted(computer: PairedComputer) {
                     store.save(computer)
+                    val agentStore = AgentStore.get(context)
+                    agentStore.refreshCloudComputers()
+                    scope.launch {
+                        runCatching { agentStore.refreshAll() }
+                    }
                     PushService.requestReconnect(context)
                     status = PairingUiState.Accepted(computer)
                 }

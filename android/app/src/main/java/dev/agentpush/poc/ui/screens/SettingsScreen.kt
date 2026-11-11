@@ -32,6 +32,7 @@ import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.ContentPaste
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -42,6 +43,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -82,6 +84,7 @@ fun SettingsScreen(
     var token by rememberSaveable { mutableStateOf(state.settings.token) }
     var permissionTick by remember { mutableIntStateOf(0) }
     var batteryTick by remember { mutableIntStateOf(0) }
+    var confirmClearCache by remember { mutableStateOf(false) }
 
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
         permissionTick += 1
@@ -232,6 +235,33 @@ fun SettingsScreen(
                 }
 
                 SectionCard {
+                    SectionTitle("协作")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "发送前预览",
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.Medium,
+                            )
+                            Spacer(Modifier.height(3.dp))
+                            Text(
+                                text = "有 @Agent 时先显示收件人和任务拆分，确认后再发送。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(
+                            checked = state.settings.previewMentions,
+                            onCheckedChange = { viewModel.setPreviewMentions(it) },
+                        )
+                    }
+                }
+
+                SectionCard {
                     SectionTitle("系统权限")
                     PermissionRow(
                         title = "通知权限",
@@ -287,6 +317,23 @@ fun SettingsScreen(
                     )
                 }
 
+                SectionCard {
+                    SectionTitle("本地数据")
+                    Text(
+                        text = "Homing 会在本机保存首頁快照、最近会话和未发送草稿，方便飞航模式或弱网时打开。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedButton(
+                        onClick = { confirmClearCache = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(13.dp),
+                    ) {
+                        Text("清除本地快照与草稿")
+                    }
+                }
+
                 Text(
                     text = "Homing ${dev.agentpush.poc.BuildConfig.VERSION_NAME} · PoC",
                     modifier = Modifier.fillMaxWidth(),
@@ -296,6 +343,31 @@ fun SettingsScreen(
                 )
             }
         }
+    }
+
+    if (confirmClearCache) {
+        AlertDialog(
+            onDismissRequest = { confirmClearCache = false },
+            title = { Text("清除本地数据？") },
+            text = {
+                Text("这不会删除 Mac 上的会话或 Homing 配置，只会清掉这台手机上缓存的首頁快照、会话摘要和草稿。")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmClearCache = false
+                        viewModel.clearLocalCache()
+                    },
+                ) {
+                    Text("清除")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmClearCache = false }) {
+                    Text("取消")
+                }
+            },
+        )
     }
 }
 

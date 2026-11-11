@@ -30,6 +30,8 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
     private val _settingsUi = MutableStateFlow(SettingsUiState())
     private val _snackbar = MutableStateFlow<String?>(null)
     private val _pendingNavigationSession = MutableStateFlow<String?>(null)
+    private val _sessionSearchHits = MutableStateFlow<List<SessionSearchHit>>(emptyList())
+    private val _sessionSearchNotice = MutableStateFlow("")
     private var pendingLaunchRequestId: String? = null
     private var sessionLive: SessionLiveStream? = null
     private var liveSessionId: String? = null
@@ -41,11 +43,19 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
     val snackbar: StateFlow<String?> = _snackbar.asStateFlow()
     val pendingNavigationSession: StateFlow<String?> =
         _pendingNavigationSession.asStateFlow()
+    val sessionSearchHits: StateFlow<List<SessionSearchHit>> =
+        _sessionSearchHits.asStateFlow()
+    val sessionSearchNotice: StateFlow<String> =
+        _sessionSearchNotice.asStateFlow()
 
     init {
         safeScope.launch {
             runCatching { store.refreshAll() }
                 .onFailure { showMessage(it.message ?: "同步失败") }
+            val current = store.state.value
+            if (current.mobileInbox.enabled != current.away) {
+                runCatching { store.setAway(current.mobileInbox.enabled) }
+            }
         }
         safeScope.launch {
             store.state.collect { state ->
@@ -77,6 +87,12 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
         refresh()
     }
 
+    fun activateComputer(deviceId: String) {
+        store.activateComputer(deviceId)
+    }
+
+    fun activeComputerId(): String = store.activeComputerId()
+
     fun openSession(sessionId: String) {
         CrashReporter.setLastSession(sessionId)
         NotificationHelper.cancelSession(getApplication(), sessionId)
@@ -102,7 +118,7 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
         liveSessionId = sessionId
         sessionLive = SessionLiveStream(
             sessionId = sessionId,
-            settingsProvider = { store.state.value.settings },
+            events = store.sessionEvents(sessionId),
             onFrame = { eventName, data ->
                 val json = runCatching { JSONObject(data) }.getOrNull()
                 if (json != null) {
@@ -127,6 +143,7 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
                             }
                         }
                         "reply_status" -> store.applyReplyStatus(json)
+                        "dispatch" -> store.applyDispatchUpdate(json)
                         "message" -> AgentEvent.fromJson(json).let { event ->
                             if (event.id > 0) store.ingestEvent(event)
                         }
@@ -147,6 +164,18 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun setReasoningVisible(sessionId: String, visible: Boolean) {
+        safeScope.launch {
+            runCatching {
+                store.setSessionReasoning(sessionId, enabled = visible)
+            }.onFailure {
+                showMessage(
+                    if (visible) "思考过程加载失败：${it.message}" else "无法收起思考过程",
+                )
+            }
+        }
+    }
+
     fun markSessionRead(sessionId: String) {
         NotificationHelper.cancelSession(getApplication(), sessionId)
         safeScope.launch {
@@ -155,10 +184,53 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun setAway(enabled: Boolean) {
+    fun searchSessionContent(query: String) {
+        val clean = query.trim()
+        if (clean.isBlank()) {
+            _sessionSearchHits.value = emptyList()
+            _sessionSearchNotice.value = ""
+            return
+        }
+        _sessionSearchNotice.value = ""
         safeScope.launch {
-            runCatching { store.setAway(enabled) }
-                .onFailure { showMessage("离开模式切换失败：${it.message}") }
+            runCatching {
+                AgentApi.searchSessions(
+                    settings = store.state.value.settings,
+                    query = clean,
+                    scope = "content",
+                    limit = 50,
+                )
+            }.onSuccess {
+                _sessionSearchHits.value = it
+            }.onFailure {
+                _sessionSearchHits.value = emptyList()
+                _sessionSearchNotice.value = if (it is AgentApiException && it.statusCode == 409) {
+                    it.message?.takeIf(String::isNotBlank) ?: "正文索引已关闭，可在设置中重新开启"
+                } else {
+                    "正文搜索失败：${it.message}"
+                }
+            }
+        }
+    }
+
+    fun clearSessionSearch() {
+        _sessionSearchHits.value = emptyList()
+        _sessionSearchNotice.value = ""
+    }
+
+    fun updateDraft(sessionId: String, text: String) {
+        store.updateDraft(sessionId, text)
+    }
+
+    fun clearDraft(sessionId: String) {
+        store.clearDraft(sessionId)
+    }
+
+    fun clearLocalCache() {
+        safeScope.launch {
+            runCatching { store.clearLocalCache() }
+                .onSuccess { showMessage("已清除本地快照、会话缓存和草稿") }
+                .onFailure { showMessage("清除本地缓存失败：${it.message}") }
         }
     }
 
@@ -250,6 +322,87 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
         safeScope.launch { store.setSessionArchived(sessionId, archived) }
     }
 
+    fun setInboxMode(enabled: Boolean) {
+        store.setInboxMode(enabled)
+        safeScope.launch {
+            runCatching { store.setAway(enabled) }
+                .onFailure {
+                    showMessage("收件箱已在本机切换，电脑端同步失败：${it.message}")
+                }
+        }
+    }
+
+    fun setSessionResident(sessionId: String, resident: Boolean) {
+        store.setSessionResident(sessionId, resident)
+        showMessage(if (resident) "已设为常驻" else "已取消常驻")
+    }
+
+    fun setAgentConnected(
+        agentId: String,
+        connected: Boolean,
+        onResult: (Result<Unit>) -> Unit = {},
+    ) {
+        safeScope.launch {
+            val result = runCatching {
+                store.setAgentConnected(agentId, connected)
+            }.map { action ->
+                if (action.message.isNotBlank()) showMessage(action.message)
+                Unit
+            }
+            result.onFailure {
+                showMessage(
+                    (if (connected) "接入失败：" else "关闭接入失败：") +
+                        (it.message ?: it.javaClass.simpleName),
+                )
+            }
+            onResult(result)
+        }
+    }
+
+    fun setRemindOnDone(sessionId: String, enabled: Boolean) {
+        safeScope.launch {
+            store.setSessionRemindOnDone(sessionId, enabled)
+            showMessage(if (enabled) "完成时会单独提醒你" else "已取消完成提醒")
+        }
+    }
+
+    fun renameSession(sessionId: String, title: String) {
+        safeScope.launch {
+            if (store.setSessionTitle(sessionId, title)) {
+                showMessage("标题已更新")
+            } else {
+                showMessage("重命名失败，请确认服务端支持自定义标题")
+            }
+        }
+    }
+
+    fun cancelQueuedReplies(sessionId: String) {
+        safeScope.launch {
+            val count = store.cancelQueuedReplies(sessionId)
+            showMessage(
+                if (count > 0) {
+                    "已撤回 $count 条排队回复"
+                } else {
+                    "没有可撤回的排队回复，可能已经开始执行"
+                },
+            )
+        }
+    }
+
+    fun cancelQueuedReply(reply: AgentReply, onResult: (Boolean) -> Unit = {}) {
+        safeScope.launch {
+            val cancelled = store.cancelQueuedReply(reply)
+            showMessage(
+                if (cancelled) {
+                    "已撤回这条排队回复"
+                } else {
+                    "撤回失败，可能已经开始执行"
+                },
+            )
+            onResult(cancelled)
+        }
+    }
+
     fun sendReply(
         session: SessionSummary,
         text: String,
@@ -257,6 +410,7 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
         files: List<String> = emptyList(),
         model: String? = null,
         effort: String? = null,
+        permissionMode: String? = null,
     ) {
         if (text.isBlank() && files.isEmpty()) {
             return
@@ -274,10 +428,211 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
                 files = files,
                 model = model,
                 effort = effort,
+                permissionMode = permissionMode,
             )
             if (reply.status == ReplyStatus.FAILED) {
                 showMessage("发送失败：${reply.message ?: "请稍后重试"}")
             }
+        }
+    }
+
+    fun sendReplyTo(
+        sessionId: String,
+        source: String,
+        eventId: Long,
+        text: String,
+    ) {
+        if (sessionId.isBlank() || text.isBlank()) return
+        safeScope.launch {
+            val reply = store.sendReply(
+                sessionId = sessionId,
+                eventId = eventId.takeIf { it > 0 },
+                source = source,
+                text = text.trim(),
+            )
+            if (reply.status == ReplyStatus.FAILED) {
+                showMessage("发送失败：${reply.message ?: "请稍后重试"}")
+            }
+        }
+    }
+
+    fun dispatchAgents(
+        session: SessionSummary,
+        eventId: Long,
+        mentions: List<AgentMention>,
+    ) {
+        if (mentions.isEmpty()) return
+        if (session.cwd.isBlank()) {
+            showMessage("这个会话没有工作目录，无法派生子任务")
+            return
+        }
+        safeScope.launch {
+            var succeeded = 0
+            val failures = mutableListOf<String>()
+            val waiting = mutableListOf<String>()
+            for (mention in mentions) {
+                if (mention.text.isBlank()) {
+                    failures += "@${mention.agentId} 缺少任务"
+                    continue
+                }
+                runCatching {
+                    store.dispatch(
+                        parentSessionId = session.sessionId,
+                        parentSource = session.brand.wire,
+                        parentEventId = eventId.takeIf { it > 0 },
+                        targetAgent = mention.agentId,
+                        text = mention.text,
+                        cwd = session.cwd,
+                    )
+                }.onSuccess { dispatch ->
+                    succeeded++
+                    if (dispatch.status == DispatchStatus.WAITING_SESSION) {
+                        waiting += AgentBrand.fromWire(dispatch.targetAgent).displayName
+                    }
+                }.onFailure { error ->
+                    failures += "@${mention.agentId}：${error.message ?: "派发失败"}"
+                    runCatching { store.refreshDispatches(session.sessionId) }
+                }
+            }
+            when {
+                failures.isNotEmpty() && succeeded == 0 ->
+                    showMessage("跨 Agent 派发失败：${failures.first()}")
+                failures.isNotEmpty() ->
+                    showMessage("已派发 $succeeded 个任务；${failures.first()}")
+                waiting.isNotEmpty() ->
+                    showMessage("${waiting.distinct().joinToString("、")} 已启动，等待会话回传")
+                else ->
+                    showMessage("已派发 $succeeded 个跨 Agent 任务")
+            }
+        }
+    }
+
+    fun compose(
+        session: SessionSummary,
+        text: String,
+        plan: ComposerDispatchPlan,
+        files: List<String>,
+        model: String?,
+        effort: String?,
+        permissionMode: String?,
+        mentionOverrides: List<ComposeMentionOverride>,
+        onResult: (Boolean) -> Unit,
+    ) {
+        if (text.isBlank() || !plan.hasMentions) {
+            onResult(false)
+            return
+        }
+        if (session.cwd.isBlank()) {
+            showMessage("这个会话没有工作目录，无法派生子任务")
+            onResult(false)
+            return
+        }
+        safeScope.launch {
+            val result = runCatching {
+                store.compose(
+                    sessionId = session.sessionId,
+                    source = session.brand.wire,
+                    text = text,
+                    parentText = plan.message,
+                    files = files,
+                    model = model,
+                    effort = effort,
+                    permissionMode = permissionMode,
+                    mentionOverrides = mentionOverrides,
+                )
+            }
+            result.onSuccess { composed ->
+                val count = composed.dispatches.size
+                val waiting = composed.dispatches
+                    .filter { it.status == DispatchStatus.WAITING_SESSION }
+                    .map { it.targetBrand.displayName }
+                    .distinct()
+                when {
+                    count == 0 -> showMessage("已发送，但没有建立协作任务")
+                    waiting.isNotEmpty() ->
+                        showMessage("已派发 $count 个任务；${waiting.joinToString("、")} 等待会话回传")
+                    else -> showMessage("已派发 $count 个跨 Agent 任务")
+                }
+                onResult(true)
+            }.onFailure { error ->
+                showMessage("跨 Agent 派发失败：${error.message ?: "请稍后重试"}")
+                onResult(false)
+            }
+        }
+    }
+
+    fun previewCompose(
+        session: SessionSummary,
+        text: String,
+        files: List<String>,
+        model: String?,
+        effort: String?,
+        permissionMode: String?,
+        mentionOverrides: List<ComposeMentionOverride>,
+        onResult: (ComposeResult?) -> Unit,
+    ) {
+        if (text.isBlank()) {
+            onResult(null)
+            return
+        }
+        if (session.cwd.isBlank()) {
+            showMessage("这个会话没有工作目录，无法派生子任务")
+            onResult(null)
+            return
+        }
+        safeScope.launch {
+            runCatching {
+                store.previewCompose(
+                    sessionId = session.sessionId,
+                    source = session.brand.wire,
+                    text = text,
+                    files = files,
+                    model = model,
+                    effort = effort,
+                    permissionMode = permissionMode,
+                    mentionOverrides = mentionOverrides,
+                )
+            }.onSuccess { onResult(it) }
+                .onFailure {
+                    showMessage("无法生成发送预览：${it.message ?: "请稍后重试"}")
+                    onResult(null)
+                }
+        }
+    }
+
+    fun setPreviewMentions(enabled: Boolean) {
+        store.setPreviewMentions(enabled)
+    }
+
+    fun forwardDispatch(dispatch: AgentDispatch, text: String? = null) {
+        safeScope.launch {
+            runCatching { store.forwardDispatch(dispatch.id, text) }
+                .onSuccess { showMessage("结论已转交给父 Agent") }
+                .onFailure { showMessage("转交失败：${it.message ?: "请稍后重试"}") }
+        }
+    }
+
+    fun cancelDispatch(dispatch: AgentDispatch) {
+        safeScope.launch {
+            runCatching { store.cancelDispatch(dispatch.id) }
+                .onSuccess {
+                    showMessage(
+                        if (it.message.contains("不是 Homing 启动")) {
+                            "已标记取消；该会话不是 Homing 启动的进程"
+                        } else {
+                            "已取消协作任务"
+                        },
+                    )
+                }
+                .onFailure { showMessage("取消失败：${it.message ?: "请稍后重试"}") }
+        }
+    }
+
+    fun discardDispatchWorktree(dispatch: AgentDispatch) {
+        safeScope.launch {
+            runCatching { store.discardDispatchWorktree(dispatch.id) }
+                .onSuccess { showMessage("已丢弃协作 worktree 与分支") }
+                .onFailure { showMessage("丢弃 worktree 失败：${it.message ?: "请稍后重试"}") }
         }
     }
 
@@ -303,13 +658,32 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    suspend fun loadSessionCommands(sessionId: String): List<SessionCommand> {
+        if (sessionId.isBlank()) return emptyList()
+        return runCatching {
+            AgentApi.fetchSessionCommands(store.state.value.settings, sessionId)
+        }.getOrDefault(emptyList())
+    }
+
+    suspend fun completeFiles(cwd: String, prefix: String): List<CompletedPath> {
+        if (cwd.isBlank()) return emptyList()
+        return runCatching {
+            AgentApi.completeFiles(store.state.value.settings, cwd, prefix)
+        }.getOrDefault(emptyList())
+    }
+
     fun decideApproval(
         eventId: Long,
         decision: String,
         onFallbackText: (() -> Unit)? = null,
+        optionId: String? = null,
     ) {
         safeScope.launch {
-            val result = store.decideApproval(eventId, decision)
+            val result = store.decideApproval(
+                eventId = eventId,
+                decision = decision,
+                optionId = optionId,
+            )
             if (!result.ok) {
                 if (onFallbackText != null) {
                     onFallbackText()
@@ -372,6 +746,10 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    suspend fun refreshAgentDirectory(): Result<AgentDirectory> {
+        return runCatching { store.refreshAgentDirectory() }
+    }
+
     fun createSession(
         source: String,
         cwd: String,
@@ -379,6 +757,7 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
         localFiles: List<PendingAttachment>,
         model: String? = null,
         effort: String? = null,
+        permissionMode: String? = null,
         onUploadProgress: (index: Int, total: Int, name: String, progress: Float) -> Unit =
             { _, _, _, _ -> },
         onResult: (NewSessionResult) -> Unit,
@@ -417,6 +796,7 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
                     files = uploadedPaths,
                     model = model,
                     effort = effort,
+                    permissionMode = permissionMode,
                 )
             }.getOrElse { error ->
                 NewSessionResult(

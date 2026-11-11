@@ -13,10 +13,6 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.time.Instant
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 
 class AgentApiException(
     val statusCode: Int,
@@ -41,6 +37,12 @@ data class NewSessionResult(
     val cwd: String = "",
 )
 
+data class DispatchResult(
+    val ok: Boolean,
+    val dispatch: AgentDispatch? = null,
+    val error: String? = null,
+)
+
 data class SessionItemsResult(
     val items: List<SessionItem> = emptyList(),
     val turns: List<SessionTurn> = emptyList(),
@@ -54,10 +56,19 @@ data class CommandResult(
 )
 
 object AgentApi {
-    private val patchClient = OkHttpClient.Builder()
-        .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
-        .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
-        .build()
+    @Volatile
+    private var transportRouter: TransportRouter? = null
+
+    @Volatile
+    private var activeSettingsProvider: (() -> AppSettings)? = null
+
+    internal fun bindTransport(
+        router: TransportRouter?,
+        activeSettings: (() -> AppSettings)? = null,
+    ) {
+        transportRouter = router
+        activeSettingsProvider = activeSettings
+    }
 
     suspend fun probe(settings: AppSettings): String = withContext(Dispatchers.IO) {
         val events = fetchEventsBlocking(settings, since = 0L)
@@ -142,34 +153,52 @@ object AgentApi {
         )
     }
 
+    suspend fun fetchHome(settings: AppSettings): HomeFeed? = withContext(Dispatchers.IO) {
+        val body = try {
+            requestText(settings, "/api/home", "GET")
+        } catch (error: AgentApiException) {
+            if (error.statusCode in setOf(404, 405, 501)) return@withContext null
+            throw error
+        }
+        runCatching { HomeFeed.fromJson(JSONObject(body)) }.getOrNull()
+    }
+
+    suspend fun clearAwayPeriod(settings: AppSettings, id: String): Boolean =
+        withContext(Dispatchers.IO) {
+            if (id.isBlank()) return@withContext false
+            val encoded = URLEncoder.encode(id, Charsets.UTF_8.name())
+            val body = try {
+                requestText(settings, "/api/away/periods/$encoded/clear", "POST", "{}")
+            } catch (error: AgentApiException) {
+                if (error.statusCode == 404) return@withContext false
+                throw error
+            }
+            runCatching { JSONObject(body).optBoolean("ok", true) }.getOrDefault(true)
+        }
+
     suspend fun patchSession(
         settings: AppSettings,
         sessionId: String,
-        fields: Map<String, Boolean>,
+        fields: Map<String, Boolean> = emptyMap(),
+        title: String? = null,
     ): SessionMeta? = withContext(Dispatchers.IO) {
-        if (sessionId.isBlank() || fields.isEmpty()) return@withContext null
+        if (sessionId.isBlank() || (fields.isEmpty() && title == null)) return@withContext null
         val encodedSession = URLEncoder.encode(sessionId, Charsets.UTF_8.name())
         val payload = JSONObject()
         fields.forEach { (key, value) -> payload.put(key, value) }
-        val request = Request.Builder()
-            .url("${settings.baseUrl.trimEnd('/')}/api/sessions/$encodedSession")
-            .patch(payload.toString().toRequestBody(JSON_MEDIA_TYPE))
-            .header("Authorization", "Bearer ${settings.token}")
-            .header("Accept", "application/json")
-            .build()
-        val body = patchClient.newCall(request).execute().use { response ->
-            val responseBody = response.body?.string().orEmpty()
-            if (!response.isSuccessful) {
-                if (response.code in setOf(404, 405, 501)) {
-                    return@withContext null
-                }
-                val message = runCatching {
-                    JSONObject(responseBody).optString("error")
-                }.getOrNull()?.takeIf { it.isNotBlank() }
-                    ?: responseBody.take(240).ifBlank { "HTTP ${response.code}" }
-                throw AgentApiException(response.code, message)
+        title?.let { payload.put("title", it) }
+        val body = try {
+            requestText(
+                settings,
+                "/api/sessions/$encodedSession",
+                "PATCH",
+                payload.toString(),
+            )
+        } catch (error: AgentApiException) {
+            if (error.statusCode in setOf(404, 405, 501)) {
+                return@withContext null
             }
-            responseBody
+            throw error
         }
         val json = runCatching { JSONObject(body) }.getOrNull()
             ?: return@withContext null
@@ -184,8 +213,46 @@ object AgentApi {
             pinned = state?.booleanOrNull("pinned") ?: meta.pinned,
             muted = state?.booleanOrNull("muted") ?: meta.muted,
             archived = state?.booleanOrNull("archived") ?: meta.archived,
+            remindOnDone = state?.booleanOrNull("remind_on_done") ?: meta.remindOnDone,
         )
     }
+
+    suspend fun cancelReply(settings: AppSettings, replyId: Long): ReplyReceipt =
+        withContext(Dispatchers.IO) {
+            if (replyId <= 0) {
+                return@withContext ReplyReceipt(
+                    ok = false,
+                    replyId = replyId,
+                    status = ReplyStatus.FAILED,
+                    message = "回复 id 无效",
+                )
+            }
+            val body = try {
+                requestText(
+                    settings,
+                    "/api/replies/$replyId/cancel",
+                    "POST",
+                    "{}",
+                )
+            } catch (error: AgentApiException) {
+                if (error.statusCode in setOf(404, 405, 409, 501)) {
+                    return@withContext ReplyReceipt(
+                        ok = false,
+                        replyId = replyId,
+                        status = ReplyStatus.QUEUED,
+                        message = error.message,
+                    )
+                }
+                throw error
+            }
+            val json = runCatching { JSONObject(body) }.getOrElse { JSONObject() }
+            ReplyReceipt(
+                ok = json.optBoolean("ok", false),
+                replyId = json.optLong("reply_id", replyId),
+                status = ReplyStatus.fromWire(json.optString("status").ifBlank { "cancelled" }),
+                message = json.optString("message").takeIf { it.isNotBlank() },
+            )
+        }
 
     suspend fun fetchAgentDirectory(settings: AppSettings): AgentDirectory =
         withContext(Dispatchers.IO) {
@@ -199,6 +266,70 @@ object AgentApi {
             }
             parseAgentDirectory(body)
         }
+
+    suspend fun fetchAgentCatalog(settings: AppSettings): AgentCatalog =
+        withContext(Dispatchers.IO) {
+            val body = try {
+                requestText(settings, "/api/agent-catalog", "GET")
+            } catch (error: AgentApiException) {
+                if (error.statusCode == 404 || error.statusCode == 501) {
+                    return@withContext AgentCatalog()
+                }
+                throw error
+            }
+            runCatching { JSONObject(body) }
+                .getOrNull()
+                ?.let(AgentCatalog::fromJson)
+                ?: AgentCatalog()
+        }
+
+    suspend fun setAgentConnected(
+        settings: AppSettings,
+        agentId: String,
+        connected: Boolean,
+    ): AgentActionResult = withContext(Dispatchers.IO) {
+        val id = URLEncoder.encode(agentId.trim(), Charsets.UTF_8.name())
+        val path = if (connected) {
+            "/api/agent-catalog/$id/quick"
+        } else {
+            "/api/agents/$id/disconnect"
+        }
+        val body = requestText(settings, path, "POST", "{}")
+        val json = runCatching { JSONObject(body) }.getOrNull()
+            ?: throw IOException("Mac 返回了无法识别的接入结果")
+        val ok = json.optBoolean("ok", true)
+        val message = json.optString("note")
+            .ifBlank { json.optString("message") }
+            .ifBlank { json.optString("error") }
+        if (!ok) {
+            throw IOException(message.ifBlank { "接入操作失败" })
+        }
+        AgentActionResult(ok = true, message = message)
+    }
+
+    suspend fun searchSessions(
+        settings: AppSettings,
+        query: String,
+        scope: String = "content",
+        limit: Int = 50,
+    ): List<SessionSearchHit> = withContext(Dispatchers.IO) {
+        val clean = query.trim()
+        if (clean.isBlank()) return@withContext emptyList()
+        val path = "/api/search?q=${URLEncoder.encode(clean, Charsets.UTF_8.name())}" +
+            "&scope=${URLEncoder.encode(scope, Charsets.UTF_8.name())}" +
+            "&limit=${limit.coerceIn(1, 200)}"
+        val body = try {
+            requestText(settings, path, "GET")
+        } catch (error: AgentApiException) {
+            if (error.statusCode in setOf(404, 405, 501)) {
+                return@withContext emptyList()
+            }
+            throw error
+        }
+        runCatching { JSONObject(body) }.getOrNull()
+            ?.let(SessionSearchHit::listFromJson)
+            .orEmpty()
+    }
 
     private fun parseInboxEntries(array: JSONArray?): List<InboxEntry> {
         if (array == null) return emptyList()
@@ -214,13 +345,15 @@ object AgentApi {
         sessionId: String,
         limit: Int = 300,
         before: String? = null,
+        includeReasoning: Boolean = false,
     ): SessionItemsResult = withContext(Dispatchers.IO) {
         val encodedSession = URLEncoder.encode(sessionId, Charsets.UTF_8.name())
         val query = buildList {
-            add("limit=${limit.coerceIn(1, 1000)}")
+            add("limit=${limit.coerceIn(1, 2000)}")
             before?.takeIf { it.isNotBlank() }?.let {
                 add("before=${URLEncoder.encode(it, Charsets.UTF_8.name())}")
             }
+            if (includeReasoning) add("include_reasoning=1")
         }.joinToString("&")
         val body = try {
             requestText(
@@ -264,6 +397,56 @@ object AgentApi {
                 ?.takeIf { it.isNotBlank() },
             available = true,
         )
+    }
+
+    suspend fun fetchSessionCommands(
+        settings: AppSettings,
+        sessionId: String,
+    ): List<SessionCommand> = withContext(Dispatchers.IO) {
+        if (sessionId.isBlank()) return@withContext emptyList()
+        val encodedSession = URLEncoder.encode(sessionId, Charsets.UTF_8.name())
+        val body = try {
+            requestText(settings, "/api/sessions/$encodedSession/commands", "GET")
+        } catch (error: AgentApiException) {
+            if (error.statusCode in setOf(404, 405, 501)) return@withContext emptyList()
+            throw error
+        }
+        val array = runCatching { JSONObject(body).optJSONArray("commands") }.getOrNull()
+            ?: return@withContext emptyList()
+        buildList {
+            for (index in 0 until array.length()) {
+                array.optJSONObject(index)
+                    ?.let(SessionCommand::fromJson)
+                    ?.let(::add)
+            }
+        }
+    }
+
+    suspend fun completeFiles(
+        settings: AppSettings,
+        cwd: String,
+        prefix: String,
+    ): List<CompletedPath> = withContext(Dispatchers.IO) {
+        if (cwd.isBlank()) return@withContext emptyList()
+        val query = "cwd=${URLEncoder.encode(cwd, Charsets.UTF_8.name())}" +
+            "&prefix=${URLEncoder.encode(prefix, Charsets.UTF_8.name())}"
+        val body = try {
+            requestText(settings, "/api/fs/complete?$query", "GET")
+        } catch (error: AgentApiException) {
+            if (error.statusCode in setOf(400, 403, 404, 405, 501)) {
+                return@withContext emptyList()
+            }
+            throw error
+        }
+        val array = runCatching { JSONObject(body).optJSONArray("items") }.getOrNull()
+            ?: return@withContext emptyList()
+        buildList {
+            for (index in 0 until array.length()) {
+                array.optJSONObject(index)
+                    ?.let(CompletedPath::fromJson)
+                    ?.let(::add)
+            }
+        }
     }
 
     suspend fun fetchProjects(settings: AppSettings): List<ProjectInfo> =
@@ -357,6 +540,7 @@ object AgentApi {
         files: List<String> = emptyList(),
         model: String? = null,
         effort: String? = null,
+        permissionMode: String? = null,
     ): ReplyReceipt = withContext(Dispatchers.IO) {
         val payload = buildReplyPayload(
             eventId,
@@ -366,6 +550,7 @@ object AgentApi {
             files,
             model,
             effort,
+            permissionMode,
         )
         val body = requestText(settings, "/api/reply", "POST", payload.toString())
         val json = runCatching { JSONObject(body) }.getOrElse { JSONObject() }
@@ -374,6 +559,206 @@ object AgentApi {
             replyId = json.optLong("reply_id", 0L),
             status = ReplyStatus.fromWire(json.optString("status").ifBlank { "queued" }),
             message = json.optString("message").takeIf { it.isNotBlank() },
+        )
+    }
+
+    suspend fun dispatch(
+        settings: AppSettings,
+        parentSessionId: String,
+        parentSource: String,
+        parentEventId: Long?,
+        targetAgent: String,
+        text: String,
+        cwd: String,
+    ): DispatchResult = withContext(Dispatchers.IO) {
+        val payload = JSONObject()
+            .put("parent_session_id", parentSessionId)
+            .put("parent_source", parentSource)
+            .put("target_agent", targetAgent)
+            .put("text", text)
+            .put("cwd", cwd)
+            .put("mode", "parallel")
+        if (parentEventId != null && parentEventId > 0) {
+            payload.put("parent_event_id", parentEventId)
+        }
+        val body = requestText(
+            settings = settings,
+            path = "/api/dispatch",
+            method = "POST",
+            body = payload.toString(),
+            readTimeoutMs = 35_000,
+        )
+        val json = runCatching { JSONObject(body) }.getOrElse { JSONObject() }
+        val nested = json.optJSONObject("dispatch") ?: json
+        DispatchResult(
+            ok = json.optBoolean("ok", true),
+            dispatch = AgentDispatch.fromJson(nested),
+            error = json.stringOrBlank("error").takeIf { it.isNotBlank() },
+        )
+    }
+
+    suspend fun compose(
+        settings: AppSettings,
+        sessionId: String,
+        source: String,
+        text: String,
+        files: List<String> = emptyList(),
+        model: String? = null,
+        effort: String? = null,
+        permissionMode: String? = null,
+        workspace: String = "auto",
+        returnMode: String = "card",
+        mentionOverrides: List<ComposeMentionOverride> = emptyList(),
+        dryRun: Boolean = false,
+    ): ComposeResult = withContext(Dispatchers.IO) {
+        val payload = JSONObject()
+            .put("session_id", sessionId)
+            .put("source", source)
+            .put("text", text)
+            .put(
+                "files",
+                JSONArray().apply {
+                    files.filter { it.isNotBlank() }.forEach { put(it) }
+                },
+            )
+            .put(
+                "collab",
+                JSONObject()
+                    .put("context", JSONArray().put("recent").put("files"))
+                    .put("workspace", workspace)
+                    .put("return", returnMode),
+            )
+            .put("dry_run", dryRun)
+        if (mentionOverrides.isNotEmpty()) {
+            payload.put(
+                "mentions",
+                JSONArray().apply {
+                    mentionOverrides.forEach { put(it.toJson()) }
+                },
+            )
+        }
+        model?.takeIf { it.isNotBlank() }?.let { payload.put("model", it) }
+        effort?.takeIf { it.isNotBlank() }?.let { payload.put("effort", it) }
+        permissionMode?.takeIf { it.isNotBlank() }
+            ?.let { payload.put("permission_mode", it) }
+        val body = requestText(
+            settings = settings,
+            path = "/api/compose",
+            method = "POST",
+            body = payload.toString(),
+            readTimeoutMs = 35_000,
+        )
+        val json = runCatching { JSONObject(body) }.getOrElse {
+            throw AgentApiException(0, "协作响应不是 JSON")
+        }
+        ComposeResult.fromJson(json)
+    }
+
+    suspend fun fetchDispatches(
+        settings: AppSettings,
+        parentSessionId: String = "",
+        limit: Int = 200,
+    ): List<AgentDispatch> = withContext(Dispatchers.IO) {
+        val query = buildList {
+            add("limit=${limit.coerceIn(1, 500)}")
+            parentSessionId.takeIf { it.isNotBlank() }?.let {
+                add("parent_session_id=${URLEncoder.encode(it, Charsets.UTF_8.name())}")
+            }
+        }.joinToString("&")
+        val body = requestText(settings, "/api/dispatches?$query", "GET")
+        val root = runCatching { JSONObject(body) }.getOrElse { JSONObject() }
+        val array = root.optJSONArray("dispatches") ?: JSONArray()
+        buildList {
+            for (index in 0 until array.length()) {
+                array.optJSONObject(index)?.let { item ->
+                    val dispatch = AgentDispatch.fromJson(item)
+                    if (dispatch.id.isNotBlank()) add(dispatch)
+                }
+            }
+        }
+    }
+
+    suspend fun forwardDispatch(
+        settings: AppSettings,
+        dispatchId: String,
+        text: String? = null,
+    ): CommandResult = withContext(Dispatchers.IO) {
+        val payload = JSONObject()
+        text?.takeIf { it.isNotBlank() }?.let { payload.put("text", it) }
+        val encoded = URLEncoder.encode(dispatchId, Charsets.UTF_8.name())
+        val body = requestText(
+            settings = settings,
+            path = "/api/dispatches/$encoded/forward",
+            method = "POST",
+            body = payload.toString(),
+            readTimeoutMs = 35_000,
+        )
+        val json = runCatching { JSONObject(body) }.getOrElse { JSONObject() }
+        CommandResult(
+            ok = json.optBoolean("ok", true),
+            message = json.stringOrBlank("error").takeIf { it.isNotBlank() },
+        )
+    }
+
+    suspend fun replyDispatch(
+        settings: AppSettings,
+        dispatchId: String,
+        text: String,
+    ): DispatchResult = withContext(Dispatchers.IO) {
+        val encoded = URLEncoder.encode(dispatchId, Charsets.UTF_8.name())
+        val body = requestText(
+            settings = settings,
+            path = "/api/dispatches/$encoded/reply",
+            method = "POST",
+            body = JSONObject().put("text", text).toString(),
+            readTimeoutMs = 35_000,
+        )
+        val json = runCatching { JSONObject(body) }.getOrElse { JSONObject() }
+        val nested = json.optJSONObject("dispatch") ?: json
+        DispatchResult(
+            ok = json.optBoolean("ok", true),
+            dispatch = AgentDispatch.fromJson(nested),
+            error = json.stringOrBlank("error").takeIf { it.isNotBlank() },
+        )
+    }
+
+    suspend fun cancelDispatch(
+        settings: AppSettings,
+        dispatchId: String,
+    ): DispatchResult = withContext(Dispatchers.IO) {
+        val encoded = URLEncoder.encode(dispatchId, Charsets.UTF_8.name())
+        val body = requestText(
+            settings = settings,
+            path = "/api/dispatches/$encoded/cancel",
+            method = "POST",
+            body = "{}",
+        )
+        val json = runCatching { JSONObject(body) }.getOrElse { JSONObject() }
+        val nested = json.optJSONObject("dispatch") ?: json
+        DispatchResult(
+            ok = json.optBoolean("ok", true),
+            dispatch = AgentDispatch.fromJson(nested),
+            error = json.stringOrBlank("error").takeIf { it.isNotBlank() },
+        )
+    }
+
+    suspend fun discardDispatchWorktree(
+        settings: AppSettings,
+        dispatchId: String,
+    ): DispatchResult = withContext(Dispatchers.IO) {
+        val encoded = URLEncoder.encode(dispatchId, Charsets.UTF_8.name())
+        val body = requestText(
+            settings = settings,
+            path = "/api/dispatches/$encoded/discard",
+            method = "POST",
+            body = JSONObject().put("confirm", true).toString(),
+        )
+        val json = runCatching { JSONObject(body) }.getOrElse { JSONObject() }
+        val nested = json.optJSONObject("dispatch") ?: json
+        DispatchResult(
+            ok = json.optBoolean("ok", true),
+            dispatch = AgentDispatch.fromJson(nested),
+            error = json.stringOrBlank("error").takeIf { it.isNotBlank() },
         )
     }
 
@@ -418,6 +803,25 @@ object AgentApi {
         mime: String,
         onProgress: (Float) -> Unit,
     ): UploadResult = withContext(Dispatchers.IO) {
+        val router = transportRouter
+        if (router != null) {
+            router.ensureRoute()
+            if (router.kind.value == TransportKind.CLOUD) {
+                if (file.length() > CLOUD_FILE_LIMIT_BYTES) {
+                    throw CloudRpcException("單文件上限 20 MB")
+                }
+                val bytes = file.readBytes()
+                val json = router.upload("/api/upload?$query", bytes, name)
+                onProgress(1f)
+                return@withContext UploadResult(
+                    ok = json.optBoolean("ok", true),
+                    path = json.optString("path"),
+                    name = json.optString("name", name),
+                    size = json.optLong("size", bytes.size.toLong()),
+                    mime = json.optString("mime", mime),
+                )
+            }
+        }
         val connection = URL(
             "${settings.baseUrl.trimEnd('/')}/api/upload?$query",
         ).openConnection() as HttpURLConnection
@@ -494,6 +898,7 @@ object AgentApi {
         files: List<String> = emptyList(),
         model: String? = null,
         effort: String? = null,
+        permissionMode: String? = null,
     ): NewSessionResult = withContext(Dispatchers.IO) {
         val payload = JSONObject()
             .put("source", source)
@@ -502,6 +907,8 @@ object AgentApi {
             .put("files", JSONArray(files))
         model?.takeIf { it.isNotBlank() }?.let { payload.put("model", it) }
         effort?.takeIf { it.isNotBlank() }?.let { payload.put("effort", it) }
+        permissionMode?.takeIf { it.isNotBlank() }
+            ?.let { payload.put("permission_mode", it) }
         try {
             val body = requestText(settings, "/api/sessions/new", "POST", payload.toString())
             val json = JSONObject(body)
@@ -596,8 +1003,10 @@ object AgentApi {
         settings: AppSettings,
         eventId: Long,
         decision: String,
+        optionId: String? = null,
     ): CommandResult = withContext(Dispatchers.IO) {
         val payload = JSONObject().put("decision", decision)
+        optionId?.takeIf { it.isNotBlank() }?.let { payload.put("option_id", it) }
         try {
             val body = requestText(
                 settings,
@@ -655,7 +1064,10 @@ object AgentApi {
         return "$base${separator}cap=$capability"
     }
 
-    private fun fetchEventsBlocking(settings: AppSettings, since: Long): List<AgentEvent> {
+    private suspend fun fetchEventsBlocking(
+        settings: AppSettings,
+        since: Long,
+    ): List<AgentEvent> {
         val body = requestText(settings, "/api/events?since=$since", "GET")
         val array = JSONArray(body)
         return buildList {
@@ -667,7 +1079,7 @@ object AgentApi {
         }
     }
 
-    private fun fetchProjectsBlocking(settings: AppSettings): List<ProjectInfo> {
+    private suspend fun fetchProjectsBlocking(settings: AppSettings): List<ProjectInfo> {
         val body = try {
             requestText(settings, "/api/projects", "GET")
         } catch (error: AgentApiException) {
@@ -715,12 +1127,30 @@ object AgentApi {
         )
     }
 
-    private fun requestText(
+    private suspend fun requestText(
         settings: AppSettings,
         path: String,
         method: String,
         body: String? = null,
+        readTimeoutMs: Int = 20_000,
     ): String {
+        val router = transportRouter
+        val activeSettings = activeSettingsProvider?.invoke()
+        if (router != null && (activeSettings == null || activeSettings == settings)) {
+            val parsedBody = body?.let {
+                runCatching { JSONTokener(it).nextValue() as? JSONObject }.getOrNull()
+            }
+            val response = router.request(method, path, parsedBody)
+            if (response.status !in 200..299) {
+                val message = (response.body as? JSONObject)
+                    ?.optString("error")
+                    ?.takeIf { it.isNotBlank() }
+                    ?: response.raw.take(240)
+                        .ifBlank { "HTTP ${response.status}" }
+                throw AgentApiException(response.status, message)
+            }
+            return response.raw
+        }
         if (settings.token.isBlank()) {
             throw IOException("Token 不能为空")
         }
@@ -729,7 +1159,7 @@ object AgentApi {
         try {
             connection.requestMethod = method
             connection.connectTimeout = 6_000
-            connection.readTimeout = 20_000
+            connection.readTimeout = readTimeoutMs
             connection.useCaches = false
             connection.setRequestProperty("Authorization", "Bearer ${settings.token}")
             connection.setRequestProperty("Accept", "application/json")
@@ -762,7 +1192,7 @@ object AgentApi {
     }
 
     private const val DEFAULT_BUFFER_SIZE = 8 * 1024
-    private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+    private const val CLOUD_FILE_LIMIT_BYTES = 20 * 1024 * 1024
 }
 
 internal fun parseAgentDirectory(body: String): AgentDirectory {
@@ -790,6 +1220,11 @@ internal fun parseAgentDirectory(body: String): AgentDirectory {
             .ifBlank { models.firstOrNull { it.isDefault }?.id.orEmpty() }
         agents[source] = AgentProfile(
             source = source,
+            displayName = json.stringOrBlank("display_name")
+                .ifBlank { json.stringOrBlank("name") },
+            icon = json.stringOrBlank("icon"),
+            available = json.optBoolean("available", false),
+            installed = json.optBoolean("installed", false),
             capabilities = AgentCapabilities.fromJson(
                 json.optJSONObject("capabilities"),
             ),
@@ -828,6 +1263,7 @@ internal fun buildReplyPayload(
     files: List<String>,
     model: String? = null,
     effort: String? = null,
+    permissionMode: String? = null,
 ): JSONObject {
     return JSONObject().apply {
         if (eventId != null && eventId > 0) {
@@ -840,5 +1276,6 @@ internal fun buildReplyPayload(
         put("files", JSONArray(files))
         model?.takeIf { it.isNotBlank() }?.let { put("model", it) }
         effort?.takeIf { it.isNotBlank() }?.let { put("effort", it) }
+        permissionMode?.takeIf { it.isNotBlank() }?.let { put("permission_mode", it) }
     }
 }

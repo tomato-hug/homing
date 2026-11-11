@@ -59,6 +59,21 @@ class NotifyPayloadTest {
     }
 
     @Test
+    fun parsesReasonAndDispatchIdForCollaborationAction() {
+        val payload = NotifyPayload.fromJson(JSONObject()
+            .put("level", "P1")
+            .put("kind", "collab_result")
+            .put("source", "claude")
+            .put("session_id", "demo-session-parent")
+            .put("dispatch_id", "dsp_demo-1")
+            .put("title", "協作完成")
+            .put("summary", "示例結論"))
+        requireNotNull(payload)
+        assertEquals("collab_result", payload.kind)
+        assertEquals("dsp_demo-1", payload.dispatchId)
+    }
+
+    @Test
     fun rejectsUnknownLevelAndEmptyBody() {
         assertNull(NotifyPayload.fromJson(JSONObject()
             .put("level", "P9")

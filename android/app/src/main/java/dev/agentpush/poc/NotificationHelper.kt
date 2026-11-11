@@ -15,11 +15,13 @@ import java.time.Instant
 object NotificationHelper {
     const val ACTION_REPLY = "dev.agentpush.poc.action.REPLY"
     const val ACTION_READ = "dev.agentpush.poc.action.READ"
+    const val ACTION_FORWARD = "dev.agentpush.poc.action.FORWARD"
     const val EXTRA_SESSION_ID = "session_id"
     const val EXTRA_EVENT_ID = "event_id"
     const val EXTRA_NOTIFICATION_ID = "notification_id"
     const val EXTRA_TITLE = "event_title"
     const val EXTRA_UNREAD_IDS = "unread_ids"
+    const val EXTRA_DISPATCH_ID = "dispatch_id"
     const val REMOTE_INPUT_KEY = "reply_text"
 
     const val SERVICE_CHANNEL_ID = "agent_connection"
@@ -27,6 +29,10 @@ object NotificationHelper {
     const val P0_CHANNEL_ID = "homing_p0"
     const val P1_CHANNEL_ID = "homing_p1"
     const val P2_CHANNEL_ID = "homing_p2"
+    const val WAITING_CHANNEL_ID = "homing_waiting"
+    const val COLLAB_CHANNEL_ID = "homing_collab"
+    const val DONE_CHANNEL_ID = "homing_done"
+    const val ERROR_CHANNEL_ID = "homing_error"
     const val SERVICE_NOTIFICATION_ID = 1
 
     fun createChannels(context: Context) {
@@ -77,8 +83,56 @@ object NotificationHelper {
             setShowBadge(true)
             lockscreenVisibility = Notification.VISIBILITY_PRIVATE
         }
+        val waitingChannel = NotificationChannel(
+            WAITING_CHANNEL_ID,
+            "Homing · 等你處理",
+            NotificationManager.IMPORTANCE_HIGH,
+        ).apply {
+            description = "授權、提問與需要你決定的任務"
+            enableVibration(true)
+            vibrationPattern = longArrayOf(0, 180, 100, 180)
+            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+        }
+        val collabChannel = NotificationChannel(
+            COLLAB_CHANNEL_ID,
+            "Homing · 協作結果",
+            NotificationManager.IMPORTANCE_DEFAULT,
+        ).apply {
+            description = "跨 Agent 子任務完成後的結論"
+            enableVibration(true)
+            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+        }
+        val doneChannel = NotificationChannel(
+            DONE_CHANNEL_ID,
+            "Homing · 已完成",
+            NotificationManager.IMPORTANCE_LOW,
+        ).apply {
+            description = "任務完成摘要，不打断当前操作"
+            setShowBadge(true)
+            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+        }
+        val errorChannel = NotificationChannel(
+            ERROR_CHANNEL_ID,
+            "Homing · 運行異常",
+            NotificationManager.IMPORTANCE_HIGH,
+        ).apply {
+            description = "Agent 執行失敗或中斷"
+            enableVibration(true)
+            vibrationPattern = longArrayOf(0, 220, 120, 220)
+            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+        }
         manager.createNotificationChannels(
-            listOf(replyChannel, serviceChannel, p0Channel, p1Channel, p2Channel),
+            listOf(
+                replyChannel,
+                serviceChannel,
+                p0Channel,
+                p1Channel,
+                p2Channel,
+                waitingChannel,
+                collabChannel,
+                doneChannel,
+                errorChannel,
+            ),
         )
     }
 
@@ -86,6 +140,17 @@ object NotificationHelper {
         "P0" -> P0_CHANNEL_ID
         "P2" -> P2_CHANNEL_ID
         else -> P1_CHANNEL_ID
+    }
+
+    fun channelIdForPayload(payload: NotifyPayload): String {
+        return when (payload.kind.lowercase()) {
+            "permission", "needs_input", "question", "awaiting_input", "approval" ->
+                WAITING_CHANNEL_ID
+            "collab_result" -> COLLAB_CHANNEL_ID
+            "error", "failed" -> ERROR_CHANNEL_ID
+            "done", "completed", "turn_complete", "reply", "stop" -> DONE_CHANNEL_ID
+            else -> channelIdForLevel(payload.level)
+        }
     }
 
     fun notifyAgentAlert(context: Context, payload: NotifyPayload) {
@@ -111,7 +176,7 @@ object NotificationHelper {
         )
         val builder = Notification.Builder(
             context,
-            channelIdForLevel(payload.level),
+            channelIdForPayload(payload),
         )
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title)
@@ -127,6 +192,28 @@ object NotificationHelper {
             .setWhen(parseMillis(payload.at))
         if (payload.level != "P2") {
             builder.setPriority(Notification.PRIORITY_HIGH)
+        }
+        if (payload.kind == "collab_result" && payload.dispatchId.isNotBlank()) {
+            val forwardIntent = Intent(context, ReplyActionReceiver::class.java).apply {
+                action = ACTION_FORWARD
+                putExtra(EXTRA_SESSION_ID, payload.sessionId)
+                putExtra(EXTRA_DISPATCH_ID, payload.dispatchId)
+                putExtra(EXTRA_NOTIFICATION_ID, notificationId)
+                putExtra(EXTRA_TITLE, title)
+            }
+            val forwardPendingIntent = PendingIntent.getBroadcast(
+                context,
+                notificationId xor 0x20000000,
+                forwardIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            builder.addAction(
+                Notification.Action.Builder(
+                    Icon.createWithResource(context, android.R.drawable.ic_menu_share),
+                    "轉交",
+                    forwardPendingIntent,
+                ).build(),
+            )
         }
         context.getSystemService(NotificationManager::class.java)
             .notify(notificationId, builder.build())

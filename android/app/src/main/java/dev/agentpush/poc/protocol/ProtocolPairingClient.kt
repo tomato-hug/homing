@@ -234,6 +234,20 @@ class ProtocolPairingClient(
             return
         }
         val now = System.currentTimeMillis()
+        val lanServers = (message.optJSONArray("lan_servers")
+            ?: message.optJSONArray("lan_urls"))
+            ?.let { array ->
+                buildList {
+                    for (index in 0 until array.length()) {
+                        val candidate = array.optString(index).trim()
+                        if (candidate.isBlank()) continue
+                        runCatching { ProtocolUrls.normalizeWebSocketUrl(candidate) }
+                            .getOrNull()
+                            ?.let(::add)
+                    }
+                }.distinct().take(8)
+            }
+            .orEmpty()
         val computer = PairedComputer(
             deviceId = hostId,
             name = "我的 Mac",
@@ -242,6 +256,7 @@ class ProtocolPairingClient(
             fingerprint = fingerprint,
             pairedAt = now,
             lastSeen = now,
+            lanServers = lanServers,
         )
         finished = true
         timeout?.cancel()

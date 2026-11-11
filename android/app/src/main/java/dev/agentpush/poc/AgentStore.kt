@@ -1,9 +1,12 @@
 package dev.agentpush.poc
 
 import android.content.Context
+import dev.agentpush.poc.protocol.PairedComputer
+import dev.agentpush.poc.protocol.PairedComputerStore
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -13,6 +16,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicLong
@@ -24,22 +29,96 @@ class AgentStore private constructor(context: Context) {
         Context.MODE_PRIVATE,
     )
     private val sessionFlagsStore = SessionFlagsStore(applicationContext)
+    private val mobileInboxPreferences = MobileInboxPreferences(applicationContext)
     private val _state = MutableStateFlow(
         AgentUiState(
             settings = AppSettings.load(applicationContext),
             connectionDiagnostics = loadDiagnostics(),
             localSessionFlags = sessionFlagsStore.load(),
+            mobileInbox = mobileInboxPreferences.load(),
         ),
     )
     private val nextLocalReplyId = AtomicLong(0L)
     private var inboxRefreshJob: Job? = null
+    private val draftSaveJobs = mutableMapOf<String, Job>()
+    private val itemSaveJobs = mutableMapOf<String, Job>()
+    private val outboxMutex = Mutex()
     private val backgroundScope = CoroutineScope(
         SupervisorJob() + Dispatchers.IO + CrashReporter.coroutineExceptionHandler,
     )
+    private val localCache = LocalCache(applicationContext)
+    private val cloudLink = CloudLinkManager.get(applicationContext)
+    private val computerStore = PairedComputerStore(applicationContext)
+    private val lanTransport = LanTransport(
+        settingsProvider = { _state.value.settings },
+    )
+    private val transportRouter = TransportRouter(
+        lan = lanTransport,
+        cloud = CloudTransport(cloudLink),
+        probeLan = { lanTransport.probeHealth() },
+        cloudAvailable = { cloudLink.preferredComputer() != null },
+    )
+    private var aggregateHomeJob: Job? = null
 
     val state: StateFlow<AgentUiState> = _state.asStateFlow()
+    private val localCacheReady = backgroundScope.async {
+        restoreLocalCache()
+    }
+
+    init {
+        AgentApi.bindTransport(transportRouter) { _state.value.settings }
+        cloudLink.setNotificationHandler { _, payload ->
+            val session = session(payload.sessionId)
+            if (session?.muted == true || session?.archived == true) {
+                true
+            } else {
+                runCatching {
+                    NotificationHelper.notifyAgentAlert(applicationContext, payload)
+                    true
+                }.getOrDefault(false)
+            }
+        }
+        backgroundScope.launch {
+            runCatching { transportRouter.ensureRoute() }
+        }
+        backgroundScope.launch {
+            transportRouter.kind.collect { kind ->
+                _state.update { it.copy(transportKind = kind) }
+                if (kind == TransportKind.CLOUD) {
+                    if (cloudLink.connected.value) {
+                        onConnectionEstablished()
+                    } else {
+                        onConnectionLost("正在连接云端")
+                    }
+                }
+            }
+        }
+        backgroundScope.launch {
+            cloudLink.connected.collect { connected ->
+                if (transportRouter.kind.value != TransportKind.CLOUD) return@collect
+                if (connected) {
+                    onConnectionEstablished()
+                } else {
+                    onConnectionLost("云端连接已断开")
+                }
+            }
+        }
+        backgroundScope.launch {
+            cloudLink.events()
+                .filter { event ->
+                    val active = computerStore.active()?.deviceId.orEmpty()
+                    event.computerId.isBlank() ||
+                        active.isBlank() ||
+                        event.computerId == active
+                }
+                .collect { event ->
+                applyLiveEvent(event.name, event.data)
+            }
+        }
+    }
 
     suspend fun refreshAll() {
+        localCacheReady.await()
         _state.update { it.copy(isRefreshing = true, error = null) }
         val settings = _state.value.settings
         try {
@@ -61,9 +140,20 @@ class AgentStore private constructor(context: Context) {
                     runCatching { AgentApi.fetchAgentDirectory(settings) }
                         .getOrDefault(_state.value.agentDirectory)
                 }
+                val agentCatalog = async {
+                    runCatching { AgentApi.fetchAgentCatalog(settings) }
+                        .getOrDefault(_state.value.agentCatalog)
+                }
                 val inbox = async {
                     runCatching { AgentApi.fetchInbox(settings) }
                         .getOrDefault(InboxFeed(available = false))
+                }
+                val home = async {
+                    runCatching { AgentApi.fetchHome(settings) }.getOrNull()
+                }
+                val dispatches = async {
+                    runCatching { AgentApi.fetchDispatches(settings) }
+                        .getOrDefault(emptyList())
                 }
                 RefreshBundle(
                     events = events.await(),
@@ -71,7 +161,10 @@ class AgentStore private constructor(context: Context) {
                     projects = projects.await(),
                     away = away.await(),
                     agentDirectory = agents.await(),
+                    agentCatalog = agentCatalog.await(),
                     inbox = inbox.await(),
+                    home = home.await(),
+                    dispatches = dispatches.await(),
                 )
             }
             mergeEvents(bundle.events)
@@ -81,18 +174,24 @@ class AgentStore private constructor(context: Context) {
                 apiAvailable = bundle.sessions.apiAvailable || bundle.inbox.available,
                 error = bundle.sessions.error,
             )
+            mergeDispatches(bundle.dispatches)
             _state.update {
                 it.copy(
                     projects = bundle.projects,
                     away = bundle.away,
                     agentDirectory = bundle.agentDirectory,
+                    agentCatalog = bundle.agentCatalog,
                     isRefreshing = false,
                     error = null,
                     lastUpdatedAt = System.currentTimeMillis(),
                     inbox = bundle.inbox.takeIf { inbox -> inbox.available },
+                    home = bundle.home,
                 )
             }
+            persistLocalSnapshot()
+            scheduleAggregatedHomeRefresh()
             backgroundScope.launch { hydrateMissingTranscripts() }
+            backgroundScope.launch { flushOutbox() }
         } catch (error: Exception) {
             _state.update {
                 it.copy(
@@ -119,12 +218,17 @@ class AgentStore private constructor(context: Context) {
         }
     }
 
-    suspend fun refreshSessionDetails(sessionId: String, force: Boolean = false) {
+    suspend fun refreshSessionDetails(
+        sessionId: String,
+        force: Boolean = false,
+        includeReasoning: Boolean? = null,
+    ) {
         if (sessionId.isBlank()) return
         val existing = _state.value.sessionItems[sessionId]
         if (!force && existing != null && System.currentTimeMillis() - existing.loadedAt < 1_500L) {
             return
         }
+        val showReasoning = includeReasoning ?: existing?.includeReasoning ?: false
         val settings = _state.value.settings
         val detail = runCatching { AgentApi.fetchSession(settings, sessionId) }.getOrNull()
         if (detail != null) {
@@ -136,7 +240,13 @@ class AgentStore private constructor(context: Context) {
                 )
             }
         }
-        val result = runCatching { AgentApi.fetchSessionItems(settings, sessionId) }
+        val result = runCatching {
+            AgentApi.fetchSessionItems(
+                settings = settings,
+                sessionId = sessionId,
+                includeReasoning = showReasoning,
+            )
+        }
             .getOrElse { error ->
                 SessionItemsResult(
                     available = false,
@@ -152,7 +262,9 @@ class AgentStore private constructor(context: Context) {
             }
             val next = if (result.available) {
                 SessionItemsState(
-                    items = normalizeSessionItems(result.items),
+                    items = normalizeSessionItems(result.items).filterNot {
+                        !showReasoning && it.type == SessionItemType.REASONING
+                    },
                     turns = result.turns,
                     reason = result.reason,
                     available = true,
@@ -161,18 +273,45 @@ class AgentStore private constructor(context: Context) {
                     runningSince = turnState?.runningSince
                         ?.takeIf { it.isNotBlank() }
                         ?: previous?.runningSince.orEmpty(),
+                    includeReasoning = showReasoning,
                 )
             } else {
                 (previous ?: SessionItemsState()).copy(
                     available = false,
                     reason = result.reason ?: previous?.reason,
                     loadedAt = System.currentTimeMillis(),
+                    includeReasoning = showReasoning,
                 )
             }
             current.copy(sessionItems = current.sessionItems + (sessionId to next))
         }
         if (!result.available || result.items.isEmpty()) {
             runCatching { refreshTranscript(sessionId, force = force) }
+        }
+        _state.value.sessionItems[sessionId]?.items?.let { items ->
+            runCatching { localCache.saveItems(sessionId, items) }
+        }
+    }
+
+    suspend fun setSessionReasoning(sessionId: String, enabled: Boolean) {
+        if (sessionId.isBlank()) return
+        if (enabled) {
+            refreshSessionDetails(sessionId, force = true, includeReasoning = true)
+            return
+        }
+        _state.update { current ->
+            val existing = current.sessionItems[sessionId] ?: return@update current
+            current.copy(
+                sessionItems = current.sessionItems + (
+                    sessionId to existing.copy(
+                        items = existing.items.filterNot {
+                            it.type == SessionItemType.REASONING
+                        },
+                        includeReasoning = false,
+                        loadedAt = System.currentTimeMillis(),
+                    )
+                    ),
+            )
         }
     }
 
@@ -185,6 +324,12 @@ class AgentStore private constructor(context: Context) {
         } else {
             SessionItem.fromJson(json, fallbackId = "item-${System.nanoTime()}")
         } ?: return
+        if (
+            item.type == SessionItemType.REASONING &&
+            _state.value.sessionItems[sessionId]?.includeReasoning != true
+        ) {
+            return
+        }
         _state.update { current ->
             val previous = current.sessionItems[sessionId]
                 ?: SessionItemsState(running = true)
@@ -194,6 +339,7 @@ class AgentStore private constructor(context: Context) {
                     ),
             )
         }
+        scheduleItemCache(sessionId)
         scheduleInboxRefresh(delayMillis = 500L)
     }
 
@@ -247,6 +393,12 @@ class AgentStore private constructor(context: Context) {
         _state.update { it.copy(projects = projects) }
     }
 
+    suspend fun refreshAgentDirectory(): AgentDirectory {
+        val directory = AgentApi.fetchAgentDirectory(_state.value.settings)
+        _state.update { it.copy(agentDirectory = directory) }
+        return directory
+    }
+
     fun mergeCreatedSession(sessionId: String, source: String, cwd: String) {
         val meta = SessionMeta(
             sessionId = sessionId,
@@ -260,12 +412,49 @@ class AgentStore private constructor(context: Context) {
             lastTs = Instant.now().toString(),
             unread = 0,
         )
+        val mobileInbox = if (sessionId.isNotBlank()) {
+            mobileInboxPreferences.setResident(sessionId, true)
+        } else {
+            _state.value.mobileInbox
+        }
         _state.update {
             it.copy(
                 sessionMeta = it.sessionMeta + (sessionId to meta),
                 transcriptCache = it.transcriptCache + (sessionId to TranscriptPage()),
+                mobileInbox = mobileInbox,
             )
         }
+    }
+
+    fun setInboxMode(enabled: Boolean): MobileInboxMode {
+        val next = mobileInboxPreferences.setEnabled(enabled)
+        _state.update { it.copy(mobileInbox = next) }
+        return next
+    }
+
+    fun setSessionResident(sessionId: String, resident: Boolean): MobileInboxMode {
+        val next = mobileInboxPreferences.setResident(sessionId, resident)
+        _state.update { it.copy(mobileInbox = next) }
+        return next
+    }
+
+    suspend fun setAgentConnected(agentId: String, connected: Boolean): AgentActionResult {
+        val result = AgentApi.setAgentConnected(
+            settings = _state.value.settings,
+            agentId = agentId,
+            connected = connected,
+        )
+        val catalog = runCatching { AgentApi.fetchAgentCatalog(_state.value.settings) }
+            .getOrDefault(_state.value.agentCatalog)
+        val directory = runCatching { AgentApi.fetchAgentDirectory(_state.value.settings) }
+            .getOrDefault(_state.value.agentDirectory)
+        _state.update {
+            it.copy(
+                agentCatalog = catalog,
+                agentDirectory = directory,
+            )
+        }
+        return result
     }
 
     suspend fun refreshAway() {
@@ -381,6 +570,52 @@ class AgentStore private constructor(context: Context) {
         scheduleInboxRefresh(delayMillis = 300L)
     }
 
+    fun applyLiveEvent(eventName: String, json: JSONObject) {
+        when (eventName) {
+            "session" -> applySessionUpdate(json)
+            "item" -> applyItem(json)
+            "turn" -> applyTurn(json)
+            "reply_status" -> applyReplyStatus(json)
+            "dispatch" -> applyDispatchUpdate(json)
+            "notify" -> Unit
+            "", "message" -> {
+                val event = AgentEvent.fromJson(json)
+                if (event.id > 0) ingestEvent(event)
+            }
+        }
+    }
+
+    fun mergeDispatches(dispatches: List<AgentDispatch>) {
+        if (dispatches.isEmpty()) return
+        _state.update { current ->
+            val merged = current.dispatches.toMutableMap()
+            for (incoming in dispatches) {
+                if (incoming.id.isBlank()) continue
+                val existing = merged[incoming.id]
+                if (
+                    existing != null &&
+                    existing.updatedAt.isNotBlank() &&
+                    incoming.updatedAt.isNotBlank() &&
+                    existing.updatedAt > incoming.updatedAt
+                ) {
+                    continue
+                }
+                merged[incoming.id] = incoming
+            }
+            val trimmed = merged.values
+                .sortedByDescending { it.createdAt }
+                .take(200)
+                .associateBy { it.id }
+            current.copy(dispatches = trimmed)
+        }
+    }
+
+    fun applyDispatchUpdate(json: JSONObject) {
+        val dispatch = AgentDispatch.fromJson(json)
+        if (dispatch.id.isBlank()) return
+        mergeDispatches(listOf(dispatch))
+    }
+
     fun applyReplyStatus(json: JSONObject) {
         val replyId = json.optLong("reply_id", 0L)
         val eventId = json.optLong("event_id", 0L)
@@ -403,14 +638,18 @@ class AgentStore private constructor(context: Context) {
                 }
                 .maxByOrNull { it.ts }
                 ?: return@update current
+            val canonicalId = if (replyId > 0) replyId else target.id
+            val incoming = target.copy(
+                id = canonicalId,
+                status = status,
+                message = message,
+                isLocal = false,
+            )
+            val updated = reconcileIncomingReply(target, incoming)
             current.copy(
-                replies = current.replies + (
-                    target.id to target.copy(
-                        status = status,
-                        message = message,
-                        isLocal = false,
-                    )
-                    ),
+                replies = current.replies
+                    .minus(target.id)
+                    .plus(updated.id to updated),
             )
         }
     }
@@ -423,11 +662,113 @@ class AgentStore private constructor(context: Context) {
         return AgentApi.probe(settings)
     }
 
+    fun updateDraft(sessionId: String, text: String) {
+        if (sessionId.isBlank()) return
+        _state.update { current ->
+            current.copy(
+                sessionDrafts = if (text.isBlank()) {
+                    current.sessionDrafts - sessionId
+                } else {
+                    current.sessionDrafts + (sessionId to text)
+                },
+            )
+        }
+        synchronized(draftSaveJobs) {
+            draftSaveJobs.remove(sessionId)?.cancel()
+            draftSaveJobs[sessionId] = backgroundScope.launch {
+                delay(350)
+                runCatching { localCache.saveDraft(sessionId, text.trimEnd()) }
+                synchronized(draftSaveJobs) { draftSaveJobs.remove(sessionId) }
+            }
+        }
+    }
+
+    private fun scheduleItemCache(sessionId: String) {
+        synchronized(itemSaveJobs) {
+            itemSaveJobs.remove(sessionId)?.cancel()
+            itemSaveJobs[sessionId] = backgroundScope.launch {
+                delay(500)
+                val items = _state.value.sessionItems[sessionId]?.items.orEmpty()
+                runCatching { localCache.saveItems(sessionId, items) }
+                synchronized(itemSaveJobs) { itemSaveJobs.remove(sessionId) }
+            }
+        }
+    }
+
+    fun clearDraft(sessionId: String) {
+        updateDraft(sessionId, "")
+    }
+
+    suspend fun clearLocalCache() {
+        synchronized(draftSaveJobs) {
+            draftSaveJobs.values.forEach { it.cancel() }
+            draftSaveJobs.clear()
+        }
+        synchronized(itemSaveJobs) {
+            itemSaveJobs.values.forEach { it.cancel() }
+            itemSaveJobs.clear()
+        }
+        localCache.clear()
+        _state.update {
+            it.copy(
+                sessionDrafts = emptyMap(),
+                inbox = null,
+                projects = emptyList(),
+                sessionMeta = emptyMap(),
+                transcriptCache = emptyMap(),
+                sessionItems = emptyMap(),
+                lastUpdatedAt = null,
+            )
+        }
+    }
+
     fun saveSettings(baseUrl: String, token: String): AppSettings {
-        val saved = AppSettings.save(applicationContext, baseUrl, token)
+        val saved = AppSettings.save(
+            applicationContext,
+            baseUrl,
+            token,
+            _state.value.settings.previewMentions,
+        )
+        _state.update { it.copy(settings = saved) }
+        invalidateTransportRoute()
+        return saved
+    }
+
+    fun setPreviewMentions(enabled: Boolean): AppSettings {
+        val current = _state.value.settings
+        val saved = AppSettings.save(
+            applicationContext,
+            current.baseUrl,
+            current.token,
+            enabled,
+        )
         _state.update { it.copy(settings = saved) }
         return saved
     }
+
+    fun invalidateTransportRoute() {
+        transportRouter.invalidate()
+        backgroundScope.launch {
+            runCatching { transportRouter.ensureRoute(force = true) }
+        }
+    }
+
+    fun refreshCloudComputers() {
+        cloudLink.refreshComputers()
+        invalidateTransportRoute()
+    }
+
+    fun activateComputer(deviceId: String) {
+        if (deviceId.isBlank()) return
+        val activeId = computerStore.active()?.deviceId.orEmpty()
+        if (deviceId == activeId) return
+        if (computerStore.load().none { it.deviceId == deviceId }) return
+        computerStore.select(deviceId)
+        cloudLink.selectComputer(deviceId)
+        transportRouter.invalidate()
+    }
+
+    fun activeComputerId(): String = computerStore.active()?.deviceId.orEmpty()
 
     fun setConnectionState(connection: ConnectionState) {
         _state.update { it.copy(connection = connection) }
@@ -478,6 +819,100 @@ class AgentStore private constructor(context: Context) {
         persistSessionFlags(sessionId, mapOf("archived" to archived))
     }
 
+    suspend fun setSessionRemindOnDone(sessionId: String, enabled: Boolean) {
+        _state.update { current ->
+            current.copy(
+                sessionMeta = current.sessionMeta.mapValues { (key, meta) ->
+                    if (key == sessionId) meta.copy(remindOnDone = enabled) else meta
+                },
+            )
+        }
+        persistSessionFlags(sessionId, mapOf("remind_on_done" to enabled))
+    }
+
+    suspend fun setSessionTitle(sessionId: String, title: String): Boolean {
+        val clean = title.trim().take(120)
+        if (sessionId.isBlank() || clean.isBlank()) return false
+        _state.update { current ->
+            current.copy(
+                sessionMeta = current.sessionMeta.mapValues { (key, meta) ->
+                    if (key == sessionId) {
+                        meta.copy(title = clean, titleSource = "homing")
+                    } else {
+                        meta
+                    }
+                },
+            )
+        }
+        val updated = runCatching {
+            AgentApi.patchSession(
+                settings = _state.value.settings,
+                sessionId = sessionId,
+                title = clean,
+            )
+        }.getOrNull() ?: return false
+        mergeSessionMeta(
+            sessions = listOf(updated),
+            apiAvailable = true,
+            error = null,
+        )
+        scheduleInboxRefresh(delayMillis = 200L)
+        return true
+    }
+
+    suspend fun cancelQueuedReplies(sessionId: String): Int {
+        if (sessionId.isBlank()) return 0
+        val queued = _state.value.replies.values
+            .filter {
+                it.sessionId == sessionId &&
+                    it.id > 0 &&
+                    it.status == ReplyStatus.QUEUED
+            }
+            .sortedBy { it.ts }
+        var cancelled = 0
+        for (reply in queued) {
+            val receipt = runCatching {
+                AgentApi.cancelReply(_state.value.settings, reply.id)
+            }.getOrNull() ?: continue
+            if (!receipt.ok) continue
+            cancelled += 1
+            _state.update { current ->
+                val existing = current.replies[reply.id] ?: reply
+                current.copy(
+                    replies = current.replies + (
+                        reply.id to existing.copy(
+                            status = receipt.status,
+                            message = receipt.message,
+                        )
+                        ),
+                )
+            }
+        }
+        if (cancelled > 0) scheduleInboxRefresh(delayMillis = 200L)
+        return cancelled
+    }
+
+    suspend fun cancelQueuedReply(reply: AgentReply): Boolean {
+        if (reply.id <= 0 || reply.status != ReplyStatus.QUEUED) return false
+        val receipt = runCatching {
+            AgentApi.cancelReply(_state.value.settings, reply.id)
+        }.getOrNull() ?: return false
+        if (!receipt.ok) return false
+        _state.update { current ->
+            val existing = current.replies[reply.id] ?: reply
+            current.copy(
+                replies = current.replies + (
+                    reply.id to existing.copy(
+                        status = receipt.status,
+                        message = receipt.message,
+                    )
+                    ),
+            )
+        }
+        scheduleInboxRefresh(delayMillis = 200L)
+        return true
+    }
+
     private suspend fun persistSessionFlags(
         sessionId: String,
         fields: Map<String, Boolean>,
@@ -518,6 +953,7 @@ class AgentStore private constructor(context: Context) {
                 connectionDiagnostics = diagnostics,
             )
         }
+        backgroundScope.launch { flushOutbox() }
     }
 
     fun onConnectionLost(reason: String) {
@@ -586,6 +1022,7 @@ class AgentStore private constructor(context: Context) {
                 AgentApi.markRead(_state.value.settings, ids)
             }
         }
+        scheduleAggregatedHomeRefresh()
     }
 
     suspend fun markAllRead() {
@@ -673,6 +1110,7 @@ class AgentStore private constructor(context: Context) {
         files: List<String> = emptyList(),
         model: String? = null,
         effort: String? = null,
+        permissionMode: String? = null,
     ): AgentReply {
         val localId = nextLocalReplyId.decrementAndGet()
         val optimistic = AgentReply(
@@ -686,6 +1124,7 @@ class AgentStore private constructor(context: Context) {
             files = files,
             model = model.orEmpty(),
             effort = effort.orEmpty(),
+            permissionMode = permissionMode.orEmpty(),
         )
         _state.update { current ->
             current.copy(
@@ -706,6 +1145,7 @@ class AgentStore private constructor(context: Context) {
                 files,
                 model,
                 effort,
+                permissionMode,
             )
             val serverReply = AgentReply(
                 id = receipt.replyId.takeIf { it > 0 } ?: localId,
@@ -719,28 +1159,62 @@ class AgentStore private constructor(context: Context) {
                 files = files,
                 model = model.orEmpty(),
                 effort = effort.orEmpty(),
+                permissionMode = permissionMode.orEmpty(),
             )
+            var reconciled = serverReply
             _state.update { current ->
+                val existing = current.replies[serverReply.id]
+                    ?: current.replies[localId]
+                val merged = reconcileIncomingReply(existing, serverReply)
+                reconciled = merged
                 current.copy(
                     replies = current.replies
                         .minus(localId)
-                        .plus(serverReply.id to serverReply),
+                        .plus(merged.id to merged),
                 )
             }
             if (serverReply.status != ReplyStatus.FAILED) {
                 markSessionReadLocally(sessionId)
                 patchSessionReadRemote(sessionId)
             }
-            serverReply
+            reconciled
         } catch (error: Exception) {
-            val failed = optimistic.copy(
-                status = ReplyStatus.FAILED,
-                message = friendlyError(error),
-            )
-            _state.update { current ->
-                current.copy(replies = current.replies + (localId to failed))
+            if (shouldQueueReply(error)) {
+                localCacheReady.await()
+                val queued = optimistic.copy(
+                    status = ReplyStatus.OUTBOX,
+                    message = "待联网发送",
+                )
+                runCatching {
+                    localCache.queueReply(
+                        OutboxReply(
+                            localReplyId = localId,
+                            sessionId = sessionId,
+                            eventId = eventId,
+                            source = source,
+                            text = text,
+                            files = files,
+                            model = model.orEmpty(),
+                            effort = effort.orEmpty(),
+                            permissionMode = permissionMode.orEmpty(),
+                            lastError = friendlyError(error),
+                        ),
+                    )
+                }
+                _state.update { current ->
+                    current.copy(replies = current.replies + (localId to queued))
+                }
+                queued
+            } else {
+                val failed = optimistic.copy(
+                    status = ReplyStatus.FAILED,
+                    message = friendlyError(error),
+                )
+                _state.update { current ->
+                    current.copy(replies = current.replies + (localId to failed))
+                }
+                failed
             }
-            failed
         }
     }
 
@@ -765,6 +1239,7 @@ class AgentStore private constructor(context: Context) {
                 reply.files,
                 reply.model.takeIf { it.isNotBlank() },
                 reply.effort.takeIf { it.isNotBlank() },
+                reply.permissionMode.takeIf { it.isNotBlank() },
             )
             val retried = reply.copy(
                 id = receipt.replyId.takeIf { it > 0 } ?: reply.id,
@@ -773,18 +1248,23 @@ class AgentStore private constructor(context: Context) {
                 ts = Instant.now().toString(),
                 isLocal = receipt.replyId <= 0,
             )
+            var reconciled = retried
             _state.update { current ->
+                val existing = current.replies[retried.id]
+                    ?: current.replies[reply.id]
+                val merged = reconcileIncomingReply(existing, retried)
+                reconciled = merged
                 current.copy(
                     replies = current.replies
                         .minus(reply.id)
-                        .plus(retried.id to retried),
+                        .plus(merged.id to merged),
                 )
             }
             if (retried.status != ReplyStatus.FAILED) {
                 markSessionReadLocally(reply.sessionId)
                 patchSessionReadRemote(reply.sessionId)
             }
-            retried
+            reconciled
         } catch (error: Exception) {
             val failed = reply.copy(
                 status = ReplyStatus.FAILED,
@@ -797,17 +1277,351 @@ class AgentStore private constructor(context: Context) {
         }
     }
 
+    private fun shouldQueueReply(error: Throwable): Boolean {
+        if (error is AgentApiException) return false
+        return error is java.io.IOException
+    }
+
+    suspend fun flushOutbox() {
+        if (!outboxMutex.tryLock()) return
+        try {
+            localCacheReady.await()
+            for (queued in localCache.outbox()) {
+                try {
+                    val receipt = AgentApi.reply(
+                        settings = _state.value.settings,
+                        eventId = queued.eventId,
+                        sessionId = queued.sessionId,
+                        source = queued.source,
+                        text = queued.text,
+                        files = queued.files,
+                        model = queued.model.takeIf { it.isNotBlank() },
+                        effort = queued.effort.takeIf { it.isNotBlank() },
+                        permissionMode = queued.permissionMode.takeIf { it.isNotBlank() },
+                    )
+                    val serverReply = AgentReply(
+                        id = receipt.replyId.takeIf { it > 0 } ?: queued.localReplyId,
+                        eventId = queued.eventId ?: 0L,
+                        sessionId = queued.sessionId,
+                        text = queued.text,
+                        ts = Instant.ofEpochMilli(queued.createdAt).toString(),
+                        status = receipt.status,
+                        message = receipt.message,
+                        isLocal = receipt.replyId <= 0,
+                        files = queued.files,
+                        model = queued.model,
+                        effort = queued.effort,
+                        permissionMode = queued.permissionMode,
+                    )
+                    _state.update { current ->
+                        current.copy(
+                            replies = current.replies
+                                .minus(queued.localReplyId)
+                                .plus(serverReply.id to serverReply),
+                        )
+                    }
+                    localCache.deleteOutbox(queued.id)
+                    markSessionReadLocally(queued.sessionId)
+                    patchSessionReadRemote(queued.sessionId)
+                } catch (error: Exception) {
+                    if (error is AgentApiException && error.statusCode in 400..499) {
+                        _state.update { current ->
+                            val failed = (current.replies[queued.localReplyId]
+                                ?: AgentReply(
+                                    id = queued.localReplyId,
+                                    eventId = queued.eventId ?: 0L,
+                                    sessionId = queued.sessionId,
+                                    text = queued.text,
+                                    ts = Instant.ofEpochMilli(queued.createdAt).toString(),
+                                    status = ReplyStatus.OUTBOX,
+                                )).copy(
+                                status = ReplyStatus.FAILED,
+                                message = friendlyError(error),
+                            )
+                            current.copy(
+                                replies = current.replies + (failed.id to failed),
+                            )
+                        }
+                        localCache.deleteOutbox(queued.id)
+                    } else {
+                        localCache.markOutboxError(queued.id, friendlyError(error))
+                        break
+                    }
+                }
+            }
+        } finally {
+            outboxMutex.unlock()
+        }
+    }
+
+    suspend fun previewCompose(
+        sessionId: String,
+        source: String,
+        text: String,
+        files: List<String>,
+        model: String?,
+        effort: String?,
+        permissionMode: String?,
+        mentionOverrides: List<ComposeMentionOverride> = emptyList(),
+    ): ComposeResult = AgentApi.compose(
+        settings = _state.value.settings,
+        sessionId = sessionId,
+        source = source,
+        text = text,
+        files = files,
+        model = model,
+        effort = effort,
+        permissionMode = permissionMode,
+        mentionOverrides = mentionOverrides,
+        dryRun = true,
+    )
+
+    suspend fun compose(
+        sessionId: String,
+        source: String,
+        text: String,
+        parentText: String,
+        files: List<String>,
+        model: String?,
+        effort: String?,
+        permissionMode: String? = null,
+        mentionOverrides: List<ComposeMentionOverride> = emptyList(),
+    ): ComposeResult {
+        val localId = if (parentText.isBlank()) {
+            0L
+        } else {
+            nextLocalReplyId.decrementAndGet()
+        }
+        if (localId < 0) {
+            val optimistic = AgentReply(
+                id = localId,
+                eventId = 0L,
+                sessionId = sessionId,
+                text = parentText,
+                ts = Instant.now().toString(),
+                status = ReplyStatus.QUEUED,
+                isLocal = true,
+                files = files,
+                model = model.orEmpty(),
+                effort = effort.orEmpty(),
+                permissionMode = permissionMode.orEmpty(),
+            )
+            _state.update { current ->
+                current.copy(replies = current.replies + (localId to optimistic))
+            }
+        }
+        return try {
+            val result = AgentApi.compose(
+                settings = _state.value.settings,
+                sessionId = sessionId,
+                source = source,
+                text = text,
+                files = files,
+                model = model,
+                effort = effort,
+                permissionMode = permissionMode,
+                mentionOverrides = mentionOverrides,
+            )
+            mergeDispatches(result.dispatches)
+            val receipt = result.reply
+            if (localId < 0) {
+                _state.update { current ->
+                    val existing = current.replies[localId]
+                    val updated = if (receipt != null && parentText.isNotBlank()) {
+                        AgentReply(
+                            id = receipt.replyId.takeIf { it > 0 } ?: localId,
+                            eventId = 0L,
+                            sessionId = sessionId,
+                            text = parentText,
+                            ts = existing?.ts ?: Instant.now().toString(),
+                            status = ReplyStatus.fromWire(receipt.status),
+                            message = receipt.message.takeIf { it.isNotBlank() },
+                            isLocal = receipt.replyId <= 0,
+                            files = files,
+                            model = model.orEmpty(),
+                            effort = effort.orEmpty(),
+                            permissionMode = permissionMode.orEmpty(),
+                        )
+                    } else {
+                        null
+                    }
+                    val merged = updated?.let {
+                        reconcileIncomingReply(current.replies[localId], it)
+                    }
+                    val replies = current.replies - localId
+                    current.copy(
+                        replies = if (merged != null) {
+                            replies + (merged.id to merged)
+                        } else {
+                            replies
+                        },
+                    )
+                }
+            }
+            if (receipt?.status != "failed") {
+                markSessionReadLocally(sessionId)
+                patchSessionReadRemote(sessionId)
+            }
+            result
+        } catch (error: Exception) {
+            if (localId < 0) {
+                _state.update { current ->
+                    val existing = current.replies[localId] ?: return@update current
+                    val clientError = error is AgentApiException &&
+                        error.statusCode in 400..499
+                    if (clientError) {
+                        current.copy(replies = current.replies - localId)
+                    } else {
+                        current.copy(
+                            replies = current.replies + (
+                                localId to existing.copy(
+                                    status = ReplyStatus.FAILED,
+                                    message = friendlyError(error),
+                                )
+                                ),
+                        )
+                    }
+                }
+            }
+            throw error
+        }
+    }
+
+    suspend fun dispatch(
+        parentSessionId: String,
+        parentSource: String,
+        parentEventId: Long?,
+        targetAgent: String,
+        text: String,
+        cwd: String,
+    ): AgentDispatch {
+        val result = AgentApi.dispatch(
+            settings = _state.value.settings,
+            parentSessionId = parentSessionId,
+            parentSource = parentSource,
+            parentEventId = parentEventId,
+            targetAgent = targetAgent,
+            text = text,
+            cwd = cwd,
+        )
+        val dispatch = result.dispatch
+            ?: throw AgentApiException(0, result.error ?: "派发失败")
+        if (!result.ok) {
+            throw AgentApiException(0, result.error ?: dispatch.message.ifBlank { "派发失败" })
+        }
+        mergeDispatches(listOf(dispatch))
+        return dispatch
+    }
+
+    suspend fun refreshDispatches(parentSessionId: String) {
+        if (parentSessionId.isBlank()) return
+        val dispatches = AgentApi.fetchDispatches(
+            settings = _state.value.settings,
+            parentSessionId = parentSessionId,
+        )
+        mergeDispatches(dispatches)
+    }
+
+    suspend fun forwardDispatch(dispatchId: String, text: String? = null): CommandResult {
+        val result = AgentApi.forwardDispatch(
+            settings = _state.value.settings,
+            dispatchId = dispatchId,
+            text = text,
+        )
+        if (!result.ok) {
+            throw AgentApiException(0, result.message ?: "转交失败")
+        }
+        val dispatch = _state.value.dispatches[dispatchId]
+        if (dispatch != null) {
+            mergeDispatches(
+                listOf(
+                    dispatch.copy(
+                        status = DispatchStatus.COMPLETED,
+                        message = "结论已转交给父 Agent",
+                    ),
+                ),
+            )
+        }
+        return result
+    }
+
+    suspend fun replyDispatch(dispatchId: String, text: String): AgentDispatch {
+        val result = AgentApi.replyDispatch(
+            settings = _state.value.settings,
+            dispatchId = dispatchId,
+            text = text,
+        )
+        val dispatch = result.dispatch
+            ?: throw AgentApiException(0, result.error ?: "追问失败")
+        if (!result.ok) {
+            throw AgentApiException(0, result.error ?: dispatch.message.ifBlank { "追问失败" })
+        }
+        mergeDispatches(listOf(dispatch))
+        return dispatch
+    }
+
+    suspend fun cancelDispatch(dispatchId: String): AgentDispatch {
+        val result = AgentApi.cancelDispatch(
+            settings = _state.value.settings,
+            dispatchId = dispatchId,
+        )
+        val dispatch = result.dispatch
+            ?: throw AgentApiException(0, result.error ?: "取消失败")
+        if (!result.ok) {
+            throw AgentApiException(0, result.error ?: dispatch.message.ifBlank { "取消失败" })
+        }
+        mergeDispatches(listOf(dispatch))
+        return dispatch
+    }
+
+    suspend fun discardDispatchWorktree(dispatchId: String): AgentDispatch {
+        val result = AgentApi.discardDispatchWorktree(
+            settings = _state.value.settings,
+            dispatchId = dispatchId,
+        )
+        val dispatch = result.dispatch
+            ?: throw AgentApiException(0, result.error ?: "丢弃 worktree 失败")
+        if (!result.ok) {
+            throw AgentApiException(0, result.error ?: dispatch.message.ifBlank { "丢弃 worktree 失败" })
+        }
+        mergeDispatches(listOf(dispatch))
+        return dispatch
+    }
+
     suspend fun setAway(enabled: Boolean): Boolean {
         val previous = _state.value.away
         _state.update { it.copy(away = enabled) }
         return try {
             val actual = AgentApi.setAway(_state.value.settings, enabled)
-            _state.update { it.copy(away = actual) }
+            val home = runCatching { AgentApi.fetchHome(_state.value.settings) }.getOrNull()
+            _state.update {
+                it.copy(
+                    away = actual,
+                    home = home ?: it.home,
+                )
+            }
+            scheduleAggregatedHomeRefresh()
             actual
         } catch (error: Exception) {
             _state.update { it.copy(away = previous) }
             throw error
         }
+    }
+
+    suspend fun clearAwayPeriod(id: String): Boolean {
+        if (id.isBlank()) return false
+        val cleared = AgentApi.clearAwayPeriod(_state.value.settings, id)
+        if (cleared) {
+            val home = runCatching { AgentApi.fetchHome(_state.value.settings) }.getOrNull()
+            _state.update {
+                it.copy(
+                    away = home?.away?.enabled ?: it.away,
+                    home = home ?: it.home,
+                )
+            }
+            scheduleAggregatedHomeRefresh()
+        }
+        return cleared
     }
 
     suspend fun stopSession(sessionId: String): CommandResult {
@@ -818,8 +1632,14 @@ class AgentStore private constructor(context: Context) {
         eventId: Long,
         decision: String,
         sessionId: String? = null,
+        optionId: String? = null,
     ): CommandResult {
-        val result = AgentApi.decideApproval(_state.value.settings, eventId, decision)
+        val result = AgentApi.decideApproval(
+            _state.value.settings,
+            eventId,
+            decision,
+            optionId,
+        )
         if (result.ok) {
             val targetSession = sessionId
                 ?.takeIf { it.isNotBlank() }
@@ -833,6 +1653,8 @@ class AgentStore private constructor(context: Context) {
     }
 
     fun session(sessionId: String): SessionSummary? = _state.value.session(sessionId)
+
+    fun sessionEvents(sessionId: String) = transportRouter.events(sessionId)
 
     internal fun replaceStateForTest(state: AgentUiState) {
         _state.value = state
@@ -891,7 +1713,10 @@ class AgentStore private constructor(context: Context) {
             val merged = current.replies.toMutableMap()
             for (reply in replies) {
                 if (reply.id > 0) {
-                    merged[reply.id] = reply
+                    merged[reply.id] = reconcileIncomingReply(
+                        merged[reply.id],
+                        reply,
+                    )
                 }
             }
             current.copy(replies = merged)
@@ -960,20 +1785,98 @@ class AgentStore private constructor(context: Context) {
         return updated
     }
 
+    private fun scheduleAggregatedHomeRefresh() {
+        val computers = computerStore.load()
+            .filter { it.deviceId.isNotBlank() && it.server.isNotBlank() }
+        if (computers.size <= 1) return
+        aggregateHomeJob?.cancel()
+        aggregateHomeJob = backgroundScope.launch {
+            refreshAggregatedHome(computers)
+        }
+    }
+
+    private suspend fun refreshAggregatedHome(computers: List<PairedComputer>) {
+        cloudLink.ensureStarted()
+        if (!cloudLink.awaitConnected(4_000L)) return
+        val results = coroutineScope {
+            computers.map { computer ->
+                async { fetchComputerHome(computer) }
+            }.map { it.await() }
+        }
+        if (results.none { it.feed != null }) return
+        val activeId = computerStore.active()?.deviceId.orEmpty()
+        val merged = mergeComputerHomes(results, activeId)
+        _state.update { current ->
+            current.copy(
+                home = merged,
+                away = merged.away.enabled,
+            )
+        }
+        persistLocalSnapshot()
+    }
+
+    private suspend fun fetchComputerHome(computer: PairedComputer): ComputerHomeResult {
+        return runCatching {
+            val response = cloudLink.request(
+                computer = computer,
+                method = "GET",
+                path = "/api/home",
+                timeoutMillis = 10_000L,
+            )
+            if (response.status !in 200..299) {
+                throw AgentApiException(
+                    response.status,
+                    (response.body as? JSONObject)?.optString("error")
+                        ?.takeIf { it.isNotBlank() }
+                        ?: "读取首页失败",
+                )
+            }
+            val json = response.body as? JSONObject
+                ?: JSONObject(transportBodyJson(response.body))
+            ComputerHomeResult(
+                computerId = computer.deviceId,
+                computerName = computer.name,
+                feed = HomeFeed.fromJson(json),
+            )
+        }.getOrElse { error ->
+            ComputerHomeResult(
+                computerId = computer.deviceId,
+                computerName = computer.name,
+                error = friendlyError(error),
+            )
+        }
+    }
+
     private fun scheduleInboxRefresh(delayMillis: Long = 600L) {
         inboxRefreshJob?.cancel()
         inboxRefreshJob = backgroundScope.launch {
             delay(delayMillis)
             val settings = _state.value.settings
+            val home = runCatching { AgentApi.fetchHome(settings) }.getOrNull()
             val inbox = runCatching { AgentApi.fetchInbox(settings) }.getOrNull()
                 ?.takeIf { it.available }
-                ?: return@launch
+            if (home == null && inbox == null) return@launch
+            val sessions = buildList {
+                if (inbox != null) addAll(inbox.sessions)
+                if (home != null) {
+                    addAll(home.attentionSessions)
+                    addAll(home.running)
+                    addAll(home.resume)
+                }
+            }.distinctBy { it.sessionId }
             mergeSessionMeta(
-                sessions = inbox.sessions,
+                sessions = sessions,
                 apiAvailable = true,
                 error = null,
             )
-            _state.update { it.copy(inbox = inbox) }
+            _state.update {
+                it.copy(
+                    inbox = inbox ?: it.inbox,
+                    home = home ?: it.home,
+                    away = home?.away?.enabled ?: it.away,
+                )
+            }
+            scheduleAggregatedHomeRefresh()
         }
     }
 
@@ -1016,6 +1919,64 @@ class AgentStore private constructor(context: Context) {
             .apply()
     }
 
+    private suspend fun restoreLocalCache() {
+        runCatching {
+            val cached = localCache.load()
+            _state.update { current ->
+                if (current.lastUpdatedAt == null && current.sessionMeta.isEmpty()) {
+                    current.copy(
+                        sessionMeta = cached.sessions.associateBy { it.sessionId },
+                        inbox = cached.inbox,
+                        home = cached.home,
+                        projects = cached.projects,
+                        away = cached.away,
+                        lastUpdatedAt = cached.savedAt,
+                        sessionDrafts = cached.drafts,
+                        sessionItems = cached.items.mapValues { (_, items) ->
+                            SessionItemsState(
+                                items = items.filterNot {
+                                    it.type == SessionItemType.REASONING
+                                },
+                                available = true,
+                                loadedAt = cached.savedAt ?: System.currentTimeMillis(),
+                                includeReasoning = false,
+                            )
+                        } + current.sessionItems,
+                        sessionApiAvailable = cached.sessions.isNotEmpty(),
+                    )
+                } else {
+                    current.copy(
+                        sessionDrafts = cached.drafts + current.sessionDrafts,
+                        sessionItems = cached.items.mapValues { (_, items) ->
+                            SessionItemsState(
+                                items = items.filterNot {
+                                    it.type == SessionItemType.REASONING
+                                },
+                                available = true,
+                                loadedAt = cached.savedAt ?: System.currentTimeMillis(),
+                                includeReasoning = false,
+                            )
+                        } + current.sessionItems,
+                    )
+                }
+            }
+        }
+    }
+
+    private suspend fun persistLocalSnapshot() {
+        val current = _state.value
+        runCatching {
+            localCache.saveSnapshot(
+                sessions = current.sessionMeta.values,
+                inbox = current.inbox,
+                home = current.home,
+                projects = current.projects,
+                away = current.away,
+                drafts = current.sessionDrafts,
+            )
+        }
+    }
+
     companion object {
         private const val DIAGNOSTICS_PREFS = "agent_push_connection"
         private const val KEY_LAST_CONNECTED_AT = "last_connected_at"
@@ -1039,7 +2000,10 @@ private data class RefreshBundle(
     val projects: List<ProjectInfo>,
     val away: Boolean,
     val agentDirectory: AgentDirectory,
+    val agentCatalog: AgentCatalog,
     val inbox: InboxFeed,
+    val home: HomeFeed?,
+    val dispatches: List<AgentDispatch>,
 )
 
 private data class SessionFetch(
@@ -1051,6 +2015,8 @@ private data class SessionFetch(
 private fun mergeMeta(existing: SessionMeta?, incoming: SessionMeta): SessionMeta {
     if (existing == null) return incoming
     return existing.copy(
+        computerId = incoming.computerId.ifBlank { existing.computerId },
+        computerName = incoming.computerName.ifBlank { existing.computerName },
         source = incoming.source.ifBlank { existing.source },
         title = incoming.title.ifBlank { existing.title },
         titleSource = incoming.titleSource.ifBlank { existing.titleSource },

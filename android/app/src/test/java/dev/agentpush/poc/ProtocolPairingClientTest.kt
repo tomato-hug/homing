@@ -12,6 +12,7 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -156,6 +157,12 @@ class ProtocolPairingClientTest {
                 .put("t", "pair.accepted")
                 .put("host_id", hostId)
                 .put("host_pub", crypto.toBase64(host.publicKey))
+                .put(
+                    "lan_urls",
+                    JSONArray()
+                        .put("http://192.168.1.20:18787")
+                        .put("ws://10.0.0.8:18787/v1/ws"),
+                )
                 .toString())
             awaitPosted(accepted, "pair.accepted")
             assertTrue(error.get().isNullOrBlank())
@@ -165,6 +172,13 @@ class ProtocolPairingClientTest {
             assertEquals(
                 crypto.toBase64(host.publicKey),
                 acceptedComputer.get().publicKeyBase64,
+            )
+            assertEquals(
+                listOf(
+                    "ws://192.168.1.20:18787/v1/ws",
+                    "ws://10.0.0.8:18787/v1/ws",
+                ),
+                acceptedComputer.get().lanServers,
             )
             serverError.get()?.let { throw AssertionError("fake server failed", it) }
         } finally {

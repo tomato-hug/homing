@@ -21,16 +21,19 @@ class NotificationHelperTest {
         val manager = context.getSystemService(NotificationManager::class.java)
         val shadowManager = Shadows.shadowOf(manager)
 
-        val expected = mapOf(
-            "P0" to NotificationHelper.P0_CHANNEL_ID,
-            "P1" to NotificationHelper.P1_CHANNEL_ID,
-            "P2" to NotificationHelper.P2_CHANNEL_ID,
+        val expected = listOf(
+            Triple("P0", "permission", NotificationHelper.WAITING_CHANNEL_ID),
+            Triple("P1", "needs_input", NotificationHelper.WAITING_CHANNEL_ID),
+            Triple("P1", "collab_result", NotificationHelper.COLLAB_CHANNEL_ID),
+            Triple("P2", "done", NotificationHelper.DONE_CHANNEL_ID),
+            Triple("P0", "error", NotificationHelper.ERROR_CHANNEL_ID),
         )
-        expected.forEach { (level, channelId) ->
-            val sessionId = "demo-$level"
+        expected.forEach { (level, kind, channelId) ->
+            val sessionId = "demo-$level-$kind"
             val payload = NotifyPayload.fromJson(JSONObject()
                 .put("type", "notify")
                 .put("level", level)
+                .put("kind", kind)
                 .put("source", "codex")
                 .put("session_id", sessionId)
                 .put("title", "示例通知")
@@ -54,12 +57,12 @@ class NotificationHelperTest {
             manager.getNotificationChannel(NotificationHelper.P0_CHANNEL_ID).importance,
         )
         assertEquals(
-            NotificationManager.IMPORTANCE_DEFAULT,
-            manager.getNotificationChannel(NotificationHelper.P1_CHANNEL_ID).importance,
+            NotificationManager.IMPORTANCE_HIGH,
+            manager.getNotificationChannel(NotificationHelper.WAITING_CHANNEL_ID).importance,
         )
         assertEquals(
             NotificationManager.IMPORTANCE_LOW,
-            manager.getNotificationChannel(NotificationHelper.P2_CHANNEL_ID).importance,
+            manager.getNotificationChannel(NotificationHelper.DONE_CHANNEL_ID).importance,
         )
     }
 }

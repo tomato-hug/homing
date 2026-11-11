@@ -2,15 +2,26 @@ package dev.agentpush.poc
 
 import android.app.Application
 import android.provider.Settings
+import androidx.compose.foundation.layout.Column
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.longClick
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToIndex
+import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTouchInput
 import androidx.test.core.app.ApplicationProvider
 import dev.agentpush.poc.ui.screens.HomingInboxScreen
 import dev.agentpush.poc.ui.screens.HomingSplashScreen
 import dev.agentpush.poc.ui.screens.MeScreen
+import dev.agentpush.poc.ui.screens.NewSessionAgentPicker
 import dev.agentpush.poc.ui.screens.ProjectsScreen
 import dev.agentpush.poc.ui.theme.AgentInboxTheme
 import org.junit.Before
@@ -75,10 +86,14 @@ class HomingUiRenderTest {
         compose.onNodeWithText("3 件事等你").assertExists()
         compose.onNodeWithText("另有 1 个在运行").assertExists()
         compose.onNodeWithText("需要授权的标题").assertExists()
+        compose.onNodeWithTag("homing-inbox")
+            .performScrollToNode(hasText("等你回复"))
         compose.onNodeWithText("等你回复").assertExists()
-        compose.onNodeWithTag("homing-inbox").performScrollToIndex(7)
+        compose.onNodeWithTag("homing-inbox")
+            .performScrollToNode(hasText("刚完成"))
         compose.onNodeWithText("刚完成").assertExists()
-        compose.onNodeWithTag("homing-inbox").performScrollToIndex(8)
+        compose.onNodeWithTag("homing-inbox")
+            .performScrollToNode(hasText("改了 2 个文件", substring = true))
         compose.onNodeWithText("改了 2 个文件", substring = true).assertExists()
         compose.onNodeWithTag("new-session-fab").assertExists()
     }
@@ -120,10 +135,13 @@ class HomingUiRenderTest {
             }
         }
 
-        compose.onNodeWithText("9 件事等你").assertExists()
-        compose.onNodeWithText("另有 2 个在运行").assertExists()
+        compose.onNodeWithText("1 件事等你").assertExists()
+        compose.onNodeWithText("保持开启，新动态会自动出现").assertExists()
+        compose.onNodeWithTag("homing-inbox")
+            .performScrollToNode(hasText("需要授权的标题"))
         compose.onNodeWithText("需要授权的标题").assertExists()
-        compose.onNodeWithTag("homing-inbox").performScrollToIndex(4)
+        compose.onNodeWithTag("homing-inbox")
+            .performScrollToNode(hasText("刚完成"))
         compose.onNodeWithText("刚完成").assertExists()
     }
 
@@ -132,14 +150,69 @@ class HomingUiRenderTest {
         installState(sampleState())
         compose.setContent {
             AgentInboxTheme {
-                ProjectsScreen(viewModel = viewModel, onOpenSession = {})
+                ProjectsScreen(
+                    viewModel = viewModel,
+                    onOpenSession = {},
+                    onNewSession = {},
+                )
             }
         }
         compose.onNodeWithText("按项目").assertExists()
+        compose.onNodeWithTag("session-grouping-toggle").performClick()
+        compose.onNodeWithText("按 Agent").assertExists()
         compose.onNodeWithText("按时间").assertExists()
         compose.onNodeWithText("project-a").assertExists()
         compose.onNodeWithTag("projects-list").performScrollToIndex(1)
         compose.onNodeWithText("临时会话 1 个").assertExists()
+    }
+
+    @Test
+    fun projectsSearchAndAgentFiltersStayCollapsedUntilRequested() {
+        installState(sampleState())
+        compose.setContent {
+            AgentInboxTheme {
+                ProjectsScreen(
+                    viewModel = viewModel,
+                    onOpenSession = {},
+                    onNewSession = {},
+                )
+            }
+        }
+
+        compose.onNodeWithTag("projects-search").assertDoesNotExist()
+        compose.onNodeWithTag("agent-filter-list").assertDoesNotExist()
+
+        compose.onNodeWithTag("projects-search-toggle").performClick()
+        compose.onNodeWithTag("projects-search").assertExists()
+
+        compose.onNodeWithTag("projects-filter-toggle").performClick()
+        compose.onNodeWithTag("agent-filter-list").assertExists()
+        compose.onNodeWithTag("agent-filter-codex").assertExists()
+        compose.onNodeWithTag("agent-filter-claude").assertExists()
+    }
+
+    @Test
+    fun projectsLongPressExposesQuickSessionActions() {
+        installState(sampleState())
+        compose.setContent {
+            AgentInboxTheme {
+                ProjectsScreen(
+                    viewModel = viewModel,
+                    onOpenSession = {},
+                    onNewSession = {},
+                )
+            }
+        }
+        compose.onNodeWithTag("projects-list")
+            .performScrollToNode(hasTestTag("session-row-session-permission"))
+        compose.onNodeWithText("归档").assertDoesNotExist()
+        compose.onNodeWithText("置顶").assertDoesNotExist()
+        compose.onNodeWithTag("session-row-session-permission")
+            .performTouchInput { longClick() }
+
+        compose.onNodeWithText("置顶会话").assertExists()
+        compose.onNodeWithText("静音会话").assertExists()
+        compose.onNodeWithText("归档会话").assertExists()
     }
 
     @Test
@@ -157,9 +230,65 @@ class HomingUiRenderTest {
         compose.onNodeWithText("我的").assertExists()
         compose.onNodeWithText("重新配对").assertExists()
         compose.onNodeWithText("Codex").assertExists()
-        compose.onNodeWithText("Homing 0.7.0").performScrollTo().assertExists()
-        compose.onNodeWithText("OpenCode").performScrollTo().assertExists()
+        compose.onNodeWithText("Homing 0.9.0").performScrollTo().assertExists()
+        compose.onNodeWithText("添加 Agent").performScrollTo().assertExists()
         compose.onNodeWithText("等你回复").performScrollTo().assertExists()
+        compose.onNodeWithText("离开模式").assertDoesNotExist()
+    }
+
+    @Test
+    fun newSessionAgentPickerDisablesOfflineAgents() {
+        val agents = listOf(
+            AgentProfile(
+                source = "codex",
+                installed = true,
+                available = true,
+                capabilities = AgentCapabilities(newSession = true),
+            ),
+            AgentProfile(
+                source = "claude",
+                installed = true,
+                available = true,
+                capabilities = AgentCapabilities(newSession = true),
+            ),
+            AgentProfile(
+                source = "workbuddy",
+                installed = true,
+                available = false,
+                capabilities = AgentCapabilities(newSession = true),
+            ),
+        )
+        compose.setContent {
+            AgentInboxTheme {
+                Column {
+                    NewSessionAgentPicker(
+                        agents = agents,
+                        selectedAgent = "codex",
+                        onlineCount = 2,
+                        loading = false,
+                        directoryAvailable = true,
+                        error = null,
+                        onSelect = {},
+                        onRefresh = {},
+                    )
+                }
+            }
+        }
+
+        compose.onNodeWithTag("new-session-agent-codex").assertIsEnabled()
+        compose.onNodeWithTag("new-session-agent-claude").assertIsEnabled()
+        compose.onNodeWithTag(
+            "new-session-agent-status-codex",
+            useUnmergedTree = true,
+        ).assertTextEquals("在线")
+        compose.onNodeWithTag("new-session-agent-list")
+            .performScrollToNode(hasTestTag("new-session-agent-workbuddy"))
+        compose.onNodeWithTag("new-session-agent-workbuddy").assertIsNotEnabled()
+        compose.onNodeWithTag(
+            "new-session-agent-status-workbuddy",
+            useUnmergedTree = true,
+        ).assertTextEquals("离线")
+        compose.onNodeWithText("2 个 Agent 在线，离线项已禁用").assertExists()
     }
 
     private fun installState(state: AgentUiState) {
@@ -300,11 +429,54 @@ class HomingUiRenderTest {
             sessionMeta = meta,
             agentDirectory = AgentDirectory(
                 agents = mapOf(
-                    "codex" to AgentProfile("codex"),
-                    "claude" to AgentProfile("claude"),
-                    "workbuddy" to AgentProfile("workbuddy"),
+                    "codex" to AgentProfile("codex", installed = true, available = true),
+                    "claude" to AgentProfile("claude", installed = true, available = true),
+                    "workbuddy" to AgentProfile(
+                        "workbuddy",
+                        installed = true,
+                        available = true,
+                    ),
                 ),
                 available = true,
+            ),
+            agentCatalog = AgentCatalog(
+                agents = listOf(
+                    AgentCatalogEntry(
+                        id = "codex",
+                        name = "Codex",
+                        vendor = "OpenAI",
+                        detected = true,
+                        connected = true,
+                        available = true,
+                        canConnect = true,
+                    ),
+                    AgentCatalogEntry(
+                        id = "claude",
+                        name = "Claude Code",
+                        vendor = "Anthropic",
+                        detected = true,
+                        connected = true,
+                        available = true,
+                        canConnect = true,
+                    ),
+                    AgentCatalogEntry(
+                        id = "opencode",
+                        name = "OpenCode",
+                        vendor = "OpenCode",
+                        detected = true,
+                        connected = false,
+                        available = true,
+                        canConnect = true,
+                    ),
+                ),
+                connectedCount = 2,
+                detectedCount = 3,
+                available = true,
+            ),
+            mobileInbox = MobileInboxMode(
+                enabled = true,
+                sinceMillis = now.minusSeconds(3_600).toEpochMilli(),
+                residentSessionIds = setOf("session-completed"),
             ),
             sessionItems = mapOf(
                 "session-completed" to SessionItemsState(

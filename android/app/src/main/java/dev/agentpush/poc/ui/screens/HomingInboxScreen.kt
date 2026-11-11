@@ -37,10 +37,13 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Bedtime
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Mic
+import androidx.compose.material.icons.outlined.NotificationsActive
+import androidx.compose.material.icons.outlined.NotificationsOff
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material3.Button
@@ -83,6 +86,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.agentpush.poc.AgentEvent
 import dev.agentpush.poc.AgentViewModel
 import dev.agentpush.poc.ConnectionState
+import dev.agentpush.poc.TransportKind
 import dev.agentpush.poc.InboxEntryKind
 import dev.agentpush.poc.SessionItemType
 import dev.agentpush.poc.SessionStatus
@@ -91,6 +95,7 @@ import dev.agentpush.poc.elapsedSince
 import dev.agentpush.poc.formatDiagnosticTime
 import dev.agentpush.poc.relativeTime
 import dev.agentpush.poc.sessionSummaryLine
+import dev.agentpush.poc.ui.AgentAvatar
 import dev.agentpush.poc.ui.HomingCard
 import dev.agentpush.poc.ui.HomingPigeon
 import dev.agentpush.poc.ui.MacStatusPill
@@ -183,8 +188,10 @@ fun HomingInboxScreen(
         }
     }
 
+    val mobileInbox = state.mobileInbox
     val allSessions = remember(state) {
-        state.sessions().filterNot { it.archived || it.isEmpty }
+        mobileInbox.visibleSessions(state.sessions())
+            .filterNot { it.archived || it.isEmpty }
     }
     val query = search.trim()
     val sessions = remember(allSessions, query) {
@@ -262,16 +269,8 @@ fun HomingInboxScreen(
             }.sortedByDescending { it.lastTs }.take(8)
         }
     }
-    val attentionCount = if (useServerInbox) {
-        inbox.waitingCount
-    } else {
-        permissions.size + waiting.size + errors.size
-    }
-    val allRunningCount = if (useServerInbox) {
-        inbox.runningCount
-    } else {
-        allSessions.count { it.running }
-    }
+    val attentionCount = permissions.size + waiting.size + errors.size
+    val allRunningCount = running.size
     val latestEventId = state.events.keys.maxOrNull() ?: 0L
 
     LaunchedEffect(latestEventId) {
@@ -311,12 +310,17 @@ fun HomingInboxScreen(
         ) {
             InboxTopBar(
                 connection = state.connection,
+                transportKind = state.transportKind,
                 pigeonState = pigeonState,
                 animationKey = bobKey,
                 searchOpen = searchOpen,
                 onToggleSearch = {
                     searchOpen = !searchOpen
                     if (!searchOpen) search = ""
+                },
+                inboxModeEnabled = mobileInbox.enabled,
+                onToggleInboxMode = {
+                    viewModel.setInboxMode(!mobileInbox.enabled)
                 },
             )
             if (searchOpen) {
@@ -348,6 +352,7 @@ fun HomingInboxScreen(
                         InboxHeadline(
                             attentionCount = attentionCount,
                             runningCount = allRunningCount,
+                            inboxEnabled = mobileInbox.enabled,
                         )
                     }
                     if (state.connection != ConnectionState.CONNECTED) {
@@ -358,6 +363,14 @@ fun HomingInboxScreen(
                                 lastConnected = state.connectionDiagnostics.lastConnectedAt,
                                 lastDisconnected = state.connectionDiagnostics.lastDisconnectedAt,
                                 onRetry = viewModel::reconnect,
+                            )
+                        }
+                    }
+                    if (!mobileInbox.enabled) {
+                        item(key = "mobile-inbox-mode") {
+                            MobileInboxModeCard(
+                                mode = mobileInbox,
+                                onToggle = viewModel::setInboxMode,
                             )
                         }
                     }
@@ -375,7 +388,10 @@ fun HomingInboxScreen(
                     }
                     if (attentionCount == 0) {
                         item(key = "all-clear") {
-                            InboxAllClearState(runningCount = allRunningCount)
+                            InboxAllClearState(
+                                runningCount = allRunningCount,
+                                inboxEnabled = mobileInbox.enabled,
+                            )
                         }
                     }
                     if (permissions.isNotEmpty()) {
@@ -492,12 +508,15 @@ fun HomingInboxScreen(
 }
 
 @Composable
-private fun InboxTopBar(
+internal fun InboxTopBar(
     connection: ConnectionState,
+    transportKind: TransportKind,
     pigeonState: PigeonState,
     animationKey: Int,
     searchOpen: Boolean,
     onToggleSearch: () -> Unit,
+    inboxModeEnabled: Boolean? = null,
+    onToggleInboxMode: (() -> Unit)? = null,
 ) {
     Row(
         modifier = Modifier
@@ -522,7 +541,32 @@ private fun InboxTopBar(
             color = HomingPalette.Text,
             modifier = Modifier.weight(1f),
         )
-        MacStatusPill(connection = connection)
+        MacStatusPill(
+            connection = connection,
+            transportKind = transportKind,
+        )
+        if (inboxModeEnabled != null && onToggleInboxMode != null) {
+            IconButton(
+                onClick = onToggleInboxMode,
+                modifier = Modifier
+                    .size(48.dp)
+                    .testTag("toggle-inbox-mode"),
+            ) {
+                Icon(
+                    imageVector = if (inboxModeEnabled) {
+                        Icons.Outlined.NotificationsActive
+                    } else {
+                        Icons.Outlined.NotificationsOff
+                    },
+                    contentDescription = if (inboxModeEnabled) {
+                        "关闭收件箱模式"
+                    } else {
+                        "开启收件箱模式"
+                    },
+                    tint = if (inboxModeEnabled) HomingPalette.Brand else HomingPalette.Muted,
+                )
+            }
+        }
         IconButton(
             onClick = onToggleSearch,
             modifier = Modifier.size(48.dp),
@@ -537,7 +581,7 @@ private fun InboxTopBar(
 }
 
 @Composable
-private fun InboxSearchField(
+internal fun InboxSearchField(
     value: String,
     onValueChange: (String) -> Unit,
 ) {
@@ -563,10 +607,18 @@ private fun InboxSearchField(
 }
 
 @Composable
-private fun InboxHeadline(attentionCount: Int, runningCount: Int) {
+private fun InboxHeadline(
+    attentionCount: Int,
+    runningCount: Int,
+    inboxEnabled: Boolean,
+) {
     Column(modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)) {
         Text(
-            text = if (attentionCount == 0) "都处理完了" else "$attentionCount 件事等你",
+            text = when {
+                !inboxEnabled -> "收件箱已清空"
+                attentionCount == 0 -> "暂时没有新动态"
+                else -> "$attentionCount 件事等你"
+            },
             style = MaterialTheme.typography.displaySmall.copy(
                 fontSize = 28.sp,
                 lineHeight = 34.sp,
@@ -575,10 +627,10 @@ private fun InboxHeadline(attentionCount: Int, runningCount: Int) {
             color = HomingPalette.Text,
         )
         Text(
-            text = if (runningCount > 0) {
-                "另有 $runningCount 个在运行"
-            } else {
-                "现在没有正在运行的会话"
+            text = when {
+                !inboxEnabled -> "开启后只接收新回复和授权"
+                runningCount > 0 -> "另有 $runningCount 个在运行"
+                else -> "保持开启，新动态会自动出现"
             },
             modifier = Modifier.padding(top = 3.dp),
             style = MaterialTheme.typography.bodySmall.copy(fontSize = 13.sp),
@@ -1031,11 +1083,10 @@ private fun CompletedRow(
                 .padding(horizontal = 13.dp, vertical = 11.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(
-                Icons.Outlined.Check,
-                contentDescription = null,
-                tint = HomingPalette.Brand,
-                modifier = Modifier.size(19.dp),
+            AgentAvatar(
+                brand = session.brand,
+                source = session.source,
+                size = 24.dp,
             )
             Spacer(Modifier.width(10.dp))
             Column(modifier = Modifier.weight(1f)) {
@@ -1087,7 +1138,10 @@ private fun CompletedRow(
 }
 
 @Composable
-private fun InboxAllClearState(runningCount: Int) {
+private fun InboxAllClearState(
+    runningCount: Int,
+    inboxEnabled: Boolean,
+) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1101,13 +1155,21 @@ private fun InboxAllClearState(runningCount: Int) {
             contentDescription = "待机的鸽子",
         )
         Text(
-            text = if (runningCount > 0) "$runningCount 个会话仍在运行" else "没有等你处理的事",
+            text = when {
+                !inboxEnabled -> "还没有开启收件箱模式"
+                runningCount > 0 -> "$runningCount 个会话仍在运行"
+                else -> "没有等你处理的事"
+            },
             modifier = Modifier.padding(top = 12.dp),
             style = MaterialTheme.typography.titleMedium,
             color = HomingPalette.Text,
         )
         Text(
-            text = "agent 需要你回复或授权时，会出现在这里，同时推送到通知栏。",
+            text = if (inboxEnabled) {
+                "agent 需要你回复或授权时，会出现在这里，同时推送到通知栏。"
+            } else {
+                "开启后，只显示开启之后出现的新动态；常驻会话仍可在会话页查看。"
+            },
             modifier = Modifier
                 .padding(top = 5.dp)
                 .padding(horizontal = 18.dp),

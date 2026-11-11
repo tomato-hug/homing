@@ -47,6 +47,7 @@ import dev.agentpush.poc.capabilityTokenIn
 import dev.agentpush.poc.ui.screens.AddComputerScreen
 import dev.agentpush.poc.ui.screens.BrowserScreen
 import dev.agentpush.poc.ui.screens.HomingInboxScreen
+import dev.agentpush.poc.ui.screens.HomingHomeScreen
 import dev.agentpush.poc.ui.screens.HomingSplashScreen
 import dev.agentpush.poc.ui.screens.MeScreen
 import dev.agentpush.poc.ui.screens.NewSessionScreen
@@ -61,7 +62,7 @@ private const val ROUTE_PROJECTS = "projects"
 private const val ROUTE_ME = "me"
 private const val ROUTE_SETTINGS = "settings"
 private const val ROUTE_ADD_COMPUTER = "add-computer"
-private const val ROUTE_NEW_SESSION = "new-session"
+private const val ROUTE_NEW_SESSION = "new-session?cwd={cwd}"
 private const val ROUTE_SESSION = "session/{sessionToken}"
 private const val ROUTE_BROWSER = "browser/{urlToken}/{titleToken}"
 
@@ -108,6 +109,7 @@ fun AgentApp(
     if (!splashDone) {
         HomingSplashScreen(
             connection = appState.connection,
+            transportKind = appState.transportKind,
             onFinished = { splashDone = true },
         )
         return
@@ -118,14 +120,25 @@ fun AgentApp(
     val showBottomBar = currentRoute == ROUTE_INBOX ||
         currentRoute == ROUTE_PROJECTS ||
         currentRoute == ROUTE_ME
-    val attentionCount = remember(appState) {
-        appState.sessions().count { session ->
-            !session.archived && !session.isEmpty && (
-                session.status == SessionStatus.NEEDS_PERMISSION ||
-                    session.status == SessionStatus.WAITING_INPUT ||
-                    session.status == SessionStatus.ERROR ||
-                    session.pendingEvent != null
-                )
+    val visibleHome = remember(appState.home, appState.mobileInbox) {
+        appState.home?.let(appState.mobileInbox::visibleHome)
+    }
+    val attentionCount = remember(appState, visibleHome) {
+        val home = visibleHome
+        if (home?.available == true) {
+            home.attention.size
+        } else if (!appState.mobileInbox.enabled) {
+            0
+        } else {
+            appState.sessions().count { session ->
+                appState.mobileInbox.hasNewActivity(session) &&
+                    !session.archived && !session.isEmpty && (
+                    session.status == SessionStatus.NEEDS_PERMISSION ||
+                        session.status == SessionStatus.WAITING_INPUT ||
+                        session.status == SessionStatus.ERROR ||
+                        session.pendingEvent != null
+                    )
+            }
         }
     }
 
@@ -155,21 +168,43 @@ fun AgentApp(
             modifier = Modifier.padding(padding),
         ) {
             composable(ROUTE_INBOX) {
-                HomingInboxScreen(
-                    viewModel = viewModel,
-                    onOpenSession = { sessionId ->
-                        navController.navigate(sessionRoute(sessionId))
-                    },
-                    onNewSession = {
-                        navController.navigate(ROUTE_NEW_SESSION)
-                    },
-                    onOpenAllSessions = {
-                        navController.navigate(ROUTE_PROJECTS) {
-                            popUpTo(ROUTE_INBOX) { saveState = true }
-                            launchSingleTop = true
-                        }
-                    },
-                )
+                val home = visibleHome
+                if (home?.available == true) {
+                    HomingHomeScreen(
+                        viewModel = viewModel,
+                        state = appState,
+                        home = home,
+                        onOpenSession = { sessionId, computerId ->
+                            viewModel.activateComputer(computerId)
+                            navController.navigate(sessionRoute(sessionId))
+                        },
+                        onNewSession = {
+                            navController.navigate(newSessionRoute())
+                        },
+                        onOpenAllSessions = {
+                            navController.navigate(ROUTE_PROJECTS) {
+                                popUpTo(ROUTE_INBOX) { saveState = true }
+                                launchSingleTop = true
+                            }
+                        },
+                    )
+                } else {
+                    HomingInboxScreen(
+                        viewModel = viewModel,
+                        onOpenSession = { sessionId ->
+                            navController.navigate(sessionRoute(sessionId))
+                        },
+                        onNewSession = {
+                            navController.navigate(newSessionRoute())
+                        },
+                        onOpenAllSessions = {
+                            navController.navigate(ROUTE_PROJECTS) {
+                                popUpTo(ROUTE_INBOX) { saveState = true }
+                                launchSingleTop = true
+                            }
+                        },
+                    )
+                }
             }
             composable(ROUTE_PROJECTS) {
                 ProjectsScreen(
@@ -177,6 +212,10 @@ fun AgentApp(
                     onOpenSession = { sessionId ->
                         navController.navigate(sessionRoute(sessionId))
                     },
+                    onNewSession = { cwd ->
+                        navController.navigate(newSessionRoute(cwd))
+                    },
+                    onOpenSettings = { navController.navigate(ROUTE_SETTINGS) },
                 )
             }
             composable(ROUTE_ME) {
@@ -206,11 +245,23 @@ fun AgentApp(
                     onOpenBrowser = { url, title ->
                         navController.navigate(browserRoute(url, title))
                     },
+                    onOpenSession = { targetSessionId ->
+                        navController.navigate(sessionRoute(targetSessionId))
+                    },
                 )
             }
-            composable(ROUTE_NEW_SESSION) {
+            composable(
+                route = ROUTE_NEW_SESSION,
+                arguments = listOf(
+                    navArgument("cwd") {
+                        type = NavType.StringType
+                        defaultValue = ""
+                    },
+                ),
+            ) { entry ->
                 NewSessionScreen(
                     viewModel = viewModel,
+                    initialCwd = decodeToken(entry.arguments?.getString("cwd").orEmpty()),
                     onBack = { navController.popBackStack() },
                     onCreated = { sessionId ->
                         navController.navigate(sessionRoute(sessionId)) {
@@ -259,7 +310,7 @@ private data class BottomDestination(
 
 private val bottomDestinations = listOf(
     BottomDestination(ROUTE_INBOX, "收件箱"),
-    BottomDestination(ROUTE_PROJECTS, "项目"),
+    BottomDestination(ROUTE_PROJECTS, "会话"),
     BottomDestination(ROUTE_ME, "我的"),
 )
 
@@ -354,6 +405,10 @@ private fun decodeSessionToken(token: String): String {
 
 private fun browserRoute(url: String, title: String): String {
     return "browser/${encodeToken(url)}/${encodeToken(title.ifBlank { "网页" })}"
+}
+
+private fun newSessionRoute(cwd: String = ""): String {
+    return "new-session?cwd=${encodeToken(cwd)}"
 }
 
 internal fun encodeToken(value: String): String {

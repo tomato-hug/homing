@@ -1,0 +1,159 @@
+package dev.agentpush.poc
+
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import org.json.JSONObject
+
+class TransportRouter(
+    private val lan: HomingTransport,
+    private val cloud: HomingTransport,
+    private val probeLan: suspend () -> Boolean,
+    private val cloudAvailable: () -> Boolean,
+    private val clock: () -> Long = System::currentTimeMillis,
+) {
+    private val routeMutex = Mutex()
+    private val failureLock = Any()
+    private val _kind = MutableStateFlow(TransportKind.LAN)
+    private var consecutiveLanFailures = 0
+    private var routeInitialized = false
+    private var lastProbeAt = 0L
+
+    @Volatile
+    private var routeDirty = false
+
+    val kind: StateFlow<TransportKind> = _kind.asStateFlow()
+
+    suspend fun ensureRoute(force: Boolean = false) {
+        routeMutex.withLock {
+            val now = clock()
+            if (!force && !routeDirty && routeInitialized &&
+                now - lastProbeAt < ROUTE_CACHE_MILLIS
+            ) {
+                return
+            }
+            val lanAvailable = runCatching { probeLan() }.getOrDefault(false)
+            _kind.value = when {
+                lanAvailable -> TransportKind.LAN
+                cloudAvailable() -> TransportKind.CLOUD
+                else -> TransportKind.LAN
+            }
+            routeInitialized = true
+            lastProbeAt = now
+            routeDirty = false
+            if (lanAvailable) clearLanFailures()
+        }
+    }
+
+    suspend fun request(
+        method: String,
+        path: String,
+        body: JSONObject? = null,
+    ): TransportResponse {
+        ensureRoute()
+        val route = _kind.value
+        if (route == TransportKind.CLOUD) {
+            return requestCloud(method, path, body)
+        }
+        return try {
+            lan.request(method, path, body).also { clearLanFailures() }
+        } catch (error: Exception) {
+            if (recordLanFailure()) {
+                requestCloud(method, path, body)
+            } else {
+                throw error
+            }
+        }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun events(sessionId: String? = null): Flow<TransportEvent> = flow {
+        ensureRoute()
+        emitAll(
+            kind.flatMapLatest { current ->
+                when (current) {
+                    TransportKind.LAN -> lan.events(sessionId)
+                    TransportKind.CLOUD -> cloud.events(sessionId)
+                }
+            },
+        )
+    }
+
+    suspend fun upload(
+        path: String,
+        bytes: ByteArray,
+        name: String,
+    ): JSONObject {
+        ensureRoute()
+        val current = _kind.value
+        if (current == TransportKind.CLOUD) {
+            if (bytes.size > CLOUD_FILE_LIMIT_BYTES) {
+                throw CloudRpcException("單文件上限 20 MB")
+            }
+            return cloud.upload(path, bytes, name)
+        }
+        return lan.upload(path, bytes, name)
+    }
+
+    suspend fun download(url: String): ByteArray {
+        ensureRoute()
+        return when (_kind.value) {
+            TransportKind.LAN -> lan.download(url)
+            TransportKind.CLOUD -> cloud.download(url)
+        }
+    }
+
+    fun invalidate() {
+        routeDirty = true
+    }
+
+    private suspend fun requestCloud(
+        method: String,
+        path: String,
+        body: JSONObject?,
+    ): TransportResponse {
+        return try {
+            cloud.request(method, path, body)
+        } catch (error: Exception) {
+            if (runCatching { probeLan() }.getOrDefault(false)) {
+                _kind.value = TransportKind.LAN
+                routeInitialized = true
+                lastProbeAt = clock()
+                clearLanFailures()
+                lan.request(method, path, body)
+            } else {
+                throw error
+            }
+        }
+    }
+
+    private fun recordLanFailure(): Boolean {
+        synchronized(failureLock) {
+            consecutiveLanFailures += 1
+            if (consecutiveLanFailures >= LAN_FAILURES_BEFORE_SWITCH && cloudAvailable()) {
+                _kind.value = TransportKind.CLOUD
+                return true
+            }
+            return false
+        }
+    }
+
+    private fun clearLanFailures() {
+        synchronized(failureLock) {
+            consecutiveLanFailures = 0
+        }
+    }
+
+    companion object {
+        private const val ROUTE_CACHE_MILLIS = 8_000L
+        private const val LAN_FAILURES_BEFORE_SWITCH = 2
+        private const val CLOUD_FILE_LIMIT_BYTES = 20 * 1024 * 1024
+    }
+}

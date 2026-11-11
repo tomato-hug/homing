@@ -25,14 +25,19 @@ enum class AgentBrand(
 }
 
 enum class ReplyStatus(val wire: String, val label: String) {
+    OUTBOX("outbox", "待发送"),
     QUEUED("queued", "排队中"),
     HELD("held", "已交给钩子"),
     INJECTED("injected", "已注入"),
+    CANCELLED("cancelled", "已撤回"),
     FAILED("failed", "失败");
 
     companion object {
         fun fromWire(value: String?): ReplyStatus {
-            return entries.firstOrNull { it.wire == value?.lowercase() } ?: QUEUED
+            return when (value?.lowercase()) {
+                "switch_model_unsupported", "sent", "delivered" -> INJECTED
+                else -> entries.firstOrNull { it.wire == value?.lowercase() } ?: QUEUED
+            }
         }
     }
 }
@@ -159,6 +164,7 @@ data class AgentEvent(
     val attachments: List<Attachment> = emptyList(),
     val localhostLinks: List<Int> = emptyList(),
     val sessionMeta: SessionMeta? = null,
+    val approvalOptions: List<ApprovalOption> = emptyList(),
 ) {
     val brand: AgentBrand
         get() = AgentBrand.fromWire(source)
@@ -199,6 +205,10 @@ data class AgentEvent(
             .put("read", read)
             .put("session_meta", sessionMeta?.toJson())
             .put(
+                "approval_options",
+                JSONArray().apply { approvalOptions.forEach { put(it.toJson()) } },
+            )
+            .put(
                 "attachments",
                 JSONArray().apply {
                     attachments.forEach { attachment ->
@@ -224,6 +234,18 @@ data class AgentEvent(
             val sessionId = json.stringOrBlank("session_id")
             val project = json.stringOrBlank("project").ifBlank { projectFromCwd(cwd) }
             val nestedMeta = json.optJSONObject("session_meta")
+            val approvalOptions = buildList {
+                fun addAll(array: JSONArray?) {
+                    if (array == null) return
+                    for (index in 0 until array.length()) {
+                        array.optJSONObject(index)
+                            ?.let(ApprovalOption::fromJson)
+                            ?.let(::add)
+                    }
+                }
+                addAll(json.optJSONArray("approval_options"))
+                addAll(nestedMeta?.optJSONObject("acp")?.optJSONArray("options"))
+            }
             return AgentEvent(
                 id = json.optLong("id", 0L),
                 ts = json.stringOrBlank("ts").ifBlank { Instant.now().toString() },
@@ -245,6 +267,7 @@ data class AgentEvent(
                         fallbackProject = project,
                     )
                 },
+                approvalOptions = approvalOptions,
                 localhostLinks = buildList {
                     if (links != null) {
                         for (index in 0 until links.length()) {
@@ -269,7 +292,37 @@ data class AgentReply(
     val files: List<String> = emptyList(),
     val model: String = "",
     val effort: String = "",
+    val permissionMode: String = "",
 )
+
+private val nonQueueDowngradeStatuses = setOf(
+    ReplyStatus.HELD,
+    ReplyStatus.INJECTED,
+    ReplyStatus.CANCELLED,
+    ReplyStatus.FAILED,
+)
+
+/**
+ * HTTP receipts and SSE frames can arrive out of order. A stale "queued"
+ * snapshot must never turn an already delivered reply back into a cancellable
+ * queue item.
+ */
+internal fun reconcileIncomingReply(
+    existing: AgentReply?,
+    incoming: AgentReply,
+): AgentReply {
+    if (existing == null) return incoming
+    if (
+        incoming.status != ReplyStatus.QUEUED ||
+        existing.status !in nonQueueDowngradeStatuses
+    ) {
+        return incoming
+    }
+    return incoming.copy(
+        status = existing.status,
+        message = existing.message ?: incoming.message,
+    )
+}
 
 data class ReplyReceipt(
     val ok: Boolean,
@@ -278,26 +331,273 @@ data class ReplyReceipt(
     val message: String? = null,
 )
 
+enum class DispatchStatus(val wire: String, val label: String) {
+    STARTING("starting", "启动中"),
+    WAITING_SESSION("waiting_session", "等待会话"),
+    STARTED("started", "已启动"),
+    RUNNING("running", "运行中"),
+    NEEDS_YOU("needs_you", "等你处理"),
+    COMPLETED("completed", "完成"),
+    FAILED("failed", "派发失败"),
+    CANCELLED("cancelled", "已取消");
+
+    companion object {
+        fun fromWire(value: String?): DispatchStatus {
+            return entries.firstOrNull { it.wire == value?.lowercase() } ?: STARTING
+        }
+    }
+}
+
+data class DispatchOutcome(
+    val text: String = "",
+    val filesChanged: List<String> = emptyList(),
+    val finishedAt: String = "",
+    val branch: String = "",
+    val diffStat: String = "",
+) {
+    companion object {
+        fun fromJson(json: JSONObject?): DispatchOutcome? {
+            if (json == null) return null
+            val files = json.optJSONArray("files_changed")
+            return DispatchOutcome(
+                text = json.stringOrBlank("text"),
+                filesChanged = buildList {
+                    if (files != null) {
+                        for (index in 0 until files.length()) {
+                            files.optString(index)
+                                .takeIf { it.isNotBlank() }
+                                ?.let(::add)
+                        }
+                    }
+                },
+                finishedAt = json.stringOrBlank("finished_at"),
+                branch = json.stringOrBlank("branch"),
+                diffStat = json.stringOrBlank("diff_stat"),
+            )
+        }
+    }
+}
+
+data class ComposeMentionPlan(
+    val agent: String = "",
+    val preset: String = "ask",
+    val text: String = "",
+    val target: String = "new",
+    val threadId: String = "",
+    val workspace: String = "",
+    val context: List<String> = emptyList(),
+    val dispatchable: Boolean = false,
+    val reason: String = "",
+) {
+    val brand: AgentBrand
+        get() = AgentBrand.fromWire(agent)
+
+    val presetLabel: String
+        get() = when (preset) {
+            "do" -> "动手"
+            "review" -> "审查"
+            "handoff" -> "交棒"
+            else -> "咨询"
+        }
+
+    companion object {
+        fun fromJson(json: JSONObject): ComposeMentionPlan {
+            return ComposeMentionPlan(
+                agent = json.stringOrBlank("agent").lowercase(),
+                preset = json.stringOrBlank("preset").ifBlank { "ask" },
+                text = json.stringOrBlank("text"),
+                target = json.stringOrBlank("target").ifBlank { "new" },
+                threadId = json.stringOrBlank("thread_id"),
+                workspace = json.stringOrBlank("workspace"),
+                context = json.optJSONArray("context")?.let { array ->
+                    (0 until array.length()).mapNotNull { index ->
+                        array.optString(index).takeIf { it.isNotBlank() }
+                    }
+                }.orEmpty(),
+                dispatchable = json.optBoolean("dispatchable", false),
+                reason = json.stringOrBlank("reason"),
+            )
+        }
+    }
+}
+
+data class ComposeMentionOverride(
+    val agent: String,
+    val target: String = "auto",
+    val context: List<String> = listOf("recent", "files"),
+    val workspace: String = "auto",
+) {
+    fun toJson(): JSONObject = JSONObject()
+        .put("agent", agent)
+        .put("target", target)
+        .put(
+            "context",
+            JSONArray().apply { context.forEach { put(it) } },
+        )
+        .put("workspace", workspace)
+}
+
+data class ComposePlan(
+    val message: String = "",
+    val mentions: List<ComposeMentionPlan> = emptyList(),
+)
+
+data class ComposeReply(
+    val replyId: Long = 0L,
+    val status: String = "",
+    val message: String = "",
+)
+
+data class ComposeResult(
+    val plan: ComposePlan = ComposePlan(),
+    val reply: ComposeReply? = null,
+    val dispatches: List<AgentDispatch> = emptyList(),
+    val dryRun: Boolean = false,
+) {
+    companion object {
+        fun fromJson(json: JSONObject): ComposeResult {
+            val planJson = json.optJSONObject("plan")
+            val mentionArray = planJson?.optJSONArray("mentions")
+            val dispatchArray = json.optJSONArray("dispatches")
+            val replyJson = json.optJSONObject("reply")
+            return ComposeResult(
+                plan = ComposePlan(
+                    message = planJson?.stringOrBlank("message").orEmpty(),
+                    mentions = buildList {
+                        if (mentionArray != null) {
+                            for (index in 0 until mentionArray.length()) {
+                                mentionArray.optJSONObject(index)?.let {
+                                    add(ComposeMentionPlan.fromJson(it))
+                                }
+                            }
+                        }
+                    },
+                ),
+                reply = replyJson?.let {
+                    ComposeReply(
+                        replyId = it.optLong("reply_id", 0L),
+                        status = it.stringOrBlank("status"),
+                        message = it.stringOrBlank("message"),
+                    )
+                },
+                dispatches = buildList {
+                    if (dispatchArray != null) {
+                        for (index in 0 until dispatchArray.length()) {
+                            dispatchArray.optJSONObject(index)?.let {
+                                val dispatch = AgentDispatch.fromJson(it)
+                                if (dispatch.id.isNotBlank()) add(dispatch)
+                            }
+                        }
+                    }
+                },
+                dryRun = json.optBoolean("dry_run", false),
+            )
+        }
+    }
+}
+
+data class AgentDispatch(
+    val id: String,
+    val parentSessionId: String = "",
+    val parentSource: String = "",
+    val parentEventId: Long? = null,
+    val targetAgent: String = "",
+    val targetSessionId: String = "",
+    val requestId: String = "",
+    val text: String = "",
+    val cwd: String = "",
+    val mode: String = "parallel",
+    val preset: String = "ask",
+    val workspace: String = "",
+    val thread: String = "",
+    val branch: String = "",
+    val repoCwd: String = "",
+    val worktreeDiscardedAt: String = "",
+    val status: DispatchStatus = DispatchStatus.STARTING,
+    val message: String = "",
+    val result: DispatchOutcome? = null,
+    val createdAt: String = "",
+    val updatedAt: String = "",
+) {
+    val targetBrand: AgentBrand
+        get() = AgentBrand.fromWire(targetAgent)
+
+    companion object {
+        fun fromJson(json: JSONObject): AgentDispatch {
+            val parentEventId = if (json.has("parent_event_id") && !json.isNull("parent_event_id")) {
+                json.optLong("parent_event_id", 0L).takeIf { it > 0 }
+            } else {
+                null
+            }
+            return AgentDispatch(
+                id = json.stringOrBlank("dispatch_id")
+                    .ifBlank { json.stringOrBlank("id") },
+                parentSessionId = json.stringOrBlank("parent_session_id"),
+                parentSource = json.stringOrBlank("parent_source"),
+                parentEventId = parentEventId,
+                targetAgent = json.stringOrBlank("target_agent").lowercase(),
+                targetSessionId = json.stringOrBlank("target_session_id"),
+                requestId = json.stringOrBlank("request_id"),
+                text = json.stringOrBlank("text"),
+                cwd = json.stringOrBlank("cwd"),
+                mode = json.stringOrBlank("mode").ifBlank { "parallel" },
+                preset = json.stringOrBlank("preset").ifBlank { "ask" },
+                workspace = json.stringOrBlank("workspace"),
+                thread = json.stringOrBlank("thread"),
+                branch = json.stringOrBlank("branch"),
+                repoCwd = json.stringOrBlank("repo_cwd"),
+                worktreeDiscardedAt = json.stringOrBlank("worktree_discarded_at"),
+                status = DispatchStatus.fromWire(json.stringOrBlank("status")),
+                message = json.stringOrBlank("message"),
+                result = DispatchOutcome.fromJson(json.optJSONObject("result")),
+                createdAt = json.stringOrBlank("created_at"),
+                updatedAt = json.stringOrBlank("updated_at"),
+            )
+        }
+    }
+}
+
 data class AgentCapabilities(
     val reply: Boolean = true,
-    val newSession: Boolean = true,
+    val newSession: Boolean = false,
+    // null 表示旧中继没有声明 readiness。WorkBuddy 的旧 ACP 会复用当前活跃
+    // 会话，不能仅凭 new_session=true 就允许手机新建，故对旧响应按不可新建处理。
+    val newSessionReady: Boolean? = null,
+    val dispatch: Boolean = false,
     val switchModel: Boolean = false,
     val effort: Boolean = false,
     val stop: Boolean = false,
     val approve: Boolean = true,
     val live: Boolean = true,
+    val permissionModes: List<String> = emptyList(),
 ) {
     companion object {
         fun fromJson(json: JSONObject?): AgentCapabilities {
             if (json == null) return AgentCapabilities()
+            val permissionModes = json.optJSONArray("permission_modes")
             return AgentCapabilities(
                 reply = json.optBoolean("reply", true),
-                newSession = json.optBoolean("new_session", true),
+                newSession = json.optBoolean("new_session", false),
+                newSessionReady = if (json.has("new_session_ready")) {
+                    json.optBoolean("new_session_ready", false)
+                } else {
+                    null
+                },
+                dispatch = json.optBoolean("dispatch", false),
                 switchModel = json.optBoolean("switch_model", false),
                 effort = json.optBoolean("effort", false),
                 stop = json.optBoolean("stop", false),
                 approve = json.optBoolean("approve", true),
                 live = json.optBoolean("live", true),
+                permissionModes = buildList {
+                    if (permissionModes != null) {
+                        for (index in 0 until permissionModes.length()) {
+                            permissionModes.optString(index)
+                                .takeIf { it.isNotBlank() }
+                                ?.let(::add)
+                        }
+                    }
+                }.distinct(),
             )
         }
     }
@@ -348,12 +648,31 @@ data class AgentModel(
 
 data class AgentProfile(
     val source: String,
+    val displayName: String = "",
+    val icon: String = "",
+    val available: Boolean = false,
+    val installed: Boolean = false,
     val capabilities: AgentCapabilities = AgentCapabilities(),
     val models: List<AgentModel> = emptyList(),
     val defaultModel: String = "",
 ) {
     val brand: AgentBrand
         get() = AgentBrand.fromWire(source)
+
+    val isOnlineForNewSession: Boolean
+        get() = available && supportsNewSession
+
+    val supportsNewSession: Boolean
+        get() = capabilities.newSession && (
+            capabilities.newSessionReady
+                ?: (source != AgentBrand.WORKBUDDY.wire)
+            )
+
+    val label: String
+        get() = displayName.ifBlank { brand.displayName }
+
+    val initial: String
+        get() = label.trim().firstOrNull()?.uppercase() ?: brand.initial
 
     val defaultModelOption: AgentModel?
         get() = models.firstOrNull { it.isDefault }
@@ -368,6 +687,45 @@ data class AgentDirectory(
     fun profile(source: String): AgentProfile {
         return agents[source.lowercase()]
             ?: AgentProfile(source = source.lowercase())
+    }
+}
+
+data class SessionSearchHit(
+    val sessionId: String,
+    val source: String,
+    val title: String,
+    val snippet: String,
+    val itemId: String = "",
+) {
+    companion object {
+        fun listFromJson(root: JSONObject): List<SessionSearchHit> {
+            val array = root.optJSONArray("hits") ?: return emptyList()
+            return buildList {
+                for (index in 0 until array.length()) {
+                    val hit = array.optJSONObject(index) ?: continue
+                    val session = hit.optJSONObject("session") ?: continue
+                    val snippetJson = hit.optJSONObject("snippet")
+                    val sessionId = session.stringOrBlank("session_id")
+                    if (sessionId.isBlank()) continue
+                    val snippet = if (snippetJson != null) {
+                        snippetJson.stringOrBlank("before") +
+                            snippetJson.stringOrBlank("match") +
+                            snippetJson.stringOrBlank("after")
+                    } else {
+                        hit.stringOrBlank("snippet")
+                    }
+                    add(
+                        SessionSearchHit(
+                            sessionId = sessionId,
+                            source = session.stringOrBlank("source"),
+                            title = session.stringOrBlank("title"),
+                            snippet = snippet.trim(),
+                            itemId = hit.stringOrBlank("item_id"),
+                        ),
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -388,6 +746,40 @@ data class ContextUsage(
         get() = formatTokenCount(limit)
 }
 
+data class SessionCommand(
+    val name: String,
+    val description: String = "",
+    val argumentHint: String = "",
+) {
+    companion object {
+        fun fromJson(json: JSONObject): SessionCommand? {
+            val name = json.stringOrBlank("name").removePrefix("/")
+            if (name.isBlank()) return null
+            return SessionCommand(
+                name = name,
+                description = json.stringOrBlank("description"),
+                argumentHint = json.stringOrBlank("argument_hint"),
+            )
+        }
+    }
+}
+
+data class CompletedPath(
+    val path: String,
+    val type: String = "file",
+) {
+    companion object {
+        fun fromJson(json: JSONObject): CompletedPath? {
+            val path = json.stringOrBlank("path")
+            if (path.isBlank()) return null
+            return CompletedPath(
+                path = path,
+                type = json.stringOrBlank("type").ifBlank { "file" },
+            )
+        }
+    }
+}
+
 fun formatTokenCount(value: Long): String {
     return when {
         value <= 0 -> "0"
@@ -399,6 +791,8 @@ fun formatTokenCount(value: Long): String {
 
 data class SessionMeta(
     val sessionId: String,
+    val computerId: String = "",
+    val computerName: String = "",
     val source: String = "",
     val title: String = "",
     val titleSource: String = "",
@@ -422,8 +816,12 @@ data class SessionMeta(
     val pinned: Boolean? = null,
     val muted: Boolean? = null,
     val archived: Boolean? = null,
+    val remindOnDone: Boolean = false,
     val isTemp: Boolean? = null,
     val isEmpty: Boolean? = null,
+    val seenEventId: Long = 0L,
+    val seenAt: String = "",
+    val collab: SessionCollab? = null,
 ) {
     val brand: AgentBrand
         get() = AgentBrand.fromWire(source)
@@ -431,6 +829,8 @@ data class SessionMeta(
     fun toJson(): JSONObject {
         return JSONObject()
             .put("session_id", sessionId)
+            .put("computer_id", computerId)
+            .put("computer_name", computerName)
             .put("source", source)
             .put("title", title)
             .put("title_source", titleSource)
@@ -453,8 +853,12 @@ data class SessionMeta(
             .put("pinned", pinned)
             .put("muted", muted)
             .put("archived", archived)
+            .put("remind_on_done", remindOnDone)
             .put("is_temp", isTemp)
             .put("is_empty", isEmpty)
+            .put("seen_event_id", seenEventId)
+            .put("seen_at", seenAt.ifBlank { JSONObject.NULL })
+            .put("collab", collab?.toJson())
             .put(
                 "context_usage",
                 contextUsage?.let {
@@ -479,6 +883,8 @@ data class SessionMeta(
                 sessionId = json.stringOrBlank("session_id")
                     .ifBlank { json.stringOrBlank("id") }
                     .ifBlank { fallbackSessionId },
+                computerId = json.stringOrBlank("computer_id"),
+                computerName = json.stringOrBlank("computer_name"),
                 source = json.stringOrBlank("source").ifBlank { fallbackSource },
                 title = json.stringOrBlank("title"),
                 titleSource = json.stringOrBlank("title_source"),
@@ -513,12 +919,134 @@ data class SessionMeta(
                 pinned = json.booleanOrNull("pinned"),
                 muted = json.booleanOrNull("muted"),
                 archived = json.booleanOrNull("archived"),
+                remindOnDone = json.optBoolean("remind_on_done", false),
                 isTemp = json.booleanOrNull("is_temp"),
                 isEmpty = json.booleanOrNull("is_empty"),
+                seenEventId = json.optLong("seen_event_id", 0L),
+                seenAt = json.stringOrBlank("seen_at"),
+                collab = SessionCollab.fromJson(json.optJSONObject("collab")),
             )
         }
     }
 }
+
+data class HomeComputerStatus(
+    val computerId: String,
+    val name: String = "",
+    val available: Boolean = false,
+    val error: String = "",
+    val attentionCount: Int = 0,
+    val runningCount: Int = 0,
+    val resumeCount: Int = 0,
+    val earlierCount: Int = 0,
+) {
+    fun toJson(): JSONObject = JSONObject()
+        .put("computer_id", computerId)
+        .put("name", name)
+        .put("available", available)
+        .put("error", error)
+        .put("attention_count", attentionCount)
+        .put("running_count", runningCount)
+        .put("resume_count", resumeCount)
+        .put("earlier_count", earlierCount)
+
+    companion object {
+        fun fromJson(json: JSONObject): HomeComputerStatus? {
+            val computerId = json.stringOrBlank("computer_id")
+            if (computerId.isBlank()) return null
+            return HomeComputerStatus(
+                computerId = computerId,
+                name = json.stringOrBlank("name"),
+                available = json.optBoolean("available", false),
+                error = json.stringOrBlank("error"),
+                attentionCount = json.optInt("attention_count", 0),
+                runningCount = json.optInt("running_count", 0),
+                resumeCount = json.optInt("resume_count", 0),
+                earlierCount = json.optInt("earlier_count", 0),
+            )
+        }
+    }
+}
+
+data class SessionCollab(
+    val role: String = "",
+    val parentSessionId: String = "",
+    val parentSource: String = "",
+    val parentDispatchId: String = "",
+    val children: List<SessionCollabChild> = emptyList(),
+) {
+    val isParent: Boolean
+        get() = role == "parent" && children.isNotEmpty()
+
+    val isChild: Boolean
+        get() = role == "child" && parentSessionId.isNotBlank()
+
+    fun toJson(): JSONObject {
+        val childArray = JSONArray()
+        children.forEach { child ->
+            childArray.put(
+                JSONObject()
+                    .put("dispatch_id", child.dispatchId)
+                    .put("agent", child.agent)
+                    .put("status", child.status)
+                    .put("preset", child.preset),
+            )
+        }
+        return JSONObject()
+            .put("role", role)
+            .put(
+                "parent",
+                if (isChild) {
+                    JSONObject()
+                        .put("session_id", parentSessionId)
+                        .put("source", parentSource)
+                        .put("dispatch_id", parentDispatchId)
+                } else {
+                    JSONObject.NULL
+                },
+            )
+            .put("children", childArray)
+    }
+
+    companion object {
+        fun fromJson(json: JSONObject?): SessionCollab? {
+            if (json == null) return null
+            val parent = json.optJSONObject("parent")
+            val childrenJson = json.optJSONArray("children")
+            val children = buildList {
+                if (childrenJson != null) {
+                    for (index in 0 until childrenJson.length()) {
+                        val child = childrenJson.optJSONObject(index) ?: continue
+                        add(
+                            SessionCollabChild(
+                                dispatchId = child.stringOrBlank("dispatch_id"),
+                                agent = child.stringOrBlank("agent"),
+                                status = child.stringOrBlank("status"),
+                                preset = child.stringOrBlank("preset"),
+                            ),
+                        )
+                    }
+                }
+            }
+            val role = json.stringOrBlank("role")
+            if (role.isBlank() && parent == null && children.isEmpty()) return null
+            return SessionCollab(
+                role = role,
+                parentSessionId = parent?.stringOrBlank("session_id").orEmpty(),
+                parentSource = parent?.stringOrBlank("source").orEmpty(),
+                parentDispatchId = parent?.stringOrBlank("dispatch_id").orEmpty(),
+                children = children,
+            )
+        }
+    }
+}
+
+data class SessionCollabChild(
+    val dispatchId: String,
+    val agent: String,
+    val status: String,
+    val preset: String,
+)
 
 data class ProjectInfo(
     val cwd: String,
@@ -582,7 +1110,10 @@ data class TranscriptPage(
 
 data class SessionSummary(
     val sessionId: String,
+    val source: String = "",
     val brand: AgentBrand,
+    val agentLabel: String = "",
+    val agentInitial: String = "",
     val title: String,
     val titleSource: String,
     val workspace: String,
@@ -609,13 +1140,20 @@ data class SessionSummary(
     val pinned: Boolean = false,
     val muted: Boolean = false,
     val archived: Boolean = false,
+    val remindOnDone: Boolean = false,
     val isTemp: Boolean = false,
     val isEmpty: Boolean = false,
+    val seenAt: String = "",
+    val collab: SessionCollab? = null,
+    val computerId: String = "",
+    val computerName: String = "",
 ) {
     val pendingEvent: AgentEvent?
         get() = latestEvent?.takeIf { event ->
             event.isPending && replies.none { reply ->
-                reply.eventId == event.id && reply.status != ReplyStatus.FAILED
+                reply.eventId == event.id &&
+                    reply.status != ReplyStatus.FAILED &&
+                    reply.status != ReplyStatus.CANCELLED
             }
         }
 
@@ -758,14 +1296,318 @@ data class InboxFeed(
     }
 }
 
+data class AwayPeriod(
+    val id: String,
+    val startedAt: String = "",
+    val endedAt: String = "",
+    val source: String = "manual",
+    val deviceId: String = "",
+    val clearedAt: String = "",
+) {
+    val active: Boolean
+        get() = endedAt.isBlank()
+
+    fun toJson(): JSONObject {
+        return JSONObject()
+            .put("id", id)
+            .put("started_at", startedAt)
+            .put("ended_at", endedAt.ifBlank { JSONObject.NULL })
+            .put("source", source)
+            .put("device_id", deviceId)
+            .put("cleared_at", clearedAt.ifBlank { JSONObject.NULL })
+    }
+
+    companion object {
+        fun fromJson(json: JSONObject?): AwayPeriod? {
+            if (json == null) return null
+            val id = json.stringOrBlank("id")
+            if (id.isBlank()) return null
+            return AwayPeriod(
+                id = id,
+                startedAt = json.stringOrBlank("started_at"),
+                endedAt = json.stringOrBlank("ended_at"),
+                source = json.stringOrBlank("source").ifBlank { "manual" },
+                deviceId = json.stringOrBlank("device_id"),
+                clearedAt = json.stringOrBlank("cleared_at"),
+            )
+        }
+    }
+}
+
+data class HomeAway(
+    val enabled: Boolean = false,
+    val current: AwayPeriod? = null,
+    val period: AwayPeriod? = null,
+) {
+    fun toJson(): JSONObject {
+        return JSONObject()
+            .put("enabled", enabled)
+            .put("current", current?.toJson() ?: JSONObject.NULL)
+            .put("period", period?.toJson() ?: JSONObject.NULL)
+    }
+}
+
+data class ApprovalOption(
+    val id: String,
+    val label: String,
+    val decision: String,
+) {
+    fun toJson(): JSONObject {
+        return JSONObject()
+            .put("id", id)
+            .put("label", label)
+            .put("decision", decision)
+    }
+
+    companion object {
+        fun fromJson(json: JSONObject): ApprovalOption? {
+            val id = json.stringOrBlank("id")
+                .ifBlank { json.stringOrBlank("option_id") }
+            if (id.isBlank()) return null
+            val kind = json.stringOrBlank("kind").lowercase()
+            val decision = json.stringOrBlank("decision").ifBlank {
+                if (kind.contains("reject") || kind.contains("deny")) "deny" else "allow"
+            }
+            return ApprovalOption(
+                id = id,
+                label = json.stringOrBlank("label")
+                    .ifBlank { json.stringOrBlank("name") }
+                    .ifBlank { id },
+                decision = decision,
+            )
+        }
+    }
+}
+
+data class HomeApproval(
+    val command: String = "",
+    val options: List<ApprovalOption> = emptyList(),
+) {
+    fun toJson(): JSONObject {
+        return JSONObject()
+            .put("command", command)
+            .put("options", JSONArray().apply { options.forEach { put(it.toJson()) } })
+    }
+
+    companion object {
+        fun fromJson(json: JSONObject?): HomeApproval? {
+            if (json == null) return null
+            val options = json.optJSONArray("options")
+            return HomeApproval(
+                command = json.stringOrBlank("command"),
+                options = buildList {
+                    if (options != null) {
+                        for (index in 0 until options.length()) {
+                            options.optJSONObject(index)
+                                ?.let(ApprovalOption::fromJson)
+                                ?.let(::add)
+                        }
+                    }
+                },
+            )
+        }
+    }
+}
+
+data class HomeCollab(
+    val children: Int = 0,
+    val running: Int = 0,
+    val needsYou: Int = 0,
+) {
+    fun toJson(): JSONObject {
+        return JSONObject()
+            .put("children", children)
+            .put("running", running)
+            .put("needs_you", needsYou)
+    }
+}
+
+data class HomeAttention(
+    val session: SessionMeta,
+    val reason: String,
+    val sinceAway: Boolean = false,
+    val eventId: Long = 0L,
+    val unseenCount: Int = 0,
+    val headline: String = "",
+    val summary: String = "",
+    val at: String = "",
+    val actions: List<String> = emptyList(),
+    val approval: HomeApproval? = null,
+    val collab: HomeCollab? = null,
+) {
+    val sessionId: String
+        get() = session.sessionId
+
+    fun toJson(): JSONObject {
+        return JSONObject()
+            .put("session", session.toJson())
+            .put("reason", reason)
+            .put("since_away", sinceAway)
+            .put("event_id", eventId)
+            .put("unseen_count", unseenCount)
+            .put("headline", headline)
+            .put("summary", summary)
+            .put("at", at)
+            .put("actions", JSONArray(actions))
+            .put("approval", approval?.toJson() ?: JSONObject.NULL)
+            .put("collab", collab?.toJson() ?: JSONObject.NULL)
+    }
+
+    companion object {
+        fun fromJson(json: JSONObject): HomeAttention? {
+            val sessionJson = json.optJSONObject("session") ?: return null
+            val session = SessionMeta.fromJson(sessionJson)
+            if (session.sessionId.isBlank()) return null
+            val actions = json.optJSONArray("actions")
+            val collab = json.optJSONObject("collab")
+            return HomeAttention(
+                session = session,
+                reason = json.stringOrBlank("reason"),
+                sinceAway = json.optBoolean("since_away", false),
+                eventId = json.optLong("event_id", 0L),
+                unseenCount = json.optInt("unseen_count", 0),
+                headline = json.stringOrBlank("headline"),
+                summary = json.stringOrBlank("summary"),
+                at = json.stringOrBlank("at"),
+                actions = buildList {
+                    if (actions != null) {
+                        for (index in 0 until actions.length()) {
+                            actions.optString(index)
+                                .takeIf { it.isNotBlank() }
+                                ?.let(::add)
+                        }
+                    }
+                },
+                approval = HomeApproval.fromJson(json.optJSONObject("approval")),
+                collab = collab?.let {
+                    HomeCollab(
+                        children = it.optInt("children", 0),
+                        running = it.optInt("running", 0),
+                        needsYou = it.optInt("needs_you", 0),
+                    )
+                },
+            )
+        }
+    }
+}
+
+data class HomeFeed(
+    val away: HomeAway = HomeAway(),
+    val attention: List<HomeAttention> = emptyList(),
+    val running: List<SessionMeta> = emptyList(),
+    val resume: List<SessionMeta> = emptyList(),
+    val computers: List<HomeComputerStatus> = emptyList(),
+    val earlierCount: Int = 0,
+    val earlierNextCursor: String = "",
+    val needsYouCount: Int = 0,
+    val awayNewCount: Int = 0,
+    val runningCount: Int = 0,
+    val newActivityScope: String = "away",
+    val generatedAt: String = "",
+    val available: Boolean = false,
+) {
+    val attentionSessions: List<SessionMeta>
+        get() = attention.map { it.session }
+
+    fun toJson(): JSONObject {
+        return JSONObject()
+            .put("away", away.toJson())
+            .put("attention", JSONArray().apply {
+                attention.forEach { put(it.toJson()) }
+            })
+            .put("running", JSONArray().apply {
+                running.forEach { put(it.toJson()) }
+            })
+            .put("resume", JSONArray().apply {
+                resume.forEach { put(it.toJson()) }
+            })
+            .put("computers", JSONArray().apply {
+                computers.forEach { put(it.toJson()) }
+            })
+            .put(
+                "earlier",
+                JSONObject()
+                    .put("count", earlierCount)
+                    .put("next_cursor", earlierNextCursor),
+            )
+            .put(
+                "counts",
+                JSONObject()
+                    .put("needs_you", needsYouCount)
+                    .put("away_new", awayNewCount)
+                    .put("running", runningCount),
+            )
+            .put("settings", JSONObject().put("new_activity", newActivityScope))
+            .put("generated_at", generatedAt)
+    }
+
+    companion object {
+        fun fromJson(json: JSONObject): HomeFeed {
+            fun sessions(key: String): List<SessionMeta> {
+                val array = json.optJSONArray(key) ?: return emptyList()
+                return buildList {
+                    for (index in 0 until array.length()) {
+                        val item = array.optJSONObject(index) ?: continue
+                        add(SessionMeta.fromJson(item))
+                    }
+                }
+            }
+            val awayJson = json.optJSONObject("away")
+            val attentionJson = json.optJSONArray("attention")
+            val computersJson = json.optJSONArray("computers")
+            val earlier = json.optJSONObject("earlier")
+            val counts = json.optJSONObject("counts")
+            val settings = json.optJSONObject("settings")
+            return HomeFeed(
+                away = HomeAway(
+                    enabled = awayJson?.optBoolean("enabled", false) ?: false,
+                    current = AwayPeriod.fromJson(awayJson?.optJSONObject("current")),
+                    period = AwayPeriod.fromJson(awayJson?.optJSONObject("period")),
+                ),
+                attention = buildList {
+                    if (attentionJson != null) {
+                        for (index in 0 until attentionJson.length()) {
+                            val item = attentionJson.optJSONObject(index) ?: continue
+                            HomeAttention.fromJson(item)?.let(::add)
+                        }
+                    }
+                },
+                running = sessions("running"),
+                resume = sessions("resume"),
+                computers = buildList {
+                    if (computersJson != null) {
+                        for (index in 0 until computersJson.length()) {
+                            val item = computersJson.optJSONObject(index) ?: continue
+                            HomeComputerStatus.fromJson(item)?.let(::add)
+                        }
+                    }
+                },
+                earlierCount = earlier?.optInt("count", 0) ?: 0,
+                earlierNextCursor = earlier?.stringOrBlank("next_cursor").orEmpty(),
+                needsYouCount = counts?.optInt("needs_you", 0) ?: 0,
+                awayNewCount = counts?.optInt("away_new", 0) ?: 0,
+                runningCount = counts?.optInt("running", 0) ?: 0,
+                newActivityScope = settings?.stringOrBlank("new_activity")
+                    ?.ifBlank { "away" }
+                    ?: "away",
+                generatedAt = json.stringOrBlank("generated_at"),
+                available = true,
+            )
+        }
+    }
+}
+
 data class AgentUiState(
     val settings: AppSettings,
     val connection: ConnectionState = ConnectionState.DISCONNECTED,
+    val transportKind: TransportKind = TransportKind.LAN,
     val connectionDiagnostics: ConnectionDiagnostics = ConnectionDiagnostics(),
     val events: Map<Long, AgentEvent> = emptyMap(),
     val replies: Map<Long, AgentReply> = emptyMap(),
     val sessionMeta: Map<String, SessionMeta> = emptyMap(),
     val agentDirectory: AgentDirectory = AgentDirectory(),
+    val agentCatalog: AgentCatalog = AgentCatalog(),
+    val dispatches: Map<String, AgentDispatch> = emptyMap(),
     val sessionItems: Map<String, SessionItemsState> = emptyMap(),
     val sessionApiAvailable: Boolean = true,
     val transcriptCache: Map<String, TranscriptPage> = emptyMap(),
@@ -775,7 +1617,10 @@ data class AgentUiState(
     val error: String? = null,
     val lastUpdatedAt: Long? = null,
     val localSessionFlags: Map<String, LocalSessionFlags> = emptyMap(),
+    val mobileInbox: MobileInboxMode = MobileInboxMode(),
     val inbox: InboxFeed? = null,
+    val home: HomeFeed? = null,
+    val sessionDrafts: Map<String, String> = emptyMap(),
 ) {
     val allUnreadCount: Int
         get() = events.values.count { !it.read }
@@ -855,7 +1700,10 @@ data class AgentUiState(
             val profile = agentDirectory.profile(source)
             SessionSummary(
                 sessionId = key,
+                source = source,
                 brand = brand,
+                agentLabel = profile.label,
+                agentInitial = profile.initial,
                 title = resolvedTitle.title,
                 titleSource = resolvedTitle.source,
                 workspace = workspace,
@@ -885,8 +1733,13 @@ data class AgentUiState(
                 pinned = pinned,
                 muted = muted,
                 archived = archived,
+                remindOnDone = meta?.remindOnDone ?: false,
                 isTemp = meta?.isTemp ?: false,
                 isEmpty = meta?.isEmpty ?: false,
+                seenAt = meta?.seenAt.orEmpty(),
+                collab = meta?.collab,
+                computerId = meta?.computerId.orEmpty(),
+                computerName = meta?.computerName.orEmpty(),
             )
         }.sortedWith(
             compareByDescending<SessionSummary> { it.pinned }
@@ -936,9 +1789,14 @@ fun resolveSessionTitle(
     sessionId: String = "",
     source: String = "",
 ): ResolvedSessionTitle {
-    val server = serverTitle?.trim().orEmpty()
     val sourceKind = titleSource?.trim()?.lowercase().orEmpty()
-    val nativeSources = setOf("", "custom", "agent", "first_prompt")
+    val rawServer = serverTitle?.trim().orEmpty()
+    val server = if (sourceKind == "agent") {
+        cleanAgentTitle(rawServer)
+    } else {
+        rawServer
+    }
+    val nativeSources = setOf("", "custom", "homing", "agent", "first_prompt")
     if (sourceKind in nativeSources && isUsableSessionTitle(server, sessionId)) {
         return ResolvedSessionTitle(
             title = server.take(80),
@@ -973,6 +1831,27 @@ fun resolveSessionTitle(
     )
 }
 
+private val markdownHeading = Regex("^#{1,6}\\s+")
+
+private val nativeTitlePrefix = Regex(
+    "(?i)^(?:会话标题|會話標題|對話標題|标题|標題|title|session title|conversation title)\\s*[：:]\\s*",
+)
+
+private fun cleanAgentTitle(value: String): String {
+    var title = value.trim()
+    while (true) {
+        val withoutHeading = markdownHeading.replace(title, "").trim()
+        if (withoutHeading == title) break
+        title = withoutHeading
+    }
+    while (true) {
+        val withoutPrefix = nativeTitlePrefix.replace(title, "").trim()
+        if (withoutPrefix == title) break
+        title = withoutPrefix
+    }
+    return title
+}
+
 private val fullUuidPattern = Regex(
     "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
 )
@@ -995,7 +1874,7 @@ fun isUsableSessionTitle(value: String?, sessionId: String = ""): Boolean {
 
 fun titleSourceLabel(value: String): String {
     return when (value.trim().lowercase()) {
-        "custom" -> "用户命名"
+        "custom", "homing" -> "用户命名"
         "agent" -> "Agent 标题"
         "first_prompt" -> "首条提问"
         "project" -> "项目名"

@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.agentpush.poc.AgentBrand
 import dev.agentpush.poc.ConnectionState
+import dev.agentpush.poc.TransportKind
 import dev.agentpush.poc.ui.theme.HomingPalette
 
 val CodexGreen = Color(0xFF4ADE80)
@@ -50,9 +51,10 @@ fun AgentBrand.accentColor(): Color {
 fun AgentAvatar(
     brand: AgentBrand,
     size: Dp = 46.dp,
+    source: String = brand.wire,
     modifier: Modifier = Modifier,
 ) {
-    val accent = brand.accentColor()
+    val accent = agentLogoColor(source) ?: brand.accentColor()
     Box(
         modifier = modifier
             .size(size)
@@ -60,12 +62,19 @@ fun AgentAvatar(
             .background(accent.copy(alpha = 0.16f)),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = brand.initial,
-            color = accent,
-            fontSize = (size.value * 0.38f).sp,
-            fontWeight = FontWeight.Bold,
-        )
+        if (agentLogoSpec(source) != null) {
+            AgentLogoMark(
+                source = source,
+                size = size * if (size <= 24.dp) 0.78f else 0.68f,
+            )
+        } else {
+            Text(
+                text = brand.initial,
+                color = accent,
+                fontSize = (size.value * 0.38f).sp,
+                fontWeight = FontWeight.Bold,
+            )
+        }
     }
 }
 
@@ -246,6 +255,7 @@ fun HomingCard(
 @Composable
 fun MacStatusPill(
     connection: ConnectionState,
+    transportKind: TransportKind = TransportKind.LAN,
     modifier: Modifier = Modifier,
 ) {
     val dotColor = when (connection) {
@@ -271,7 +281,7 @@ fun MacStatusPill(
                     .background(dotColor),
             )
             Text(
-                text = "我的 Mac",
+                text = "我的 Mac · ${transportKind.label}",
                 style = MaterialTheme.typography.labelMedium,
                 color = HomingPalette.Body,
                 maxLines = 1,

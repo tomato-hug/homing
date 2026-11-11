@@ -66,10 +66,19 @@ import dev.agentpush.poc.ui.theme.HomingMono
 @Composable
 fun AgentGlyph(
     brand: AgentBrand,
+    source: String = brand.wire,
     size: Dp = 20.dp,
     modifier: Modifier = Modifier,
     tint: Color = MaterialTheme.colorScheme.onSurface,
 ) {
+    if (agentLogoSpec(source) != null) {
+        AgentLogoMark(
+            source = source,
+            size = size,
+            modifier = modifier,
+        )
+        return
+    }
     val icon = when (brand) {
         AgentBrand.CODEX -> Icons.Outlined.Terminal
         AgentBrand.CLAUDE -> Icons.Outlined.AutoAwesome

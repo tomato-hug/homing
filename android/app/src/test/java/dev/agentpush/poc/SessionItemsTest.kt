@@ -38,6 +38,10 @@ class SessionItemsTest {
               "agents": [
                 {
                   "source": "codex",
+                  "display_name": "Codex CLI",
+                  "icon": "codex",
+                  "available": true,
+                  "installed": true,
                   "capabilities": {
                     "reply": true,
                     "new_session": true,
@@ -67,6 +71,9 @@ class SessionItemsTest {
         assertTrue(directory.available)
         assertTrue(profile.capabilities.switchModel)
         assertTrue(profile.capabilities.stop)
+        assertEquals("Codex CLI", profile.label)
+        assertTrue(profile.available)
+        assertTrue(profile.installed)
         assertEquals("gpt-5.6", profile.defaultModel)
         assertEquals("GPT-5.6", profile.defaultModelOption?.displayName)
         assertEquals(listOf("low", "high"), profile.models.single().efforts)
@@ -76,10 +83,90 @@ class SessionItemsTest {
     fun missingAgentsEndpointLeavesCapabilitiesConservative() {
         val profile = AgentDirectory().profile("claude")
 
+        assertFalse(profile.capabilities.newSession)
         assertFalse(profile.capabilities.switchModel)
         assertFalse(profile.capabilities.stop)
         assertFalse(profile.capabilities.effort)
         assertTrue(profile.capabilities.reply)
+    }
+
+    @Test
+    fun missingNewSessionCapabilityFailsClosed() {
+        val directory = parseAgentDirectory(
+            """
+            {
+              "agents": [
+                {
+                  "source": "opencode",
+                  "available": true,
+                  "installed": true,
+                  "capabilities": {
+                    "reply": false,
+                    "sessions": true
+                  }
+                }
+              ]
+            }
+            """.trimIndent(),
+        )
+
+        val profile = directory.profile("opencode")
+        assertTrue(profile.available)
+        assertFalse(profile.capabilities.newSession)
+        assertFalse(profile.supportsNewSession)
+        assertFalse(profile.isOnlineForNewSession)
+    }
+
+    @Test
+    fun legacyWorkBuddyCapabilityDoesNotEnableUnsafeNewSessions() {
+        val directory = parseAgentDirectory(
+            """
+            {
+              "agents": [
+                {
+                  "source": "workbuddy",
+                  "available": true,
+                  "installed": true,
+                  "capabilities": {
+                    "reply": true,
+                    "new_session": true
+                  }
+                }
+              ]
+            }
+            """.trimIndent(),
+        )
+
+        val profile = directory.profile("workbuddy")
+        assertTrue(profile.capabilities.newSession)
+        assertFalse(profile.supportsNewSession)
+        assertFalse(profile.isOnlineForNewSession)
+    }
+
+    @Test
+    fun explicitNewSessionReadinessEnablesAgent() {
+        val directory = parseAgentDirectory(
+            """
+            {
+              "agents": [
+                {
+                  "source": "workbuddy",
+                  "available": true,
+                  "installed": true,
+                  "capabilities": {
+                    "reply": true,
+                    "new_session": true,
+                    "new_session_ready": true
+                  }
+                }
+              ]
+            }
+            """.trimIndent(),
+        )
+
+        val profile = directory.profile("workbuddy")
+        assertTrue(profile.supportsNewSession)
+        assertTrue(profile.isOnlineForNewSession)
     }
 
     @Test
@@ -105,6 +192,81 @@ class SessionItemsTest {
         assertEquals("workbuddy/deepseek-v4.1-flash", profile.defaultModel)
         assertTrue(profile.models.first().isDefault)
         assertFalse(profile.capabilities.switchModel)
+    }
+
+    @Test
+    fun parsesConnectedAgentCatalogWithoutShowingDisconnectedRows() {
+        val catalog = AgentCatalog.fromJson(
+            JSONObject(
+                """
+                {
+                  "agents": [
+                    {
+                      "id": "codex",
+                      "name": "Codex",
+                      "vendor": "OpenAI",
+                      "icon": "codex",
+                      "detected": true,
+                      "connected": true,
+                      "available": true,
+                      "can_connect": true,
+                      "hook_installed": true
+                    },
+                    {
+                      "id": "opencode",
+                      "name": "OpenCode",
+                      "detected": true,
+                      "connected": false,
+                      "available": true,
+                      "can_connect": true
+                    }
+                  ],
+                  "summary": {
+                    "connected": 1,
+                    "detected": 1
+                  }
+                }
+                """.trimIndent(),
+            ),
+        )
+
+        assertTrue(catalog.available)
+        assertEquals(listOf("codex"), catalog.connected.map { it.id })
+        assertEquals(listOf("opencode"), catalog.connectable.map { it.id })
+        assertEquals(1, catalog.connectedCount)
+        assertEquals("codex", catalog.connected.single().logoSource)
+    }
+
+    @Test
+    fun parsesContentSearchSnippets() {
+        val hits = SessionSearchHit.listFromJson(
+            JSONObject(
+                """
+                {
+                  "hits": [
+                    {
+                      "session": {
+                        "session_id": "demo-session-search",
+                        "source": "kimi",
+                        "title": "示例会话"
+                      },
+                      "snippet": {
+                        "before": "前文 ",
+                        "match": "登入流程",
+                        "after": " 後文"
+                      },
+                      "item_id": "item-7"
+                    }
+                  ]
+                }
+                """.trimIndent(),
+            ),
+        )
+
+        assertEquals(1, hits.size)
+        assertEquals("kimi", hits.single().source)
+        assertEquals("前文 登入流程 後文", hits.single().snippet)
+        assertEquals("item-7", hits.single().itemId)
     }
 
     @Test
@@ -244,6 +406,49 @@ class SessionItemsTest {
         assertEquals(SessionItemType.APPROVAL, item.type)
         assertEquals(9L, item.eventId)
         assertEquals("pending", item.tool.status)
+    }
+
+    @Test
+    fun truncatedLiveItemDoesNotReplaceFullTranscript() {
+        val full = SessionItem(
+            id = "item-full",
+            ts = "2026-11-08T15:00:00Z",
+            type = SessionItemType.TOOL_CALL,
+            text = "完整內容".repeat(200),
+            tool = ItemTool(
+                name = "exec_command",
+                inputSummary = "cat demo.txt",
+                outputTail = "完整輸出".repeat(400),
+                exitCode = 0,
+                status = "done",
+            ),
+            files = listOf(
+                ItemFileChange(
+                    path = "demo.txt",
+                    added = 2,
+                    removed = 0,
+                    diff = "+完整 diff".repeat(200),
+                ),
+            ),
+        )
+        val truncated = full.copy(
+            text = "完整內容".repeat(10),
+            tool = full.tool.copy(outputTail = "完整輸出".repeat(10), status = "running"),
+            truncated = true,
+        )
+
+        val state = appendSessionItem(SessionItemsState(items = listOf(full)), truncated)
+        val merged = state.items.single()
+
+        assertEquals(full.text, merged.text)
+        assertEquals(full.tool.outputTail, merged.tool.outputTail)
+        assertEquals("running", merged.tool.status)
+        assertEquals(full.files.single().diff, merged.files.single().diff)
+        assertFalse(merged.truncated)
+        assertTrue(state.running)
+
+        val onlyLive = appendSessionItem(SessionItemsState(), truncated)
+        assertTrue(onlyLive.items.single().truncated)
     }
 
     @Test
@@ -399,5 +604,19 @@ class SessionItemsTest {
         assertFalse(payload.has("model"))
         assertFalse(payload.has("effort"))
         assertNotNull(payload.getString("text"))
+    }
+
+    @Test
+    fun replyPayloadCarriesPermissionMode() {
+        val payload = buildReplyPayload(
+            eventId = null,
+            sessionId = "session-1",
+            source = "claude",
+            text = "继续",
+            files = emptyList(),
+            permissionMode = "plan",
+        )
+
+        assertEquals("plan", payload.getString("permission_mode"))
     }
 }

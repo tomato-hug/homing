@@ -26,6 +26,48 @@ class SessionPresentationTest {
     }
 
     @Test
+    fun homingTitleWinsOverPromptAndProject() {
+        val resolved = resolveSessionTitle(
+            serverTitle = "手机端自訂名稱",
+            titleSource = "homing",
+            firstQuestion = "幫我看看連線",
+            eventTitle = "Codex 回覆",
+            project = "agent-push-poc",
+            sessionId = uuid,
+            source = "codex",
+        )
+
+        assertEquals("手机端自訂名稱", resolved.title)
+        assertEquals("homing", resolved.source)
+        assertEquals("用户命名", titleSourceLabel("homing"))
+    }
+
+    @Test
+    fun agentTitleWrapperIsCleanedWithoutTouchingCustomTitle() {
+        val native = resolveSessionTitle(
+            serverTitle = "标题：创建鹈鹕骑自行车SVG动画",
+            titleSource = "agent",
+            firstQuestion = "请做一个动画",
+            eventTitle = "Codex 回复",
+            project = "demo-project",
+            sessionId = uuid,
+            source = "codex",
+        )
+        val custom = resolveSessionTitle(
+            serverTitle = "标题：这是我自己取的名字",
+            titleSource = "homing",
+            firstQuestion = "请做一个动画",
+            eventTitle = "Codex 回复",
+            project = "demo-project",
+            sessionId = uuid,
+            source = "codex",
+        )
+
+        assertEquals("创建鹈鹕骑自行车SVG动画", native.title)
+        assertEquals("标题：这是我自己取的名字", custom.title)
+    }
+
+    @Test
     fun firstPromptBeatsProjectFallback() {
         val resolved = resolveSessionTitle(
             serverTitle = "agent-push-poc",
@@ -114,10 +156,13 @@ class SessionPresentationTest {
         val second = session(cwd = "/tmp/two", project = "same", lastTs = "2026-11-08T11:00:00Z")
 
         val projectGroups = groupSessions(listOf(first, second), SessionGrouping.PROJECT)
+        val agentGroups = groupSessions(listOf(first, second), SessionGrouping.AGENT)
         val timeGroups = groupSessions(listOf(first, second), SessionGrouping.TIME)
 
         assertEquals(2, projectGroups.size)
         assertEquals("/tmp/two", projectGroups.first().key)
+        assertEquals(1, agentGroups.size)
+        assertEquals("codex", agentGroups.first().sessions.first().brand.wire)
         assertEquals(1, timeGroups.size)
         assertEquals(2, timeGroups.first().sessions.size)
     }
@@ -128,6 +173,28 @@ class SessionPresentationTest {
         assertEquals(SessionQuickAction.REPLY, SessionStatus.WAITING_INPUT.quickAction())
         assertEquals(SessionQuickAction.VIEW, SessionStatus.RUNNING.quickAction())
         assertEquals(SessionQuickAction.VIEW, SessionStatus.COMPLETED.quickAction())
+    }
+
+    @Test
+    fun agentGroupingSplitsDynamicSources() {
+        val kimi = session(
+            cwd = "/tmp/kimi",
+            lastTs = "2026-11-08T10:00:00Z",
+            source = "kimi",
+        )
+        val dsh = session(
+            cwd = "/tmp/dsh",
+            lastTs = "2026-11-08T11:00:00Z",
+            source = "deepseek-harness",
+        )
+
+        val groups = groupSessions(listOf(kimi, dsh), SessionGrouping.AGENT)
+
+        assertEquals(2, groups.size)
+        assertEquals(
+            setOf("agent:kimi", "agent:deepseek-harness"),
+            groups.map { it.key }.toSet(),
+        )
     }
 
     @Test
@@ -281,6 +348,40 @@ class SessionPresentationTest {
         assertEquals(1, shared.copy(sessionApiAvailable = false).sessions().size)
     }
 
+    @Test
+    fun acpPermissionOptionsSurviveEventRoundTrip() {
+        val raw = JSONObject(
+            """
+            {
+              "id": 41,
+              "ts": "2026-11-08T10:00:00Z",
+              "source": "hermes",
+              "kind": "permission",
+              "session_id": "demo-session-acp",
+              "title": "请求授权",
+              "text": "写入文件",
+              "session_meta": {
+                "acp": {
+                  "options": [
+                    {"id": "allow_once", "label": "仅此次", "kind": "allow_once"},
+                    {"id": "allow_always", "label": "总是允许", "kind": "allow_always"},
+                    {"id": "reject_once", "label": "拒绝", "kind": "reject_once"}
+                  ]
+                }
+              }
+            }
+            """.trimIndent(),
+        )
+
+        val event = AgentEvent.fromJson(raw)
+
+        assertEquals(listOf("仅此次", "总是允许", "拒绝"), event.approvalOptions.map { it.label })
+        assertEquals(listOf("allow", "allow", "deny"), event.approvalOptions.map { it.decision })
+        val restored = AgentEvent.fromJson(event.toJson())
+        assertEquals(3, restored.approvalOptions.size)
+        assertEquals("allow_always", restored.approvalOptions[1].id)
+    }
+
     private fun session(
         cwd: String,
         project: String = "agent-push-poc",
@@ -288,10 +389,14 @@ class SessionPresentationTest {
         branch: String = "main",
         model: String = "gpt-5.6",
         lastTs: String = "2026-11-08T10:00:00Z",
+        source: String = "codex",
     ): SessionSummary {
         return SessionSummary(
             sessionId = "$cwd-$lastTs",
-            brand = AgentBrand.CODEX,
+            source = source,
+            brand = AgentBrand.fromWire(source),
+            agentLabel = if (source == "codex") "Codex" else source,
+            agentInitial = source.firstOrNull()?.uppercase().orEmpty(),
             title = "会话标题",
             titleSource = "agent",
             workspace = workspace,

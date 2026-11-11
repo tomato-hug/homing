@@ -7,6 +7,8 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,6 +17,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -24,6 +27,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -31,6 +35,7 @@ import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.AudioFile
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Mic
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -38,7 +43,6 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -58,12 +62,16 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.agentpush.poc.AgentBrand
+import dev.agentpush.poc.AgentProfile
 import dev.agentpush.poc.AgentViewModel
 import dev.agentpush.poc.NewSessionResult
 import dev.agentpush.poc.ProjectInfo
@@ -74,12 +82,14 @@ import dev.agentpush.poc.ui.AgentAvatar
 import dev.agentpush.poc.ui.ModelPickerSheet
 import dev.agentpush.poc.ui.ModelPill
 import dev.agentpush.poc.ui.accentColor
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NewSessionScreen(
     viewModel: AgentViewModel,
+    initialCwd: String = "",
     onBack: () -> Unit,
     onCreated: (String) -> Unit,
 ) {
@@ -87,7 +97,7 @@ fun NewSessionScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var agent by rememberSaveable { mutableStateOf("codex") }
-    var cwd by rememberSaveable { mutableStateOf("") }
+    var cwd by rememberSaveable(initialCwd) { mutableStateOf(initialCwd) }
     var text by rememberSaveable { mutableStateOf("") }
     var attachments by remember { mutableStateOf<List<PendingAttachment>>(emptyList()) }
     var creating by remember { mutableStateOf(false) }
@@ -98,11 +108,28 @@ fun NewSessionScreen(
     var workspaceFilter by rememberSaveable { mutableStateOf("") }
     var selectedModels by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var selectedEfforts by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var selectedPermissionModes by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var refreshingAgents by remember { mutableStateOf(false) }
+    var agentRefreshError by remember { mutableStateOf<String?>(null) }
 
     val projects = state.projects
+    val creatableAgents = remember(state.agentDirectory) {
+        state.agentDirectory.agents.values
+            .filter { it.supportsNewSession }
+            .sortedWith(
+                compareByDescending<AgentProfile> { it.isOnlineForNewSession }
+                    .thenBy(agentSortKey)
+                    .thenBy { it.source },
+            )
+    }
     val agentProfile = state.agentDirectory.profile(agent)
+    val selectedAgentOnline = agentProfile.isOnlineForNewSession
+    val onlineAgentCount = creatableAgents.count { it.isOnlineForNewSession }
     val modelForAgent = selectedModels[agent].orEmpty()
     val effortForAgent = selectedEfforts[agent].orEmpty()
+    val permissionModes = agentProfile.capabilities.permissionModes
+    val permissionForAgent = selectedPermissionModes[agent].orEmpty()
+        .ifBlank { "default" }
     val effectiveModel = modelForAgent.ifBlank {
         agentProfile.defaultModel.ifBlank {
             agentProfile.defaultModelOption?.id.orEmpty()
@@ -126,6 +153,29 @@ fun NewSessionScreen(
                 cwd = result.getOrNull()?.firstOrNull()?.cwd
                     ?: state.sessions().firstOrNull()?.cwd.orEmpty()
             }
+        }
+    }
+    LaunchedEffect(creatableAgents, agent) {
+        val selected = creatableAgents.firstOrNull { it.source == agent }
+        when {
+            selected == null -> {
+                val next = creatableAgents.firstOrNull { it.isOnlineForNewSession }
+                    ?: creatableAgents.firstOrNull()
+                if (next != null && next.source != agent) agent = next.source
+            }
+            !selected.isOnlineForNewSession -> {
+                creatableAgents.firstOrNull { it.isOnlineForNewSession }
+                    ?.let { agent = it.source }
+            }
+        }
+    }
+    LaunchedEffect(Unit) {
+        while (true) {
+            refreshingAgents = true
+            val result = viewModel.refreshAgentDirectory()
+            refreshingAgents = false
+            agentRefreshError = result.exceptionOrNull()?.message
+            delay(20_000)
         }
     }
 
@@ -217,25 +267,25 @@ fun NewSessionScreen(
                 .padding(horizontal = 18.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            SectionLabel("选择 Agent")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf(
-                    "codex" to AgentBrand.CODEX,
-                    "claude" to AgentBrand.CLAUDE,
-                    "workbuddy" to AgentBrand.WORKBUDDY,
-                ).forEach { (wire, brand) ->
-                    FilterChip(
-                        selected = agent == wire,
-                        onClick = { agent = wire },
-                        label = { Text(brand.displayName) },
-                        leadingIcon = { AgentAvatar(brand = brand, size = 23.dp) },
-                        shape = RoundedCornerShape(50),
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = brand.accentColor().copy(alpha = 0.16f),
-                        ),
-                    )
-                }
-            }
+            NewSessionAgentPicker(
+                agents = creatableAgents,
+                selectedAgent = agent.takeIf { selectedAgentOnline }.orEmpty(),
+                onlineCount = onlineAgentCount,
+                loading = refreshingAgents && creatableAgents.isEmpty(),
+                directoryAvailable = state.agentDirectory.available,
+                error = agentRefreshError,
+                onSelect = { agent = it },
+                onRefresh = {
+                    if (!refreshingAgents) {
+                        scope.launch {
+                            refreshingAgents = true
+                            val result = viewModel.refreshAgentDirectory()
+                            refreshingAgents = false
+                            agentRefreshError = result.exceptionOrNull()?.message
+                        }
+                    }
+                },
+            )
 
             SectionLabel("模型")
             Row(
@@ -271,6 +321,28 @@ fun NewSessionScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            if (permissionModes.isNotEmpty()) {
+                SectionLabel("权限模式")
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                    items(permissionModes) { mode ->
+                        FilterChip(
+                            selected = permissionForAgent == mode,
+                            onClick = {
+                                selectedPermissionModes =
+                                    selectedPermissionModes + (agent to mode)
+                            },
+                            label = { Text(permissionModeLabel(mode)) },
+                            shape = RoundedCornerShape(50),
+                        )
+                    }
+                }
+                Text(
+                    text = "权限模式会随新会话的启动参数一起提交；Agent 不支援的模式不会出现在这里。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
 
@@ -463,6 +535,8 @@ fun NewSessionScreen(
                         localFiles = attachments,
                         model = effectiveModel.takeIf { modelForAgent.isNotBlank() },
                         effort = effortForAgent.takeIf { it.isNotBlank() },
+                        permissionMode = permissionForAgent
+                            .takeIf { it.isNotBlank() && it != "default" },
                         onUploadProgress = { index, total, name, progress ->
                             if (creating) {
                                 uploadStage = "上传 ${index + 1}/$total · $name " +
@@ -501,7 +575,10 @@ fun NewSessionScreen(
                         }
                     }
                 },
-                enabled = !creating && cwd.isNotBlank() && text.isNotBlank(),
+                enabled = !creating &&
+                    selectedAgentOnline &&
+                    cwd.isNotBlank() &&
+                    text.isNotBlank(),
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(50.dp),
@@ -516,7 +593,13 @@ fun NewSessionScreen(
                     Spacer(Modifier.width(8.dp))
                     Text("正在启动…")
                 } else {
-                    Text(uploadStage ?: "启动任务")
+                    Text(
+                        uploadStage ?: if (selectedAgentOnline) {
+                            "启动 ${agentDisplayName(agentProfile)} 任务"
+                        } else {
+                            "没有在线 Agent"
+                        },
+                    )
                 }
             }
             Spacer(Modifier.height(28.dp))
@@ -560,6 +643,209 @@ fun NewSessionScreen(
                 }
             },
         )
+    }
+}
+
+@Composable
+internal fun NewSessionAgentPicker(
+    agents: List<AgentProfile>,
+    selectedAgent: String,
+    onlineCount: Int,
+    loading: Boolean,
+    directoryAvailable: Boolean,
+    error: String?,
+    onSelect: (String) -> Unit,
+    onRefresh: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        SectionLabel("选择 Agent")
+        Spacer(Modifier.weight(1f))
+        if (loading) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(15.dp),
+                strokeWidth = 2.dp,
+            )
+            Spacer(Modifier.width(8.dp))
+        }
+        IconButton(
+            onClick = onRefresh,
+            enabled = !loading,
+            modifier = Modifier
+                .size(36.dp)
+                .testTag("new-session-agent-refresh"),
+        ) {
+            Icon(
+                Icons.Outlined.Refresh,
+                contentDescription = "刷新 Agent 在线状态",
+                modifier = Modifier.size(18.dp),
+            )
+        }
+    }
+    Text(
+        text = when {
+            !directoryAvailable && !loading -> "正在等待电脑返回 Agent 状态…"
+            onlineCount == 0 -> "当前没有在线 Agent；离线项暂时不能选择"
+            else -> "$onlineCount 个 Agent 在线，离线项已禁用"
+        },
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    if (!error.isNullOrBlank()) {
+        Text(
+            text = "在线状态刷新失败：$error",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.error,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+    if (agents.isEmpty()) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("new-session-agent-empty"),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.34f),
+            shape = RoundedCornerShape(13.dp),
+        ) {
+            Text(
+                text = if (loading) {
+                    "正在检测可用的 Agent…"
+                } else {
+                    "没有可新建会话的 Agent，请先在电脑端完成接入。"
+                },
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 13.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    } else {
+        LazyRow(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("new-session-agent-list"),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            items(agents, key = { it.source }) { profile ->
+                NewSessionAgentCard(
+                    profile = profile,
+                    selected = selectedAgent == profile.source,
+                    onClick = { onSelect(profile.source) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun NewSessionAgentCard(
+    profile: AgentProfile,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    val online = profile.isOnlineForNewSession
+    val brand = profile.brand
+    val accent = brand.accentColor()
+    Surface(
+        onClick = onClick,
+        enabled = online,
+        modifier = Modifier
+            .width(166.dp)
+            .heightIn(min = 72.dp)
+            .alpha(if (online) 1f else 0.38f)
+            .testTag("new-session-agent-${profile.source}"),
+        shape = RoundedCornerShape(14.dp),
+        color = if (selected && online) {
+            accent.copy(alpha = 0.13f)
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.34f)
+        },
+        border = BorderStroke(
+            1.dp,
+            if (selected && online) {
+                accent.copy(alpha = 0.72f)
+            } else {
+                MaterialTheme.colorScheme.outline.copy(alpha = 0.18f)
+            },
+        ),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 11.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(9.dp),
+        ) {
+            AgentAvatar(
+                brand = brand,
+                source = profile.source,
+                size = 31.dp,
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = agentDisplayName(profile),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Row(
+                    modifier = Modifier.padding(top = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(6.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (online) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                },
+                            ),
+                    )
+                    Text(
+                        text = if (online) "在线" else "离线",
+                        modifier = Modifier.testTag(
+                            "new-session-agent-status-${profile.source}",
+                        ),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (online) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+private val agentSortKey: (AgentProfile) -> Int = { profile ->
+    when (profile.source) {
+        "codex" -> 0
+        "claude" -> 1
+        "workbuddy" -> 2
+        else -> 10
+    }
+}
+
+private fun agentDisplayName(profile: AgentProfile): String {
+    val brand = AgentBrand.fromWire(profile.source)
+    return if (brand == AgentBrand.UNKNOWN) profile.source else brand.displayName
+}
+
+private fun permissionModeLabel(value: String): String {
+    return when (value.trim().lowercase().replace('-', '_')) {
+        "", "default", "manual" -> "默认"
+        "plan" -> "计划"
+        "accept_edits", "auto" -> "自动接受编辑"
+        "read_only", "readonly" -> "只读"
+        else -> value
     }
 }
 

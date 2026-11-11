@@ -5,20 +5,55 @@ import dev.agentpush.poc.protocol.DeviceIdentity
 import dev.agentpush.poc.protocol.HomingCrypto
 import dev.agentpush.poc.protocol.HomingCryptoAndroid
 import dev.agentpush.poc.protocol.HomingEnvelope
+import dev.agentpush.poc.protocol.HomingKeyPair
 import dev.agentpush.poc.protocol.PairedComputer
 import dev.agentpush.poc.protocol.ProtocolUrls
+import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.time.Instant
+import java.util.Base64
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+
+data class CloudRpcResult(
+    val requestId: String,
+    val status: Int,
+    val body: Any?,
+)
+
+class CloudRpcException(message: String) : Exception(message)
+
+private data class PendingCloudRpc(
+    val serverUrl: String,
+    val continuation: CancellableContinuation<CloudRpcResult>,
+)
+
+private data class PendingCloudUpload(
+    val serverUrl: String,
+    val computerId: String,
+    val continuation: CancellableContinuation<CloudRpcResult>,
+)
+
+private data class PendingCloudDownload(
+    val serverUrl: String,
+    val computerId: String,
+    val continuation: CancellableContinuation<ByteArray>,
+    val output: ByteArrayOutputStream = ByteArrayOutputStream(),
+    var nextSeq: Int = 0,
+)
 
 /**
  * Receives end-to-end encrypted notification events over protocol v1.
@@ -51,11 +86,31 @@ class CloudNotificationClient(
          */
         fun onNotification(computer: PairedComputer, payload: NotifyPayload): Boolean
 
+        /**
+         * Receives a decrypted SSE-shaped event. Return true once it was
+         * handled so the relay can remove it from the offline queue.
+         */
+        fun onEvent(
+            computer: PairedComputer,
+            name: String,
+            data: JSONObject,
+        ): Boolean = true
+
         fun onStateChanged(server: String, state: State, detail: String?) = Unit
     }
 
     private val lock = Any()
     private val sessions = linkedMapOf<String, ServerSession>()
+    private val rpcLock = Any()
+    private val pendingRpc = mutableMapOf<String, PendingCloudRpc>()
+    private val fileLock = Any()
+    private val pendingUploads = mutableMapOf<String, PendingCloudUpload>()
+    private val pendingDownloads = mutableMapOf<String, PendingCloudDownload>()
+    private val seenEnvelopes = object : LinkedHashMap<String, Long>() {
+        override fun removeEldestEntry(
+            eldest: MutableMap.MutableEntry<String, Long>?,
+        ): Boolean = size > MAX_SEEN_ENVELOPES
+    }
     private var running = false
 
     fun start() {
@@ -96,6 +151,187 @@ class CloudNotificationClient(
         current.forEach(ServerSession::sendPushRegistration)
     }
 
+    suspend fun requestRPC(
+        computer: PairedComputer,
+        method: String,
+        path: String,
+        body: JSONObject? = null,
+        timeoutMillis: Long = DEFAULT_RPC_TIMEOUT_MILLIS,
+    ): CloudRpcResult {
+        require(path.startsWith("/api/")) { "云端 RPC 只能访问 /api/ 路径" }
+        val normalizedMethod = method.trim().uppercase().ifBlank { "GET" }
+        if (normalizedMethod !in ALLOWED_RPC_METHODS) {
+            throw CloudRpcException("云端请求方法不受支持")
+        }
+        val candidates = serverSessions(computer)
+        if (candidates.isEmpty()) {
+            throw CloudRpcException("这台电脑还没有可用连接")
+        }
+        val requestId = crypto.ulid()
+        val payload = JSONObject()
+            .put("type", "rpc")
+            .put("rid", requestId)
+            .put("method", normalizedMethod)
+            .put("path", path)
+        if (body != null) payload.put("body", body)
+
+        val startedAt = System.currentTimeMillis()
+        var lastError: Throwable? = null
+        for (candidate in candidates.sortedByDescending { it.second.isConnected() }) {
+            val remaining = timeoutMillis - (System.currentTimeMillis() - startedAt)
+            if (remaining <= 0) break
+            try {
+                return requestRPCOnSession(
+                    serverUrl = candidate.first,
+                    session = candidate.second,
+                    computer = computer,
+                    requestId = requestId,
+                    payload = payload,
+                    timeoutMillis = remaining,
+                )
+            } catch (error: Throwable) {
+                lastError = error
+            }
+        }
+        throw lastError ?: CloudRpcException("云端请求超时")
+    }
+
+    private suspend fun requestRPCOnSession(
+        serverUrl: String,
+        session: ServerSession,
+        computer: PairedComputer,
+        requestId: String,
+        payload: JSONObject,
+        timeoutMillis: Long,
+    ): CloudRpcResult {
+        val result = withTimeoutOrNull(timeoutMillis.coerceAtLeast(1L)) {
+            suspendCancellableCoroutine<CloudRpcResult> { continuation ->
+                synchronized(rpcLock) {
+                    pendingRpc[requestId] = PendingCloudRpc(serverUrl, continuation)
+                }
+                continuation.invokeOnCancellation {
+                    synchronized(rpcLock) { pendingRpc.remove(requestId) }
+                }
+                if (!session.sendEncrypted(computer, payload)) {
+                    failRPCRequest(requestId, "云端连接未就绪")
+                }
+            }
+        }
+        return result ?: throw CloudRpcException("云端请求超时")
+    }
+
+    suspend fun uploadFile(
+        computer: PairedComputer,
+        path: String,
+        bytes: ByteArray,
+        contentType: String = "application/octet-stream",
+        timeoutMillis: Long = DEFAULT_FILE_TIMEOUT_MILLIS,
+    ): CloudRpcResult {
+        require(path.startsWith("/api/upload")) { "云端文件上传只能写入 /api/upload" }
+        if (bytes.size > MAX_FILE_BYTES) {
+            throw CloudRpcException("單文件上限 20 MB")
+        }
+        val candidates = serverSessions(computer)
+        val (serverUrl, session) = candidates.firstOrNull { it.second.isConnected() }
+            ?: candidates.firstOrNull()
+            ?: throw CloudRpcException("這台電腦還沒有可用連接")
+        val fid = crypto.ulid()
+        val result = withTimeoutOrNull(timeoutMillis.coerceAtLeast(1L)) {
+            suspendCancellableCoroutine<CloudRpcResult> { continuation ->
+                val pending = PendingCloudUpload(
+                    serverUrl = serverUrl,
+                    computerId = computer.deviceId,
+                    continuation = continuation,
+                )
+                synchronized(fileLock) { pendingUploads[fid] = pending }
+                continuation.invokeOnCancellation {
+                    synchronized(fileLock) { pendingUploads.remove(fid, pending) }
+                }
+
+                fun sendChunks() {
+                    var seq = 0
+                    if (bytes.isEmpty()) {
+                        val payload = JSONObject()
+                            .put("type", "file.chunk")
+                            .put("fid", fid)
+                            .put("seq", 0)
+                            .put("last", true)
+                            .put("data", "")
+                            .put("path", path)
+                            .put("content_type", contentType)
+                        if (!session.sendEncrypted(computer, payload)) {
+                            failFileTransfer(fid, "雲端連接未就緒", upload = true)
+                        }
+                        return
+                    }
+                    var offset = 0
+                    while (offset < bytes.size) {
+                        val end = (offset + FILE_CHUNK_BYTES).coerceAtMost(bytes.size)
+                        val payload = JSONObject()
+                            .put("type", "file.chunk")
+                            .put("fid", fid)
+                            .put("seq", seq)
+                            .put("last", end == bytes.size)
+                            .put(
+                                "data",
+                                Base64.getEncoder().encodeToString(
+                                    bytes.copyOfRange(offset, end),
+                                ),
+                            )
+                        if (seq == 0) {
+                            payload.put("path", path)
+                            payload.put("content_type", contentType)
+                        }
+                        if (!session.sendEncrypted(computer, payload)) {
+                            failFileTransfer(fid, "雲端連接未就緒", upload = true)
+                            return
+                        }
+                        offset = end
+                        seq += 1
+                    }
+                }
+                sendChunks()
+            }
+        }
+        return result ?: throw CloudRpcException("雲端文件上傳超時")
+    }
+
+    suspend fun downloadFile(
+        computer: PairedComputer,
+        path: String,
+        timeoutMillis: Long = DEFAULT_FILE_TIMEOUT_MILLIS,
+    ): ByteArray {
+        if (!path.startsWith("/f/") || path.contains("..")) {
+            throw CloudRpcException("雲端附件下載只允許 /f/ 能力連結")
+        }
+        val candidates = serverSessions(computer)
+        val (serverUrl, session) = candidates.firstOrNull { it.second.isConnected() }
+            ?: candidates.firstOrNull()
+            ?: throw CloudRpcException("這台電腦還沒有可用連接")
+        val fid = crypto.ulid()
+        val result = withTimeoutOrNull(timeoutMillis.coerceAtLeast(1L)) {
+            suspendCancellableCoroutine<ByteArray> { continuation ->
+                val pending = PendingCloudDownload(
+                    serverUrl = serverUrl,
+                    computerId = computer.deviceId,
+                    continuation = continuation,
+                )
+                synchronized(fileLock) { pendingDownloads[fid] = pending }
+                continuation.invokeOnCancellation {
+                    synchronized(fileLock) { pendingDownloads.remove(fid, pending) }
+                }
+                val payload = JSONObject()
+                    .put("type", "file.request")
+                    .put("fid", fid)
+                    .put("path", path)
+                if (!session.sendEncrypted(computer, payload)) {
+                    failFileTransfer(fid, "雲端連接未就緒", upload = false)
+                }
+            }
+        }
+        return result ?: throw CloudRpcException("雲端附件下載超時")
+    }
+
     fun stop() {
         val current = synchronized(lock) {
             running = false
@@ -104,6 +340,8 @@ class CloudNotificationClient(
             copy
         }
         current.forEach(ServerSession::stop)
+        failPendingRPC(null, "云端连接已停止")
+        failPendingFiles(null, "云端连接已停止")
         scheduler.shutdownNow()
     }
 
@@ -115,10 +353,12 @@ class CloudNotificationClient(
         val grouped = LinkedHashMap<String, MutableList<PairedComputer>>()
         computers.forEach { computer ->
             if (computer.deviceId.isBlank()) return@forEach
-            val url = runCatching {
-                ProtocolUrls.normalizeWebSocketUrl(computer.server)
-            }.getOrNull() ?: return@forEach
-            grouped.getOrPut(url) { mutableListOf() }.add(computer)
+            computer.serverCandidates().forEach { raw ->
+                val url = runCatching {
+                    ProtocolUrls.normalizeWebSocketUrl(raw)
+                }.getOrNull() ?: return@forEach
+                grouped.getOrPut(url) { mutableListOf() }.add(computer)
+            }
         }
 
         val removed = sessions.keys.filterNot(grouped::containsKey)
@@ -149,6 +389,7 @@ class CloudNotificationClient(
         private var reconnectTask: ScheduledFuture<*>? = null
         private var heartbeatTask: ScheduledFuture<*>? = null
         private var backoffMillis = INITIAL_RECONNECT_MILLIS
+        private var connectedNow = false
 
         fun start() {
             val shouldConnect = synchronized(stateLock) {
@@ -165,6 +406,14 @@ class CloudNotificationClient(
             }
         }
 
+        fun carries(deviceId: String): Boolean {
+            return synchronized(stateLock) { computers.containsKey(deviceId) }
+        }
+
+        fun isConnected(): Boolean {
+            return synchronized(stateLock) { connectedNow }
+        }
+
         fun reconnectNow() {
             synchronized(stateLock) {
                 if (!started || stopped) return
@@ -175,7 +424,10 @@ class CloudNotificationClient(
                 socket = null
                 cancelHeartbeatLocked()
                 backoffMillis = INITIAL_RECONNECT_MILLIS
+                connectedNow = false
             }
+            failPendingRPC(serverUrl, "云端连接正在重连")
+            failPendingFiles(serverUrl, "云端连接正在重连")
             listener.onStateChanged(serverUrl, State.RECONNECTING, "网络恢复，立即重连")
             connect()
         }
@@ -190,7 +442,10 @@ class CloudNotificationClient(
                 cancelHeartbeatLocked()
                 socketToClose = socket
                 socket = null
+                connectedNow = false
             }
+            failPendingRPC(serverUrl, "云端连接已停止")
+            failPendingFiles(serverUrl, "云端连接已停止")
             socketToClose?.close(1000, "client stopped")
             listener.onStateChanged(serverUrl, State.STOPPED, null)
         }
@@ -206,6 +461,24 @@ class CloudNotificationClient(
                 .toString())
         }
 
+        fun sendEncrypted(computer: PairedComputer, payload: JSONObject): Boolean {
+            val active = synchronized(stateLock) { socket } ?: return false
+            return runCatching {
+                val recipientPublicKey = crypto.fromBase64(computer.publicKeyBase64)
+                val envelope = crypto.createEnvelope(
+                    from = identity.deviceId,
+                    to = computer.deviceId,
+                    payloadJson = payload.toString(),
+                    sender = HomingKeyPair(identity.publicKey, identity.secretKey),
+                    recipientPublicKey = recipientPublicKey,
+                )
+                active.send(envelope.toRelayJson().toString())
+            }.getOrElse {
+                Log.w(TAG, "Unable to encrypt RPC request", it)
+                false
+            }
+        }
+
         private fun connect() {
             val currentGeneration: Int
             synchronized(stateLock) {
@@ -213,6 +486,7 @@ class CloudNotificationClient(
                 reconnectTask?.cancel(false)
                 reconnectTask = null
                 currentGeneration = generation.incrementAndGet()
+                connectedNow = false
             }
             listener.onStateChanged(
                 serverUrl,
@@ -326,6 +600,7 @@ class CloudNotificationClient(
                 reconnectTask?.cancel(false)
                 reconnectTask = null
                 cancelHeartbeatLocked()
+                connectedNow = true
                 heartbeatTask = scheduler.scheduleWithFixedDelay(
                     {
                         if (isCurrent(currentGeneration)) {
@@ -361,6 +636,10 @@ class CloudNotificationClient(
             ) {
                 return
             }
+            if (!claimEnvelope(envelope.from, envelope.id)) {
+                acknowledge(webSocket, envelope.id)
+                return
+            }
             val computer = synchronized(stateLock) { computers[envelope.from] } ?: return
             val senderPublicKey = runCatching {
                 crypto.fromBase64(computer.publicKeyBase64)
@@ -372,16 +651,48 @@ class CloudNotificationClient(
                 return
             }
             val payload = runCatching { JSONObject(plaintext) }.getOrNull() ?: return
+            if (payload.optString("type") == "rpc_result") {
+                completeRPC(payload)
+                acknowledge(webSocket, envelope.id)
+                return
+            }
+            when (payload.optString("type")) {
+                "file.result" -> {
+                    completeFileTransfer(payload, computer)
+                    acknowledge(webSocket, envelope.id)
+                    return
+                }
+                "file.chunk" -> {
+                    acceptDownloadChunk(payload, computer)
+                    acknowledge(webSocket, envelope.id)
+                    return
+                }
+            }
             if (payload.optString("type") != "event") {
                 acknowledge(webSocket, envelope.id)
                 return
             }
             val name = payload.optString("name")
-            if (name != "notify") {
+            if (name.isBlank()) {
                 acknowledge(webSocket, envelope.id)
                 return
             }
             val data = payload.optJSONObject("data")
+            if (name != "notify") {
+                val delivered = data != null && runCatching {
+                    listener.onEvent(computer, name, data)
+                }.getOrElse {
+                    Log.e(TAG, "Event handler failed for $name", it)
+                    false
+                }
+                if (delivered) {
+                    acknowledge(webSocket, envelope.id)
+                } else {
+                    webSocket.close(1011, "event failed")
+                    connectionLost(currentGeneration, "本地事件处理失败")
+                }
+                return
+            }
             val notify = data?.let(NotifyPayload::fromJson)
             if (notify == null) {
                 acknowledge(webSocket, envelope.id)
@@ -401,6 +712,24 @@ class CloudNotificationClient(
             }
         }
 
+        private fun completeRPC(payload: JSONObject) {
+            val requestId = payload.optString("rid")
+            if (requestId.isBlank()) return
+            val pending = synchronized(rpcLock) {
+                pendingRpc[requestId]
+                    ?.takeIf { it.serverUrl == serverUrl }
+                    ?.let { pendingRpc.remove(requestId) }
+            } ?: return
+            val body = payload.opt("body")?.takeUnless { it == JSONObject.NULL }
+            pending.continuation.resume(
+                CloudRpcResult(
+                    requestId = requestId,
+                    status = payload.optInt("status", 0),
+                    body = body,
+                ),
+            )
+        }
+
         private fun acknowledge(webSocket: WebSocket, id: String) {
             webSocket.send(JSONObject().put("t", "ack").put("id", id).toString())
         }
@@ -411,6 +740,7 @@ class CloudNotificationClient(
                 if (currentGeneration != generation.get() || stopped) return
                 generation.incrementAndGet()
                 socket = null
+                connectedNow = false
                 cancelHeartbeatLocked()
                 backoffMillis = (backoffMillis * 2).coerceAtMost(MAX_RECONNECT_MILLIS)
                 delay = backoffMillis / 2
@@ -421,6 +751,8 @@ class CloudNotificationClient(
                     TimeUnit.MILLISECONDS,
                 )
             }
+            failPendingRPC(serverUrl, "云端连接已断开")
+            failPendingFiles(serverUrl, "云端连接已断开")
             listener.onStateChanged(serverUrl, State.RECONNECTING, detail)
         }
 
@@ -436,11 +768,164 @@ class CloudNotificationClient(
         }
     }
 
+    private fun serverSessions(
+        computer: PairedComputer,
+    ): List<Pair<String, ServerSession>> {
+        val seen = mutableSetOf<String>()
+        return buildList {
+            computer.serverCandidates().forEach { raw ->
+                val url = runCatching {
+                    ProtocolUrls.normalizeWebSocketUrl(raw)
+                }.getOrNull() ?: return@forEach
+                if (!seen.add(url)) return@forEach
+                val session = synchronized(lock) { sessions[url] } ?: return@forEach
+                if (session.carries(computer.deviceId)) add(url to session)
+            }
+        }
+    }
+
+    private fun claimEnvelope(from: String, id: String): Boolean {
+        val now = System.currentTimeMillis()
+        synchronized(seenEnvelopes) {
+            seenEnvelopes.entries.removeAll { now - it.value > SEEN_ENVELOPE_TTL_MILLIS }
+            val key = "$from:$id"
+            if (seenEnvelopes.containsKey(key)) return false
+            seenEnvelopes[key] = now
+            return true
+        }
+    }
+
+    private fun acceptDownloadChunk(payload: JSONObject, computer: PairedComputer) {
+        val fid = payload.optString("fid")
+        if (fid.isBlank()) return
+        val pending = synchronized(fileLock) {
+            pendingDownloads[fid]?.takeIf {
+                it.computerId == computer.deviceId
+            }
+        } ?: return
+        val seq = payload.optInt("seq", -1)
+        if (seq != pending.nextSeq) {
+            failFileTransfer(fid, "附件分塊序號不連續", upload = false)
+            return
+        }
+        val data = runCatching {
+            Base64.getDecoder().decode(payload.optString("data"))
+        }.getOrElse {
+            failFileTransfer(fid, "附件分塊格式錯誤", upload = false)
+            return
+        }
+        if (pending.output.size() + data.size > MAX_FILE_BYTES) {
+            failFileTransfer(fid, "單文件上限 20 MB", upload = false)
+            return
+        }
+        pending.output.write(data)
+        pending.nextSeq += 1
+        if (!payload.optBoolean("last", false)) return
+        val completed = synchronized(fileLock) {
+            pendingDownloads.remove(fid, pending)
+        }
+        if (completed) {
+            pending.continuation.resume(pending.output.toByteArray())
+        }
+    }
+
+    private fun completeFileTransfer(payload: JSONObject, computer: PairedComputer) {
+        val fid = payload.optString("fid")
+        if (fid.isBlank()) return
+        val upload = synchronized(fileLock) {
+            pendingUploads[fid]?.takeIf {
+                it.computerId == computer.deviceId
+            }
+        }
+        if (upload != null) {
+            val removed = synchronized(fileLock) { pendingUploads.remove(fid, upload) }
+            if (removed) {
+                upload.continuation.resume(
+                    CloudRpcResult(
+                        requestId = fid,
+                        status = payload.optInt("status", 0),
+                        body = payload.opt("body")?.takeUnless { it == JSONObject.NULL },
+                    ),
+                )
+            }
+            return
+        }
+        val download = synchronized(fileLock) {
+            pendingDownloads[fid]?.takeIf {
+                it.computerId == computer.deviceId
+            }
+        } ?: return
+        val removed = synchronized(fileLock) { pendingDownloads.remove(fid, download) }
+        if (!removed) return
+        val body = payload.optJSONObject("body")
+        val message = body?.optString("error")
+            ?.takeIf { it.isNotBlank() }
+            ?: "雲端附件下載失敗"
+        download.continuation.resumeWithException(CloudRpcException(message))
+    }
+
+    private fun failFileTransfer(fid: String, message: String, upload: Boolean) {
+        if (upload) {
+            val pending = synchronized(fileLock) { pendingUploads.remove(fid) } ?: return
+            pending.continuation.resumeWithException(CloudRpcException(message))
+        } else {
+            val pending = synchronized(fileLock) { pendingDownloads.remove(fid) } ?: return
+            pending.continuation.resumeWithException(CloudRpcException(message))
+        }
+    }
+
+    private fun failPendingFiles(serverUrl: String?, message: String) {
+        val uploads = synchronized(fileLock) {
+            val ids = pendingUploads.entries
+                .filter { serverUrl == null || it.value.serverUrl == serverUrl }
+                .map { it.key }
+            ids.mapNotNull { pendingUploads.remove(it) }
+        }
+        uploads.forEach {
+            it.continuation.resumeWithException(CloudRpcException(message))
+        }
+        val downloads = synchronized(fileLock) {
+            val ids = pendingDownloads.entries
+                .filter { serverUrl == null || it.value.serverUrl == serverUrl }
+                .map { it.key }
+            ids.mapNotNull { pendingDownloads.remove(it) }
+        }
+        downloads.forEach {
+            it.continuation.resumeWithException(CloudRpcException(message))
+        }
+    }
+
+    private fun failPendingRPC(serverUrl: String?, message: String) {
+        val failed = synchronized(rpcLock) {
+            val ids = pendingRpc.entries
+                .filter { serverUrl == null || it.value.serverUrl == serverUrl }
+                .map { it.key }
+            ids.mapNotNull { pendingRpc.remove(it) }
+        }
+        failed.forEach {
+            it.continuation.resumeWithException(CloudRpcException(message))
+        }
+    }
+
+    private fun failRPCRequest(requestId: String, message: String) {
+        val pending = synchronized(rpcLock) {
+            pendingRpc.remove(requestId)
+        } ?: return
+        pending.continuation.resumeWithException(CloudRpcException(message))
+    }
+
     companion object {
         private const val TAG = "HomingCloudWS"
         private const val INITIAL_RECONNECT_MILLIS = 1_000L
         private const val MAX_RECONNECT_MILLIS = 60_000L
         private const val HEARTBEAT_SECONDS = 25L
+        private const val DEFAULT_RPC_TIMEOUT_MILLIS = 20_000L
+        private const val DEFAULT_FILE_TIMEOUT_MILLIS = 90_000L
+        private const val FILE_CHUNK_BYTES = 48 * 1024
+        private const val MAX_FILE_BYTES = 20 * 1024 * 1024
+        private const val MAX_SEEN_ENVELOPES = 2_000
+        private const val SEEN_ENVELOPE_TTL_MILLIS = 10 * 60 * 1_000L
+        private val ALLOWED_RPC_METHODS = setOf("GET", "POST", "PATCH", "PUT", "DELETE")
 
         private fun defaultHttpClient(): OkHttpClient {
             return OkHttpClient.Builder()
@@ -452,3 +937,13 @@ class CloudNotificationClient(
         }
     }
 }
+
+private fun HomingEnvelope.toRelayJson(): JSONObject = JSONObject()
+    .put("v", v)
+    .put("t", t)
+    .put("id", id)
+    .put("from", from)
+    .put("to", to)
+    .put("ts", ts)
+    .put("nonce", nonce)
+    .put("ct", ct)

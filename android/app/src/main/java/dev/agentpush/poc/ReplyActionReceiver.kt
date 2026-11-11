@@ -12,7 +12,8 @@ class ReplyActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val action = intent.action ?: return
         if (action != NotificationHelper.ACTION_REPLY &&
-            action != NotificationHelper.ACTION_READ
+            action != NotificationHelper.ACTION_READ &&
+            action != NotificationHelper.ACTION_FORWARD
         ) {
             return
         }
@@ -39,7 +40,21 @@ class ReplyActionReceiver : BroadcastReceiver() {
         executor.execute {
             try {
                 runBlocking {
-                    if (action == NotificationHelper.ACTION_READ) {
+                    if (action == NotificationHelper.ACTION_FORWARD) {
+                        val dispatchId = intent.getStringExtra(
+                            NotificationHelper.EXTRA_DISPATCH_ID,
+                        ).orEmpty()
+                        if (dispatchId.isBlank()) return@runBlocking
+                        val result = store.forwardDispatch(dispatchId)
+                        NotificationHelper.updateReplyFallback(
+                            applicationContext,
+                            notificationId,
+                            sessionId,
+                            title,
+                            result.ok,
+                            result.message ?: if (result.ok) "已轉交給父 Agent" else "轉交失敗",
+                        )
+                    } else if (action == NotificationHelper.ACTION_READ) {
                         val ids = unreadIds.ifEmpty {
                             store.session(sessionId)?.events
                                 ?.filter { !it.read }

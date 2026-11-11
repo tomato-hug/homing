@@ -2,6 +2,7 @@ package dev.agentpush.poc.ui.screens
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -10,10 +11,13 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -22,18 +26,25 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowForward
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Code
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Computer
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,21 +54,25 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import dev.agentpush.poc.AgentBrand
+import dev.agentpush.poc.AgentCatalog
+import dev.agentpush.poc.AgentCatalogEntry
+import dev.agentpush.poc.AgentProfile
 import dev.agentpush.poc.AgentViewModel
 import dev.agentpush.poc.BuildConfig
 import dev.agentpush.poc.ConnectionState
+import dev.agentpush.poc.TransportKind
 import dev.agentpush.poc.ReminderPreferences
 import dev.agentpush.poc.ReminderSettings
 import dev.agentpush.poc.formatDiagnosticTime
 import dev.agentpush.poc.protocol.PairedComputer
 import dev.agentpush.poc.protocol.PairedComputerStore
-import dev.agentpush.poc.ui.AgentGlyph
+import dev.agentpush.poc.ui.AgentAvatar
 import dev.agentpush.poc.ui.HomingCard
 import dev.agentpush.poc.ui.HomingPigeon
 import dev.agentpush.poc.ui.PigeonState
@@ -65,21 +80,6 @@ import dev.agentpush.poc.ui.accentColor
 import dev.agentpush.poc.ui.serverHostLabel
 import dev.agentpush.poc.ui.theme.HomingMono
 import dev.agentpush.poc.ui.theme.HomingPalette
-
-private data class AgentEntry(
-    val name: String,
-    val brand: AgentBrand?,
-    val wire: String,
-    val note: String,
-)
-
-private val agentEntries = listOf(
-    AgentEntry("Codex", AgentBrand.CODEX, "codex", "CLI 与 IDE 会话"),
-    AgentEntry("Claude Code", AgentBrand.CLAUDE, "claude", "Stop / Notification 钩子"),
-    AgentEntry("WorkBuddy", AgentBrand.WORKBUDDY, "workbuddy", "桌面端活跃会话"),
-    AgentEntry("OpenCode", null, "opencode", "等待接入"),
-    AgentEntry("ZCode", null, "zcode", "等待接入"),
-)
 
 @Composable
 fun MeScreen(
@@ -92,6 +92,16 @@ fun MeScreen(
     var reminders by remember { mutableStateOf(ReminderPreferences.load(context)) }
     val computerStore = remember { PairedComputerStore(context) }
     var computers by remember { mutableStateOf(computerStore.load()) }
+    var activeDeviceId by remember {
+        mutableStateOf(computerStore.active()?.deviceId.orEmpty())
+    }
+    var addAgentOpen by remember { mutableStateOf(false) }
+    var busyAgentIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+
+    LaunchedEffect(state.lastUpdatedAt, state.transportKind, state.connection) {
+        computers = computerStore.load()
+        activeDeviceId = computerStore.active()?.deviceId.orEmpty()
+    }
 
     Column(
         modifier = Modifier
@@ -107,13 +117,17 @@ fun MeScreen(
             color = HomingPalette.Text,
         )
         MacConnectionCard(
-            server = state.settings.baseUrl,
+            server = if (state.transportKind == TransportKind.CLOUD) {
+                computers.firstOrNull { it.deviceId == activeDeviceId }?.server
+                    ?: state.settings.baseUrl
+            } else {
+                state.settings.baseUrl
+            },
             connection = state.connection,
+            transportKind = state.transportKind,
             lastConnected = state.connectionDiagnostics.lastConnectedAt,
             lastDisconnected = state.connectionDiagnostics.lastDisconnectedAt,
             reason = state.connectionDiagnostics.lastDisconnectReason,
-            away = state.away,
-            onAwayChange = viewModel::setAway,
             onReconnect = viewModel::reconnect,
             onOpenSettings = onOpenSettings,
         )
@@ -122,15 +136,38 @@ fun MeScreen(
         Spacer(Modifier.height(7.dp))
         CloudComputersCard(
             computers = computers,
+            activeDeviceId = activeDeviceId,
+            onSelect = { computer ->
+                computerStore.select(computer.deviceId)
+                activeDeviceId = computer.deviceId
+                viewModel.activateComputer(computer.deviceId)
+                viewModel.refresh()
+            },
             onAddComputer = onAddComputer,
         )
         Spacer(Modifier.height(18.dp))
         SectionTitle("Agent")
         Spacer(Modifier.height(7.dp))
-        AgentDirectoryCard(
-            connectedWires = state.agentDirectory.agents.keys,
-            directoryAvailable = state.agentDirectory.available,
-        )
+        val catalog = state.agentCatalog
+        if (catalog.available) {
+            AgentAccessCard(
+                catalog = catalog,
+                busyIds = busyAgentIds,
+                onSetConnected = { entry, connected ->
+                    busyAgentIds = busyAgentIds + entry.id
+                    viewModel.setAgentConnected(entry.id, connected) {
+                        busyAgentIds = busyAgentIds - entry.id
+                    }
+                },
+                onAddAgent = { addAgentOpen = true },
+            )
+        } else {
+            DetectedAgentCard(
+                profiles = state.agentDirectory.agents.values
+                    .filter { it.installed }
+                    .sortedBy { it.label.lowercase() },
+            )
+        }
         Spacer(Modifier.height(18.dp))
         SectionTitle("提醒")
         Spacer(Modifier.height(7.dp))
@@ -167,17 +204,31 @@ fun MeScreen(
             )
         }
     }
+
+    if (addAgentOpen) {
+        AgentPickerSheet(
+            catalog = state.agentCatalog,
+            busyIds = busyAgentIds,
+            onConnect = { entry ->
+                busyAgentIds = busyAgentIds + entry.id
+                viewModel.setAgentConnected(entry.id, true) { result ->
+                    busyAgentIds = busyAgentIds - entry.id
+                    if (result.isSuccess) addAgentOpen = false
+                }
+            },
+            onDismiss = { addAgentOpen = false },
+        )
+    }
 }
 
 @Composable
 private fun MacConnectionCard(
     server: String,
     connection: ConnectionState,
+    transportKind: TransportKind,
     lastConnected: Long?,
     lastDisconnected: Long?,
     reason: String?,
-    away: Boolean,
-    onAwayChange: (Boolean) -> Unit,
     onReconnect: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
@@ -186,7 +237,7 @@ private fun MacConnectionCard(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "局域网直连 · 我的 Mac",
+                        text = "${transportKind.label} · 我的 Mac",
                         style = MaterialTheme.typography.titleMedium,
                         color = HomingPalette.Text,
                     )
@@ -202,7 +253,7 @@ private fun MacConnectionCard(
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-                ConnectionStatePill(connection)
+                ConnectionStatePill(connection, transportKind)
             }
             Spacer(Modifier.height(10.dp))
             Text(
@@ -250,35 +301,6 @@ private fun MacConnectionCard(
                     Text("重新配对")
                 }
             }
-            HorizontalDivider(
-                modifier = Modifier.padding(vertical = 11.dp),
-                color = HomingPalette.NavBorder,
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "离开模式",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = HomingPalette.Text,
-                    )
-                    Text(
-                        text = "离开 Mac 时收紧提示，由中继保存事件",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = HomingPalette.Muted,
-                    )
-                }
-                Switch(
-                    checked = away,
-                    onCheckedChange = onAwayChange,
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = HomingPalette.Background,
-                        checkedTrackColor = HomingPalette.Brand,
-                    ),
-                )
-            }
         }
     }
 }
@@ -286,6 +308,8 @@ private fun MacConnectionCard(
 @Composable
 private fun CloudComputersCard(
     computers: List<PairedComputer>,
+    activeDeviceId: String,
+    onSelect: (PairedComputer) -> Unit,
     onAddComputer: () -> Unit,
 ) {
     HomingCard {
@@ -331,6 +355,7 @@ private fun CloudComputersCard(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .clickable { onSelect(computer) }
                             .padding(horizontal = 14.dp, vertical = 11.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -374,14 +399,22 @@ private fun CloudComputersCard(
                             )
                         }
                         Surface(
-                            color = HomingPalette.Brand.copy(alpha = 0.12f),
+                            color = if (computer.deviceId == activeDeviceId) {
+                                HomingPalette.Brand.copy(alpha = 0.16f)
+                            } else {
+                                HomingPalette.Raised
+                            },
                             shape = RoundedCornerShape(50),
                         ) {
                             Text(
-                                text = "已配对",
+                                text = if (computer.deviceId == activeDeviceId) "当前" else "切换",
                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
                                 style = MaterialTheme.typography.labelSmall,
-                                color = HomingPalette.Brand,
+                                color = if (computer.deviceId == activeDeviceId) {
+                                    HomingPalette.Brand
+                                } else {
+                                    HomingPalette.Muted
+                                },
                             )
                         }
                     }
@@ -408,62 +441,96 @@ private fun CloudComputersCard(
 }
 
 @Composable
-private fun AgentDirectoryCard(
-    connectedWires: Set<String>,
-    directoryAvailable: Boolean,
+private fun AgentAccessCard(
+    catalog: AgentCatalog,
+    busyIds: Set<String>,
+    onSetConnected: (AgentCatalogEntry, Boolean) -> Unit,
+    onAddAgent: () -> Unit,
 ) {
+    val connected = catalog.connected.sortedBy { it.displayName.lowercase() }
     HomingCard {
         Column {
-            agentEntries.forEachIndexed { index, entry ->
+            if (connected.isEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "还没有接入 Agent",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = HomingPalette.Text,
+                        )
+                        Text(
+                            text = "从本机已检测到的 Agent 中添加",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = HomingPalette.Muted,
+                        )
+                    }
+                    TextButton(onClick = onAddAgent) {
+                        Text("添加")
+                    }
+                }
+            }
+            connected.forEachIndexed { index, entry ->
                 if (index > 0) {
                     HorizontalDivider(
                         modifier = Modifier.padding(start = 54.dp),
                         color = HomingPalette.NavBorder,
                     )
                 }
-                val connected = entry.wire in connectedWires ||
-                    (directoryAvailable && entry.brand != null && connectedWires.isEmpty())
-                AgentRow(entry = entry, connected = connected)
+                AgentRow(
+                    entry = entry,
+                    busy = entry.id in busyIds,
+                    onSetConnected = { onSetConnected(entry, false) },
+                )
+            }
+            if (connected.isNotEmpty()) {
+                HorizontalDivider(color = HomingPalette.NavBorder)
+                OutlinedButton(
+                    onClick = onAddAgent,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                        .height(42.dp),
+                    shape = RoundedCornerShape(9.dp),
+                ) {
+                    Icon(
+                        Icons.Outlined.Add,
+                        contentDescription = null,
+                        modifier = Modifier.size(17.dp),
+                    )
+                    Spacer(Modifier.width(5.dp))
+                    Text("添加 Agent")
+                }
             }
         }
     }
 }
 
 @Composable
-private fun AgentRow(entry: AgentEntry, connected: Boolean) {
+private fun AgentRow(
+    entry: AgentCatalogEntry,
+    busy: Boolean,
+    onSetConnected: () -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 14.dp, vertical = 11.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        val tint = entry.brand?.accentColor() ?: HomingPalette.Muted
-        Box(
-            modifier = Modifier
-                .size(34.dp)
-                .clip(CircleShape)
-                .background(tint.copy(alpha = 0.13f)),
-            contentAlignment = Alignment.Center,
-        ) {
-            if (entry.brand != null) {
-                AgentGlyph(brand = entry.brand, size = 18.dp, tint = tint)
-            } else {
-                Icon(
-                    imageVector = if (entry.wire == "opencode") {
-                        Icons.Outlined.Code
-                    } else {
-                        Icons.Outlined.Terminal
-                    },
-                    contentDescription = null,
-                    tint = tint,
-                    modifier = Modifier.size(18.dp),
-                )
-            }
-        }
+        AgentAvatar(
+            brand = dev.agentpush.poc.AgentBrand.fromWire(entry.id),
+            source = entry.logoSource,
+            size = 38.dp,
+        )
         Spacer(Modifier.width(10.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = entry.name,
+                text = entry.displayName,
                 style = MaterialTheme.typography.bodyMedium.copy(
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Medium,
@@ -471,25 +538,227 @@ private fun AgentRow(entry: AgentEntry, connected: Boolean) {
                 color = HomingPalette.Text,
             )
             Text(
-                text = entry.note,
+                text = listOfNotNull(
+                    entry.vendor.takeIf { it.isNotBlank() },
+                    "已接入".takeIf { entry.connected },
+                    "钩子已连接".takeIf { entry.hookInstalled },
+                ).joinToString(" · ").ifBlank { "已接入" },
                 style = MaterialTheme.typography.labelSmall,
                 color = HomingPalette.Muted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
-        Surface(
-            color = if (connected) {
-                HomingPalette.Brand.copy(alpha = 0.12f)
-            } else {
-                HomingPalette.Raised
-            },
-            shape = RoundedCornerShape(50),
-        ) {
-            Text(
-                text = if (connected) "已接入" else "待接入",
-                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-                style = MaterialTheme.typography.labelSmall,
-                color = if (connected) HomingPalette.Brand else HomingPalette.Muted,
+        if (busy) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(22.dp),
+                strokeWidth = 2.dp,
+                color = HomingPalette.Brand,
             )
+        } else {
+            Switch(
+                checked = true,
+                onCheckedChange = { onSetConnected() },
+                modifier = Modifier.testTag("agent-toggle-${entry.id}"),
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = HomingPalette.Background,
+                    checkedTrackColor = HomingPalette.Brand,
+                ),
+            )
+        }
+    }
+}
+
+@Composable
+private fun DetectedAgentCard(profiles: List<AgentProfile>) {
+    HomingCard {
+        Column {
+            if (profiles.isEmpty()) {
+                Text(
+                    text = "没有检测到已安装的 Agent",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 18.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = HomingPalette.Muted,
+                )
+            } else {
+                profiles.forEachIndexed { index, profile ->
+                    if (index > 0) {
+                        HorizontalDivider(
+                            modifier = Modifier.padding(start = 54.dp),
+                            color = HomingPalette.NavBorder,
+                        )
+                    }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 11.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        AgentAvatar(
+                            brand = profile.brand,
+                            source = profile.source,
+                            size = 38.dp,
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = profile.label,
+                                style = MaterialTheme.typography.bodyMedium.copy(
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Medium,
+                                ),
+                                color = HomingPalette.Text,
+                            )
+                            Text(
+                                text = "本机已检测",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = HomingPalette.Muted,
+                            )
+                        }
+                        Surface(
+                            color = HomingPalette.Brand.copy(alpha = 0.12f),
+                            shape = RoundedCornerShape(50),
+                        ) {
+                            Text(
+                                text = "已检测",
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = HomingPalette.Brand,
+                            )
+                        }
+                    }
+                }
+                Text(
+                    text = "当前 Mac 服务未提供接入开关，升级后可直接在这里关闭接入。",
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5.sp),
+                    color = HomingPalette.Muted,
+                )
+            }
+        }
+    }
+}
+
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun AgentPickerSheet(
+    catalog: AgentCatalog,
+    busyIds: Set<String>,
+    onConnect: (AgentCatalogEntry) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val candidates = catalog.connectable
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = HomingPalette.Background,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 18.dp),
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 18.dp, end = 8.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "添加 Agent",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = HomingPalette.Text,
+                    )
+                    Text(
+                        text = "只列出本机已检测或已准备接入套件的 Agent",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = HomingPalette.Muted,
+                    )
+                }
+                IconButton(onClick = onDismiss) {
+                    Icon(Icons.Outlined.Close, contentDescription = "关闭 Agent 列表")
+                }
+            }
+            if (candidates.isEmpty()) {
+                Text(
+                    text = "没有更多可接入的 Agent",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 18.dp, vertical = 28.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = HomingPalette.Muted,
+                )
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 560.dp)
+                        .testTag("agent-picker-list"),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                        horizontal = 12.dp,
+                        vertical = 4.dp,
+                    ),
+                    verticalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    items(
+                        candidates,
+                        key = { "catalog-${it.id}" },
+                    ) { entry ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 8.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            AgentAvatar(
+                                brand = dev.agentpush.poc.AgentBrand.fromWire(entry.id),
+                                source = entry.logoSource,
+                                size = 32.dp,
+                            )
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(horizontal = 10.dp),
+                            ) {
+                                Text(
+                                    text = entry.displayName,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = HomingPalette.Text,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    text = if (entry.detected) "本机已检测" else "接入套件已准备",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = HomingPalette.Muted,
+                                )
+                            }
+                            if (entry.id in busyIds) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(21.dp),
+                                    strokeWidth = 2.dp,
+                                    color = HomingPalette.Brand,
+                                )
+                            } else {
+                                Button(
+                                    onClick = { onConnect(entry) },
+                                    shape = RoundedCornerShape(9.dp),
+                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                                        horizontal = 12.dp,
+                                        vertical = 7.dp,
+                                    ),
+                                ) {
+                                    Text("接入", fontSize = 12.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -615,14 +884,17 @@ private fun SettingsEntry(onClick: () -> Unit) {
 }
 
 @Composable
-private fun ConnectionStatePill(connection: ConnectionState) {
+private fun ConnectionStatePill(
+    connection: ConnectionState,
+    transportKind: TransportKind,
+) {
     val color = when (connection) {
         ConnectionState.CONNECTED -> HomingPalette.Brand
         ConnectionState.RECONNECTING -> HomingPalette.Warning
         ConnectionState.DISCONNECTED -> HomingPalette.Error
     }
     val label = when (connection) {
-        ConnectionState.CONNECTED -> "已连接"
+        ConnectionState.CONNECTED -> "${transportKind.label}已连接"
         ConnectionState.RECONNECTING -> "重连中"
         ConnectionState.DISCONNECTED -> "未连接"
     }
