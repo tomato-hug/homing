@@ -1,0 +1,25 @@
+# 单个 JSON 对象或 JSON 数组的 agent。
+# 支持 {"sessionId": "...", "messages": [...]}，也支持顶层直接是 messages 数组。
+id: my-json-agent
+name: My JSON Agent
+icon: generic
+
+detect:
+  bin: [my-json-agent]
+  paths:
+    - ~/.my-json-agent
+
+sessions:
+  source: json
+  glob: ~/.my-json-agent/sessions/*.json
+  format: generic-json
+  format_options:
+    session_id: sessionId
+    cwd: cwd
+    time: timestamp
+    role: role
+    text: content
+    user_values: [user, human]
+    assistant_values: [assistant, agent]
+
+push: poll

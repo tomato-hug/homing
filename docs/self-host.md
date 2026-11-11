@@ -111,14 +111,26 @@ default. If you use nginx, set `proxy_http_version 1.1` and forward the
 Start the local service first, listening on an address the phone can reach:
 
 ```sh
-homing serve --addr 0.0.0.0:18788
+homing serve --addr 0.0.0.0:18787
 ```
+
+For cloud/self-hosted pairing, first set the relay address in the console
+(`连接 › 中转与局域网`) or write it into `<data-dir>/cloud/peers.json` before
+restarting the service:
+
+```json
+{"version":1,"server":"wss://homing.example.com/v1/ws","peers":{}}
+```
+
+The console's `PUT /api/cloud/config` endpoint updates the same file and swaps
+the background connector without restarting `homing serve`. It is loopback-only
+and requires the console cookie or local owner token.
 
 Then, in another terminal, let the CLI create a single-use token and print the
 QR code:
 
 ```sh
-homing pair --serve http://127.0.0.1:18788
+homing pair --serve http://127.0.0.1:18787
 ```
 
 `homing pair` asks `homing serve` over a loopback-only control endpoint, prints

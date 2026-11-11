@@ -1,0 +1,24 @@
+# 一行一条 JSON 的 agent。把路径、格式和字段名改成它实际使用的值。
+id: my-agent
+name: My Agent
+icon: generic
+
+detect:
+  bin: [my-agent]
+  paths:
+    - ~/.my-agent
+
+sessions:
+  source: jsonl
+  glob: ~/.my-agent/sessions/*.jsonl
+  format: custom
+  format_options:
+    session_id: session_id
+    cwd: cwd
+    time: timestamp
+    role: role
+    text: content
+    user_values: [user, human]
+    assistant_values: [assistant, agent]
+
+push: poll

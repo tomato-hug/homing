@@ -373,7 +373,10 @@ grep -E '\[stream\]|\[hold\]|\[reply\]|\[away\]' ~/Projects/agent-push-poc/relay
 }
 ```
 
-按 `last_ts` 倒序；`?limit=`（默认 100，上限 500）、`?source=`、`?status=` 可选过滤，`cursor` 暂未实现（`next_cursor` 恒 `null`）。
+按 `last_ts` 倒序；`?limit=`（默认 100，上限 500）、`?source=`、`?status=`、
+`cursor=` 与 `zone=earlier` 可选过滤。返回的 `next_cursor` 是下一批的 offset；
+没有更多会话时为 `null`。`zone=earlier` 会排除 `/api/home` 已放入
+attention／resume 的会话。
 
 **标题四级回退（永不为空）**，`title_source` 标明取自哪一级：
 
@@ -724,7 +727,7 @@ Codex 走 `exec resume` 注入，Claude / WorkBuddy 走 Stop 钩子的 `block.re
 
 ## 已知限制
 
-- 事件和已读状态保存在内存，`events.jsonl` 用于重启后读回事件；服务重启后已读标记会恢复为未读。Android 端对已通知事件 ID 去重，避免重复提醒。
+- 事件、回覆、調度與離開時段會先追加到對應 JSONL，再寫入 `history.db`（SQLite，主檔與 WAL/SHM 均為 0600）；啟動時從 JSONL replay 修復兩者之間的中斷。已讀水位另存 `session-state.json`，重啟不會恢復成未讀。Android 端仍會對已通知事件 ID 去重，避免重複提醒。
 - 明文 HTTP 和通知直接回复仅为 PoC。只应在可信局域网使用，token 不要外传。
 - `8787` 属于 `ResetWatch`，本项目不再使用该端口；`/apk` 与钩子都只走 `18787`。
 - 手机回复目前只能送达 Codex（`codex exec resume` 续跑该 thread，属于另起进程执行同一 thread）；桌面 App 正在显示该 thread 时需要刷新才能看到新回合。
@@ -734,7 +737,7 @@ Codex 走 `exec resume` 注入，Claude / WorkBuddy 走 Stop 钩子的 `block.re
 - 能力链接一旦泄露，在 7 天内等于该目录的只读访问权；链接只应在可信局域网内转发。
 - 端口代理只支持 HTTP，不支持 WebSocket/SSE 长连接与 TLS 上游。
 - `POST /api/sessions/new` 的 WorkBuddy 分支依赖 App 运行时的会话级 ACP 端口（App 没有活跃会话时该端口不监听），且只能复用当前活跃会话（`reused_active`）。
-- `/api/sessions` 首次调用要建立缓存（本机约 3–5 秒），之后每次约 60–80ms；纯原生会话的 `status` 只能给 `done` / `error`（没有事件流）。
+- `/api/sessions` 首次扫描会把 Codex rollout 索引與 `session_index.jsonl` 建立快取；本機 97 個會話、32 份 rollout 的實測為第一次約 100ms、之後約 30–100ms，`source=codex` 約 30ms。純原生會話的 `status` 只能給 `done` / `error`（沒有事件流）。
 - `items` 只读文件尾部 2MB，超长会话更早的条目不会返回；`plan` 类型目前只有 Codex 的 `update_plan` 会产生。
 - Claude / WorkBuddy 没有显式的回合标记，`event: turn` 是用 user / assistant 消息近似出来的。
 - WorkBuddy 的 ACP 不支持切换模型（`switch_model_unsupported`），也没有 PermissionRequest 概念。

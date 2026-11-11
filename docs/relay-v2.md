@@ -301,3 +301,51 @@ default_model: probe.default_model || null,
 ```
 
 本次没有改 `relay/server.mjs`（该文件当时已有其他会话未提交的改动），所以 `/api/agents` 里这两家仍是 `models: []`。
+
+---
+
+## 10. Go 新增接口（2026-11-10，Node 无对应）
+
+以下接口只在新 Go 版存在，Node 18787 不会返回它们；客户端对 404 有回退。
+
+### `GET /api/home`
+
+三区注意力首页：`attention[]`（授权 → 等回复 → 错误 → 协作结果 → 完成 → 进展）、`running[]`、`resume[]`（最多 5 条）、`earlier.count`、`counts`、`away`。支持 `since_away`、`approval`、`collab` 和 `unread` 设置，正文见 `docs/homing-v3/SPEC.md` §5.3。
+
+### `GET /api/search`
+
+```jsonc
+{
+  "query": "登录",
+  "scope": "title",
+  "hits": [
+    {
+      "session": { /* /api/sessions 摘要同形 */ },
+      "snippet": { "before": "修正", "match": "登录", "after": "按钮" },
+      "item_id": "codex-i3"
+    }
+  ],
+  "searched": 40,
+  "truncated": false
+}
+```
+
+`scope=title` 查标题、项目、路径；`scope=content` 再逐会话读最近 300 条正文（最多 30 条命中）。中文按 rune 切片，不会截断 UTF-8。
+
+### 即时事件
+
+`/api/stream?session_id=<id>` 新增：
+
+```text
+event: item  data: {"session_id":"…","item":{…agent.Item…}}
+event: turn  data: {"session_id":"…","state":"running|idle","ts":"…"}
+```
+
+`internal/live` 以 1 秒轮询 `ItemReader` 尾部，首轮只建立水位；条目按 `seq` 单调发布，客户端仍应按 `item.id` 去重。最多同时跟 20 个会话，超过时淘汰最久未活动的跟踪器。
+
+### 安全
+
+- `GET/PATCH /api/devices` 的 `scopes` 为 `read` / `reply` / `drive`；空数组等于全有（兼容旧设备）。
+- 缺少 `drive` 时 `/api/compose`、`/api/sessions/new`、`/api/dispatch`、`forward/reply/cancel` 返回 403 `scope_denied`；缺少 `reply` 时 `/api/reply`、`/api/approvals/{id}` 返回 403。
+- `/api/compose`、`/api/sessions/new`、`/api/dispatch` 每设备每分鐘 20 次。
+- `audit.jsonl` 只允许白名单字段：时间、设备、动作、会话／dispatch id、目标 Agent、目录、授权决定；不写正文。

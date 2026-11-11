@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "http",
+            "url": "http://127.0.0.1:18787/hook/codex",
+            "timeout": 660
+          }
+        ]
+      }
+    ]
+  }
+}

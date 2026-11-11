@@ -260,7 +260,8 @@ curl -s -X DELETE $BASE/api/devices/6f7fd39686d1 -H "Authorization: Bearer <本�
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/connection` | 版本、端口、局域网地址、数据目录、开机自启、安全状态 |
+| GET | `/api/connection` | 版本、端口、局域网地址、数据目录、开机自启、安全状态、云中转连接状态 |
+| PUT | `/api/cloud/config` | 保存 / 清除云中转或自建中继的 WebSocket 地址；只接受本机回环请求，保存后立即重连 |
 | GET | `/api/stats` | 今日推送数 / 合并数 / P0·P1·P2 分布 + 暂停状态 |
 | GET | `/api/logs?limit=200` | homingd 日志尾部（token 与 `hm_` 令牌会打码） |
 | GET/POST | `/api/setup` | 首次设置状态 / 标记完成 |
@@ -270,11 +271,16 @@ curl -s -X DELETE $BASE/api/devices/6f7fd39686d1 -H "Authorization: Bearer <本�
 | POST | `/api/agents/<id>/hooks` | 装钩子（只自动改 Claude 的 settings.json，先备份） |
 | GET/PUT | `/api/agents/settings`、`/api/agents/order` | 每个 agent 的接入设置（推不推手机、推送方式、回复方式、模型）+ 卡片顺序 |
 | GET/PATCH | `/api/agents/<id>/settings` | 改单个 agent 的接入设置 |
-| POST | `/api/agents/<id>/test-push` | 试发一条到测试会话（**占位**：等 relay 接上推送管线） |
+| POST | `/api/agents/<id>/test-push` | 经已配对的 LAN／云端通道试发一条测试通知；返回 `delivered`，无通道时 503 |
 | POST | `/api/agents/<id>/disconnect` | 断开 Homing 这边的接入（不动 agent 自己的配置文件） |
 | GET/POST | `/api/adapters` | 接入清单列表 / 保存到 `~/.homing/agents/<id>.yaml`（**清单解析归 relay**） |
 | POST | `/api/adapters/test` | 测试读取某个路径（只看形状，不落盘） |
 | DELETE | `/api/adapters/<id>` | 删除清单文件 |
+
+`PUT /api/cloud/config` 的请求体是 `{"server":"wss://relay.example.com/v1/ws"}`；
+传空字符串会停止当前 connector，但不会删除已配对设备。地址先经过
+`ws` / `wss` / `http` / `https` 校验，再写入 `cloud/peers.json`，校验或写入失败时
+不会替换正在使用的连接。控制台「连接 › 中转与局域网」使用同一接口。
 
 ---
 
@@ -306,7 +312,7 @@ curl -s -X DELETE $BASE/api/devices/6f7fd39686d1 -H "Authorization: Bearer <本�
 两个约定：
 
 1. **接入状态以配置文件为准**。`/api/agents/settings` 里没被用户动过的 agent，`connected` 由「配置文件里有没有 `127.0.0.1:<port>/hook/`」推出来，否则升级上来的老用户会看到所有 agent 都「未接入」。
-2. **接入页的写操作分两半**。清单文件的解析、`/api/ingest`、脚本适配器加载归 relay（DSH）；控制台这边只做界面 + 三个接口的形状，`/api/agents/<id>/test-push` 目前返回 `placeholder: true`。
+2. **接入页的写操作分两半**。清单文件的解析、`/api/ingest`、脚本适配器加载归 relay（DSH）；控制台这边只做界面 + 三个接口的形状。`/api/agents/<id>/test-push` 已接真实通知通道，但不会向 Agent 会话写入消息。
 
 ---
 

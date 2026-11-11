@@ -35,21 +35,34 @@ cmd/homing/                  电脑端入口                                   W
 internal/cli/                子命令注册表（homing pair、homing agents …）   各自注册
 cmd/homing-server/           云中转入口                                   Codex
 internal/agent/              Agent 接口与注册表（已有，改接口先在汇报里说） WorkBuddy
-internal/agent/<id>/         内置 agent：codex claude workbuddy opencode zcode …  WorkBuddy；新 agent 由 DSH 加
+internal/agent/<id>/         内置 agent：codex claude workbuddy kimi opencode zcode …  WorkBuddy；新 agent 由 DSH 加
 internal/agent/builtin/      一行一个 import，汇总内置 agent              谁加 agent 谁加一行
 internal/api/                本机 HTTP：/api/*、SSE、/console              WorkBuddy
+internal/api/search.go       标题/正文搜索（FTS 索引 + 内存回退）            WorkBuddy
+internal/live/               会话增量条目尾随与 item/turn SSE              新增
 internal/files/              附件、能力链接与 /f 文件解析                   G1 兼容层
 internal/relayapi/           hooks、上传、会话操作、设备与下载兼容路由      G1 兼容层
+internal/orchestrator/       跨 Agent 调度：任务校验、父子关联、启动状态  G1 新增
+internal/mcpserver/          stdio MCP：固定父会话的 homing.dispatch 桥接  G1/P4 新增
+internal/library/            本机能力索引：技能、指令、套件、审计与可回滚导入  G1 新增
+internal/driver/             ACP 驱动、权限映射、会话管理与 drive-test       G2/P2 新增
+internal/searchindex/        正文搜索旁路索引（FTS5，可增量重建）              G1 新增
+internal/agentconfig/        控制台的 agent 设置、排序与钩子安装          G1 兼容层
 internal/store/              已读/置顶/静音/归档、已配对设备、令牌          WorkBuddy
 internal/notify/             P0/P1/P2 分级、30 秒合并、暂停推送              WorkBuddy
 internal/platform/           数据目录、各 agent 路径、WSL、开机自启          WorkBuddy
-internal/adapter/            自定义 agent：清单引擎、脚本适配器、事件上报    DSH
+internal/adapter/            自定义 agent：清单引擎、脚本适配器、事件上报、agent catalog  DSH
+internal/adapter/catalogdata/ 已核实清单的内嵌副本（和 adapters/ 逐字节对照）  DSH
 internal/protocol/           协议 v1 的 Go 实现                            Codex
 internal/cloud/              连云中转 + 局域网直连 /v1/ws                   Codex
 internal/server/             homing-server 的实现                          Codex
 internal/gui/                Wails v3：托盘、托盘面板、主窗口、点击动画帧   WorkBuddy
+internal/tui/                终端界面                                       G5
+internal/updater/            更新检查、校验与替换                            G5
 web/console/                 控制台静态页（由 console/ 构建）               WorkBuddy
 build/icon/                  图标与托盘动画帧生成程序                       WorkBuddy
+scripts/install.sh           安装脚本、SHA-256 校验与 PATH 提示              G5
+Dockerfile / .github/        Docker 镜像与 tag 发布流水线                    G5
 android/  packages/          不变                                          Codex
 relay/  server/  desktop/    旧 Node / Tauri 版，Go 版对照通过后移到 legacy/
 ```
@@ -59,11 +72,14 @@ relay/  server/  desktop/    旧 Node / Tauri 版，Go 版对照通过后移到 
 - 运行时才知道的 agent（清单、脚本）用 `agent.RegisterProvider(...)`。
 - 路由在各自包的 `init()` 里 `api.Register(name, order, func(mux, deps){...})`，用 Go 1.22 的路由写法（`"GET /api/agents"`）。
 - 子命令同理：在自己包的 `init()` 里 `cli.Register(cli.Command{Name: "pair", Summary: "…", Run: …})`（`internal/cli`），`homing help` 会自动列出；`homing pair` 由 internal/cloud 注册，`homing agents test` 由 internal/adapter 注册。
+- `homing mcp` 由 `internal/mcpserver` 注册。它只允许固定一个父会话，不把父会话
+  或本机 token 暴露成工具参数；只能启动一个新的跨 Agent 子任务，不能读会话正文、
+  回覆父 Agent 或自动转交结果。
 - `cmd/homing` 已经空导入 `internal/adapter`、`internal/cloud`、`internal/agent/builtin`，DSH 和 Codex 不用改 main.go。
 
 ## 4. Agent 接口
 
-骨架已提交，见 `internal/agent/agent.go`。必须实现：`ID / Name / Icon / PushSignal / Capabilities / Detect / ListSessions / Meta`；可选：`ReadItems / IsEmptySession / Reply / Models / Watch`，实现了就算支持，`/api/agents` 的 `capabilities` 由此生成。JSON 字段先按 Node 版写了，WorkBuddy 迁第一个 agent 时以 Node 实际输出为准校正；校正后其他人以代码为准。
+骨架已提交，见 `internal/agent/agent.go`。必须实现：`ID / Name / Icon / PushSignal / Capabilities / Detect / ListSessions / Meta`；可选：`ReadItems / IsEmptySession / Reply / Models / Watch / SessionStarter / Stopper / PermissionResponder`，实现了就算支持，`/api/agents` 的 `capabilities` 由此生成。另有独立的 `QueuedReplyCanceller`：只给能精確撤回尚未執行回覆的 Agent 實作（目前是 Codex），不支援時 `/api/replies/{id}/cancel` 明確回 409。JSON 字段先按 Node 版写了，WorkBuddy 迁第一个 agent 时以 Node 实际输出为准校正；校正后其他人以代码为准。
 
 会话读取沿用 Magpie 的三种策略：`line`（标准 JSONL 逐行）、`grow`（长 JSONL 记偏移量增量读）、`whole`（整个 JSON / SQLite 一次读）。认不出格式的 JSONL 默认按 Claude Code 格式解析（很多 agent 照抄了它）。
 
@@ -79,6 +95,16 @@ relay/  server/  desktop/    旧 Node / Tauri 版，Go 版对照通过后移到 
 | WebSocket | `github.com/coder/websocket` |
 
 SQLite 一律用 `modernc.org/sqlite`（纯 Go，不需要 cgo）。
+
+### 5.1 本地历史层
+
+`internal/store` 仍把 `events.jsonl`、`replies.jsonl`、`dispatches.jsonl` 和
+`away-periods.jsonl` 当作第一写入点与兼容／导出格式；写入成功后再更新
+`history.db`。启动时会把 JSONL replay 进 SQLite，修复进程在两次写入之间退出留下的
+缺口。SQLite 的表是 `events`、`replies`、`dispatches`、`away_periods`；事件的已读
+标记独立存列，JSONL replay 不会把已读事件改回未读。主库和 WAL/SHM 都固定为 0600，
+数据目录为 0700；`homing serve` 和桌面版退出时会调用 `Deps.Close()`，让 SQLite
+正常收尾。正文全文搜索仍用独立的 `index.db`，不混进历史库。
 
 ## 6. 从 Node 切到 Go（对照测试）
 
@@ -125,7 +151,11 @@ SQLite 一律用 `modernc.org/sqlite`（纯 Go，不需要 cgo）。
 
 - Wails v3（锁定确切版本号，不用 @latest）。托盘用它自带的托盘接口：Mac 用模板图标，Windows 用彩色图标；托盘面板是挂在托盘图标上的窗口。
 - 控制台页面就是 web/console，窗口直接加载内嵌页面；浏览器访问 http://127.0.0.1:18787/console 看到的是同一套。
+- 改 `console/` 后运行 `bash scripts/build-console.sh`，它会把 Vite 的 `dist/` 同步到 `web/console/`，再由 `go:embed` 打进 `homing`。不要手改 `web/console/`。
 - 托盘点击动画：照 Magpie 的做法，在构建时由 `build/icon/gen.go` 按 docs/homing-v2/pigeon_v2.json 的「轻点」场景逐帧生成 PNG（30 ms 一帧，约 20 帧），运行时逐帧换图标；状态图标（有新消息、等你处理、离线、出错）也由它生成。设计稿在画布「动效 v2 分镜」页。
+- 2026-11-10 落地：无参数 `homing` 已在隔离端口启动本机服务、Wails 主窗口、托盘菜单与 `/console/tray` 面板；关窗只隐藏，退出托盘才结束进程。
+- 控制台会话工作台已完成：1000 条会话与 2000 条正文分批渲染、正文/正文搜索、回覆、授权、`@` 派发、协作卡、导出与手机宽度布局。
+- Agent 页展示 57 家支援目录，按「已接入／本机检测／快速接入／更多适配」横向分区；资源库页已接 L1 本机能力索引、安装计划、回滚、来源与审计。
 
 ## 8. 发布（G4–G5，参照 Magpie）
 
@@ -133,6 +163,7 @@ SQLite 一律用 `modernc.org/sqlite`（纯 Go，不需要 cgo）。
 - `curl -fsSL …/install.sh | sh`、`go install github.com/tomato-hug/homing/cmd/homing@latest`。
 - 后台自动更新，校验 sha256 后替换。
 - 打 tag 自动出版本（GitHub Actions）。
+- 已落地：`Dockerfile`、`.dockerignore`、`scripts/install.sh`、`.github/workflows/release.yml`、`internal/updater` 与 `homing update`。没有可用 tag 时无法在本地完整跑 GitHub Release 流程；发布签名/公证仍需在持有证书的机器上执行。
 
 ## 9. 阶段
 
@@ -141,7 +172,7 @@ SQLite 一律用 `modernc.org/sqlite`（纯 Go，不需要 cgo）。
 | G1 | store、platform、notify、api；把 codex / claude / workbuddy / opencode / zcode 从 relay/scanners 翻成 Go（含回复注入）；`homing serve`、`homing ls`；对照测试全过 | WorkBuddy |
 | G2 | internal/adapter：清单引擎、脚本适配器（Go 内嵌一个 runner.mjs，用子进程跑 node 或 bun，标准输入输出一行一个 JSON 调用）、事件上报和令牌、/api/adapters 系列；adapters/ 示例在 Go 版下跑通；`homing agents test` | DSH |
 | G3 | internal/protocol 跑通测试向量；homing-server 移植（server/ 的测试用例照搬）；internal/cloud；`homing pair` | Codex |
-| G4 | Wails v3 界面、托盘动画帧、控制台内嵌、Mac / Windows 安装包、切换开机启动 | WorkBuddy |
-| G5 | TUI、自动更新、install.sh、发布流水线、Docker 镜像 | 待定 |
+| G4 | Wails v3 界面、托盘、控制台内嵌与开机启动（代码已落地；安装包签名/公证待证书环境验证） | WorkBuddy |
+| G5 | TUI、自动更新、install.sh、发布流水线、Docker 镜像（代码与本地构建已落地；tag 发布待远端验证） | 待定 |
 
 G1 / G2 / G3 可以同时开工，各写各的目录。
