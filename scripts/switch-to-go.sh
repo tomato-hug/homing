@@ -139,6 +139,8 @@ cat > "$GO_PLIST" <<PLIST
 	<dict>
 		<key>PATH</key>
 		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin</string>
+		<key>APK_PATH</key>
+		<string>$REPO/android/app/build/outputs/apk/debug/app-debug.apk</string>
 	</dict>
 	<key>RunAtLoad</key>
 	<true/>
@@ -175,6 +177,11 @@ else
   echo "没有查到局域网 IP（未连 Wi‑Fi？），跳过局域网检查"
 fi
 lsof -nP -iTCP:$PORT -sTCP:LISTEN | tail -n +2
+if curl -fsS -m 3 -o /dev/null -I "http://127.0.0.1:$PORT/apk"; then
+  echo "安卓安装包可从 http://${LAN_IP:-<电脑IP>}:$PORT/apk 下载"
+else
+  echo "提示：/apk 暂不可用（还没构建过 android/app/build/outputs/apk/debug/app-debug.apk）"
+fi
 
 step "完成"
 echo "Go 版已接管 $PORT，并会在登录时自动启动（$GO_PLIST）。"
