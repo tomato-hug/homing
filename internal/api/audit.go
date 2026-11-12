@@ -31,6 +31,7 @@ var auditAllowedKeys = map[string]bool{
 // identifiers and action names; request bodies and agent output never enter
 // this file.
 func (d *Deps) Audit(r *http.Request, action string, fields map[string]any) {
+	d.recordAuditFlow(r, action, fields)
 	entry := map[string]any{
 		"at":     time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
 		"action": action,

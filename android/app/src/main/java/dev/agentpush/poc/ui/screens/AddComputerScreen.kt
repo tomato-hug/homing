@@ -35,6 +35,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -60,6 +61,9 @@ import dev.agentpush.poc.protocol.PairingInvite
 import dev.agentpush.poc.protocol.ProtocolPairingClient
 import dev.agentpush.poc.PushService
 import dev.agentpush.poc.ui.HomingCard
+import dev.agentpush.poc.ui.HomingPigeonScene
+import dev.agentpush.poc.ui.PigeonCrop
+import dev.agentpush.poc.ui.PigeonScene
 import dev.agentpush.poc.ui.theme.HomingMono
 import dev.agentpush.poc.ui.theme.HomingPalette
 import kotlinx.coroutines.launch
@@ -80,6 +84,8 @@ private sealed interface PairingUiState {
 fun AddComputerScreen(
     onBack: () -> Unit,
     onPaired: () -> Unit,
+    initialInvite: String? = null,
+    onInviteConsumed: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val preferences = remember {
@@ -150,6 +156,20 @@ fun AddComputerScreen(
                 }
             },
         )
+    }
+
+    // 从电脑二维码的落地页（/get）或系统相机点进来：带着配对链接，直接开始配对
+    LaunchedEffect(initialInvite) {
+        val raw = initialInvite ?: return@LaunchedEffect
+        onInviteConsumed()
+        runCatching { PairingInvite.parse(raw) }
+            .onSuccess { invite ->
+                server = invite.server
+                startPairing(invite = invite)
+            }
+            .onFailure {
+                status = PairingUiState.Failed(it.message ?: "配对链接无效")
+            }
     }
 
     val scanner = rememberLauncherForActivityResult(ScanContract()) { result ->
@@ -467,11 +487,13 @@ private fun AcceptedCard(computer: PairedComputer, onDone: () -> Unit) {
             modifier = Modifier.padding(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Icon(
-                Icons.Outlined.CheckCircle,
-                contentDescription = null,
-                tint = HomingPalette.Brand,
-                modifier = Modifier.size(38.dp),
+            // 配对成功：鸽子从电脑飞到手机，落定后停在那一帧
+            HomingPigeonScene(
+                scene = PigeonScene.PAIR,
+                size = 84.dp,
+                crop = PigeonCrop.STAGE,
+                hold = true,
+                contentDescription = "配对成功",
             )
             Text(
                 text = "电脑已添加",

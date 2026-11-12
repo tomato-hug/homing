@@ -86,6 +86,9 @@ export function renderAgents(ctx: PageContext): PageResult {
   let query = "";
   const expanded = new Set<string>();
   let dragId: string | null = null;
+  // 从首页「详情」进来时展开那一个 Agent
+  const focusId = new URLSearchParams(location.search).get("focus");
+  if (focusId) expanded.add(focusId);
 
   const libraryHead = h(
     "div",
@@ -93,8 +96,8 @@ export function renderAgents(ctx: PageContext): PageResult {
     h(
       "div",
       { class: "agent-library-copy" },
-      h("h1", { text: "Agent 支援庫" }),
-      h("p", { text: "按真實能力接入；打開詳情可查看鉤子、命令與本機路徑。" }),
+      h("h1", { text: "全部 Agent" }),
+      h("p", { text: "按真实能力接入；展开可查看钩子、命令与本机路径。日常接入在首页完成。" }),
     ),
   );
   const tabsHost = h("div", { class: "segmented agent-filter" });

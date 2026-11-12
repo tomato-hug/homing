@@ -1,10 +1,13 @@
 import "./styles.css";
 import { h, clear, icon } from "./lib/dom";
-import { icons, pigeon } from "./lib/icons";
+import { icons } from "./lib/icons";
+import { createPigeon, type PigeonPlayer } from "./lib/pigeon";
 import { endpoints, poll, type ConnectionInfo, type Inbox } from "./lib/api";
 import { pill } from "./lib/ui";
 import { renderInbox } from "./pages/inbox";
 import { renderHome } from "./pages/home";
+import { renderHub } from "./pages/hub";
+import { renderFlow } from "./pages/flow";
 import { renderCollab } from "./pages/collab";
 import { renderSessions } from "./pages/sessions";
 import { renderAgents } from "./pages/agents";
@@ -45,11 +48,13 @@ interface Route {
 
 const routes: Route[] = [
   { path: "/console/tray", crumbs: ["Homing"], iconSvg: icons.overview, render: renderTray },
-  { path: "/console/", crumbs: ["使用", "总览"], iconSvg: icons.overview, render: renderHome },
+  { path: "/console/", crumbs: ["Agent"], iconSvg: icons.agents, render: renderHub },
+  { path: "/console/overview", crumbs: ["使用", "总览"], iconSvg: icons.overview, render: renderHome },
+  { path: "/console/flow", crumbs: ["使用", "实时流"], iconSvg: icons.bolt, render: renderFlow },
   { path: "/console/inbox", crumbs: ["使用", "收件箱"], iconSvg: icons.inbox, render: renderInbox },
   { path: "/console/sessions", crumbs: ["使用", "会话"], iconSvg: icons.chat, render: renderSessions },
   { path: "/console/collab", crumbs: ["使用", "协作"], iconSvg: icons.cornerDown, render: renderCollab },
-  { path: "/console/agents", crumbs: ["Agent", "已接入"], iconSvg: icons.agents, render: renderAgents },
+  { path: "/console/agents", crumbs: ["Agent", "全部 Agent"], iconSvg: icons.puzzle, render: renderAgents },
   { path: "/console/devices", crumbs: ["手机", "设备"], iconSvg: icons.phone, render: renderDevices },
   { path: "/console/notifications", crumbs: ["手机", "通知"], iconSvg: icons.bell, render: renderNotifications },
   { path: "/console/relay", crumbs: ["连接", "中转与局域网"], iconSvg: icons.plug, render: renderRelay },
@@ -108,18 +113,23 @@ interface NavGroup {
 
 const navGroups: NavGroup[] = [
   {
+    label: "开始",
+    items: [{ path: "/console/", label: "Agent", iconSvg: icons.agents }],
+  },
+  {
     label: "使用",
     items: [
-      { path: "/console/", label: "总览", iconSvg: icons.overview, badge: "waiting" },
+      { path: "/console/overview", label: "总览", iconSvg: icons.overview, badge: "waiting" },
       { path: "/console/sessions", label: "会话", iconSvg: icons.chat },
+      { path: "/console/flow", label: "实时流", iconSvg: icons.bolt },
       { path: "/console/collab", label: "协作", iconSvg: icons.cornerDown },
     ],
   },
   {
-    label: "Agent",
+    label: "Agent 管理",
     items: [
-      { path: "/console/agents", label: "已接入", iconSvg: icons.agents },
-      { path: "/console/adapters", label: "目录与接入", iconSvg: icons.puzzle },
+      { path: "/console/agents", label: "全部 Agent", iconSvg: icons.puzzle },
+      { path: "/console/adapters", label: "适配器", iconSvg: icons.terminal },
       { path: "/console/library", label: "资源库", iconSvg: icons.library },
     ],
     children: [
@@ -193,6 +203,40 @@ export function navigate(path: string, options: { replace?: boolean } = {}) {
 
 // ---------------------------------------------------------------- 侧栏
 
+// 侧栏品牌鸽子在整个会话里只有一个实例：换页时把同一个 SVG 挂回去，动画不中断。
+let brandPigeon: PigeonPlayer | null = null;
+let lastNeedsYou = -1;
+
+function brandPigeonEl(): HTMLElement {
+  if (!brandPigeon) {
+    brandPigeon = createPigeon({ size: 28, crop: "bird", label: "Homing" });
+    brandPigeon.play("wake");
+  }
+  const btn = h("button", { class: "brand-pigeon", type: "button", title: "Homing", "aria-label": "Homing" });
+  btn.append(brandPigeon.el);
+  btn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    brandPigeon?.play("tap");
+  });
+  return btn;
+}
+
+/** 按服务状态切换鸽子：离线睡觉、有事等你时衔信张望、来新消息时收信 */
+function paintBrandPigeon() {
+  const bird = brandPigeon;
+  if (!bird) return;
+  const waiting = shellState.home?.counts.needs_you ?? shellState.inbox?.counts.waiting ?? 0;
+  if (!shellState.online) {
+    if (bird.scene !== "sleep") bird.play("sleep", true);
+    return;
+  }
+  if (bird.scene === "sleep") bird.play("wake");
+  else if (lastNeedsYou >= 0 && waiting > lastNeedsYou) bird.play("recv");
+  else if (waiting > 0 && bird.scene === null) bird.play("wait", true);
+  else if (waiting === 0 && bird.scene === "wait") bird.idle();
+  lastNeedsYou = waiting;
+}
+
 function navItem(leaf: NavLeaf, active: boolean): HTMLElement {
   const el = h(
     "div",
@@ -249,7 +293,7 @@ function buildSidebar(): HTMLElement {
     h(
       "div",
       { class: "brand" },
-      pigeon(24, "#CBD5E1"),
+      brandPigeonEl(),
       h("span", { class: "brand-name", text: "Homing" }),
       h("span", { class: "brand-ver", text: consoleVersion }),
     ),
@@ -277,6 +321,11 @@ function paintNavBadge() {
   if (!navBadge) return;
   const count = shellState.home?.counts.needs_you ?? shellState.inbox?.counts.waiting ?? 0;
   navBadge.textContent = count > 0 ? String(count) : "";
+}
+
+function paintShellStatus() {
+  paintNavBadge();
+  paintBrandPigeon();
 }
 
 // ---------------------------------------------------------------- 顶栏
@@ -316,7 +365,7 @@ async function refreshShell() {
   } catch {
     shellState.online = false;
     paintConnection();
-    paintNavBadge();
+    paintShellStatus();
     paintSidebarStatus();
     return;
   }
@@ -329,7 +378,7 @@ async function refreshShell() {
   const home = await endpoints.home().catch(() => null);
   shellState.home = home;
   shellState.inbox = home ? null : await endpoints.inbox().catch(() => null);
-  paintNavBadge();
+  paintShellStatus();
 }
 
 // ---------------------------------------------------------------- 路由渲染
@@ -403,6 +452,8 @@ function renderRoute() {
     route.path === "/console/sessions"
       ? "content content-workbench"
       : route.path === "/console/" ||
+          route.path === "/console/overview" ||
+          route.path === "/console/flow" ||
           route.path === "/console/agents" ||
           route.path === "/console/library" ||
           route.path === "/console/collab"
@@ -456,19 +507,8 @@ function boot() {
     navigate(href);
   });
 
-  const path = normalizePath(location.pathname);
-  if (path === "/console/" && !location.search) {
-    // 第一次进来且还没走过向导：直接进 /console/setup
-    endpoints
-      .setup()
-      .then((state) => {
-        const skipped = localStorage.getItem("homing.setup.skipped") === "1";
-        if (!state.completed && !skipped) navigate("/console/setup", { replace: true });
-        else renderRoute();
-      })
-      .catch(() => renderRoute());
-    return;
-  }
+  // 首页就是「Agent」：检测、接入、装手机端、配对都在那一页完成，
+  // 不再先把人送进单独的设置向导。
   renderRoute();
 }
 

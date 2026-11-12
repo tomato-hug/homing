@@ -57,13 +57,20 @@ type catalogSpec struct {
 	SourceURL       string           `json:"source_url,omitempty"`
 	SourcePackage   string           `json:"source_package,omitempty"`
 	InstallCommands []CatalogCommand `json:"install_commands,omitempty"`
+	// DownloadURL is the official download page for desktop apps that have no
+	// command-line installer. The console opens it in the browser.
+	DownloadURL string `json:"download_url,omitempty"`
 }
 
-// CatalogCommand is a copyable way to install the agent itself. Homing does
-// not run it for the user; the console only shows it next to the source URL.
+// CatalogCommand is a way to install the agent itself. The console shows it
+// and, after the user confirms, POST /api/agent-catalog/{id}/setup runs it on
+// this computer (console only, never from a phone).
 type CatalogCommand struct {
 	Label   string `json:"label"`
 	Command string `json:"command"`
+	// Runnable is filled per request: the command's program (curl, brew,
+	// npm…) exists on this computer, so the console can run it.
+	Runnable bool `json:"runnable,omitempty"`
 }
 
 // CatalogIntegration describes the concrete ways Homing can connect to one
@@ -90,6 +97,13 @@ var catalogSpecs = []catalogSpec{
 		DetectBins: []string{"codex"}, DetectPaths: []string{"~/.codex"},
 		PushSignals: []string{"hook", "poll"}, Sessions: true, Reply: true, Models: true,
 		HookSupport: "native", HookInstall: "snippet", HookFile: "~/.codex/hooks.json",
+		Homepage: "https://github.com/openai/codex",
+		Tagline:  "OpenAI 的终端编程 Agent；手机上可以直接发起和回复会话。",
+		InstallCommands: []CatalogCommand{
+			{Label: "安装脚本", Command: "curl -fsSL https://chatgpt.com/codex/install.sh | sh"},
+			{Label: "Homebrew", Command: "brew install --cask codex"},
+			{Label: "npm", Command: "npm install -g @openai/codex"},
+		},
 		Notes: "PermissionRequest 钩子需要你在 hooks.json 里手工添加，并在 Codex 里确认信任。",
 	},
 	{
@@ -98,6 +112,12 @@ var catalogSpecs = []catalogSpec{
 		DetectBins: []string{"claude"}, DetectPaths: []string{"~/.claude"},
 		PushSignals: []string{"hook", "poll"}, Sessions: true, Reply: true, Models: true,
 		HookSupport: "native", HookInstall: "auto", HookFile: "~/.claude/settings.json",
+		Homepage: "https://docs.anthropic.com/en/docs/claude-code/overview",
+		Tagline:  "Anthropic 的终端编程 Agent；钩子可一键安装，审批能推到手机。",
+		InstallCommands: []CatalogCommand{
+			{Label: "安装脚本", Command: "curl -fsSL https://claude.ai/install.sh | bash"},
+			{Label: "npm", Command: "npm install -g @anthropic-ai/claude-code"},
+		},
 		Notes: "Stop / Notification / PermissionRequest 钩子可以在控制台一键安装。",
 	},
 	{
@@ -106,7 +126,10 @@ var catalogSpecs = []catalogSpec{
 		DetectBins: []string{"workbuddy"}, DetectPaths: []string{"~/.workbuddy"},
 		PushSignals: []string{"hook", "poll"}, Sessions: true, Reply: true, Models: true,
 		HookSupport: "native", HookInstall: "auto", HookFile: "~/.workbuddy/settings.json",
-		Notes: "回复要经桌面端注入；电脑上没开 WorkBuddy 时只能收到事件。",
+		Homepage:    "https://www.codebuddy.cn/work/",
+		DownloadURL: "https://www.codebuddy.cn/work/",
+		Tagline:     "腾讯的桌面办公 Agent；装好桌面端后自动接入。",
+		Notes:       "回复要经桌面端注入；电脑上没开 WorkBuddy 时只能收到事件。",
 	},
 	{
 		ID: "kimi", Name: "Kimi Code", Vendor: "Moonshot AI", Category: "CLI",
@@ -204,7 +227,8 @@ var catalogSpecs = []catalogSpec{
 	// ---- event-hook integrations ------------------------------------------
 	{
 		ID: "cursor", Name: "Cursor", Vendor: "Anysphere", Category: "IDE",
-		Readiness: ReadinessHook, Icon: "cursor",
+		DownloadURL: "https://cursor.com/download",
+		Readiness:   ReadinessHook, Icon: "cursor",
 		DetectBins:  []string{"cursor-agent"},
 		DetectPaths: []string{"~/.cursor", "~/Library/Application Support/Cursor", "/Applications/Cursor.app"},
 		PushSignals: []string{"hook"}, HookSupport: "native", HookInstall: "manual",
@@ -220,7 +244,8 @@ var catalogSpecs = []catalogSpec{
 	},
 	{
 		ID: "zed", Name: "Zed", Vendor: "Zed Industries", Category: "编辑器",
-		Readiness: ReadinessHook, Icon: "zed",
+		DownloadURL: "https://zed.dev/download",
+		Readiness:   ReadinessHook, Icon: "zed",
 		DetectBins: []string{"zed"}, DetectPaths: []string{"~/.config/zed", "~/Library/Application Support/Zed", "/Applications/Zed.app"},
 		PushSignals: []string{"hook"}, HookSupport: "generic", HookInstall: "generic",
 		Notes: "可先用通用钩子收事件，或用自定义清单接它的 assistant 记录；原生会话格式尚未核实。",
@@ -320,14 +345,16 @@ var catalogSpecs = []catalogSpec{
 	// ---- not verified yet --------------------------------------------------
 	{
 		ID: "antigravity", Name: "Google Antigravity", Vendor: "Google", Category: "IDE",
-		Readiness: ReadinessUnverified, Icon: "antigravity",
+		DownloadURL: "https://antigravity.google/download",
+		Readiness:   ReadinessUnverified, Icon: "antigravity",
 		DetectPaths: []string{"~/.gemini/antigravity", "/Applications/Antigravity.app"},
 		HookSupport: "none", HookInstall: "none",
 		Notes: "Go 已支持逐会话分库 SQLite（db_glob），但表结构没有样本可核对，所以还没写现成清单。",
 	},
 	{
 		ID: "warp", Name: "Warp", Vendor: "Warp", Category: "终端",
-		Readiness: ReadinessUnverified, Icon: "warp",
+		DownloadURL: "https://www.warp.dev/download",
+		Readiness:   ReadinessUnverified, Icon: "warp",
 		DetectPaths: []string{"~/.warp", "/Applications/Warp.app"},
 		HookSupport: "none", HookInstall: "none",
 		Notes: "目前没有核实到可供外部读取的 agent 会话格式；先不提供接入，避免给出假承诺。",
@@ -350,7 +377,8 @@ var catalogSpecs = []catalogSpec{
 	},
 	{
 		ID: "windsurf", Name: "Windsurf", Vendor: "Codeium", Category: "IDE",
-		Readiness: ReadinessUnverified, Icon: "windsurf",
+		DownloadURL: "https://windsurf.com/download",
+		Readiness:   ReadinessUnverified, Icon: "windsurf",
 		DetectPaths: []string{"~/.codeium/windsurf", "/Applications/Windsurf.app"},
 		HookSupport: "none", HookInstall: "none",
 		Notes: "会话库格式未核实；可以用自定义清单或脚本适配器先试读。",
@@ -368,47 +396,51 @@ var catalogSpecs = []catalogSpec{
 // CatalogEntry is one row of GET /api/agent-catalog. Fields describe what is
 // true on this machine right now, not only what the catalog knows about.
 type CatalogEntry struct {
-	ID                string               `json:"id"`
-	Name              string               `json:"name"`
-	Vendor            string               `json:"vendor,omitempty"`
-	Category          string               `json:"category,omitempty"`
-	Icon              string               `json:"icon,omitempty"`
-	Readiness         string               `json:"readiness"`
-	Detected          bool                 `json:"detected"`
-	Connected         bool                 `json:"connected"`
-	Available         bool                 `json:"available"`
-	ManifestInstalled bool                 `json:"manifest_installed"`
-	CanInstall        bool                 `json:"can_install"`
-	CanConnect        bool                 `json:"can_connect"`
-	CanGenerateKit    bool                 `json:"can_generate_kit"`
-	InstallKind       string               `json:"install_kind"`
-	Sessions          bool                 `json:"sessions"`
-	Reply             bool                 `json:"reply"`
-	Models            bool                 `json:"models"`
-	PushSignals       []string             `json:"push_signals"`
-	HookSupport       string               `json:"hook_support"`
-	HookInstall       string               `json:"hook_install"`
-	HookInstalled     bool                 `json:"hook_installed"`
-	HookFile          string               `json:"hook_file,omitempty"`
-	HookHint          string               `json:"hook_hint,omitempty"`
-	DetectBins        []string             `json:"detect_bins,omitempty"`
-	DetectPaths       []string             `json:"detect_paths,omitempty"`
-	Version           *string              `json:"version"`
-	ManifestFile      string               `json:"manifest_file,omitempty"`
-	Notes             string               `json:"notes,omitempty"`
-	Tagline           string               `json:"tagline,omitempty"`
-	Homepage          string               `json:"homepage,omitempty"`
-	DocsURL           string               `json:"docs_url,omitempty"`
-	ConfigFile        string               `json:"config_file,omitempty"`
-	Platforms         []string             `json:"platforms,omitempty"`
-	CatalogSource     string               `json:"catalog_source"`
-	SourceURL         string               `json:"source_url,omitempty"`
-	SourcePackage     string               `json:"source_package,omitempty"`
-	InstallCommands   []CatalogCommand     `json:"install_commands,omitempty"`
-	Integrations      []CatalogIntegration `json:"integrations"`
-	KitInstalled      bool                 `json:"kit_installed"`
-	KitDir            string               `json:"kit_dir,omitempty"`
-	Drive             *CatalogDrive        `json:"drive,omitempty"`
+	ID                string           `json:"id"`
+	Name              string           `json:"name"`
+	Vendor            string           `json:"vendor,omitempty"`
+	Category          string           `json:"category,omitempty"`
+	Icon              string           `json:"icon,omitempty"`
+	Readiness         string           `json:"readiness"`
+	Detected          bool             `json:"detected"`
+	Connected         bool             `json:"connected"`
+	Available         bool             `json:"available"`
+	ManifestInstalled bool             `json:"manifest_installed"`
+	CanInstall        bool             `json:"can_install"`
+	CanConnect        bool             `json:"can_connect"`
+	CanGenerateKit    bool             `json:"can_generate_kit"`
+	InstallKind       string           `json:"install_kind"`
+	Sessions          bool             `json:"sessions"`
+	Reply             bool             `json:"reply"`
+	Models            bool             `json:"models"`
+	PushSignals       []string         `json:"push_signals"`
+	HookSupport       string           `json:"hook_support"`
+	HookInstall       string           `json:"hook_install"`
+	HookInstalled     bool             `json:"hook_installed"`
+	HookFile          string           `json:"hook_file,omitempty"`
+	HookHint          string           `json:"hook_hint,omitempty"`
+	DetectBins        []string         `json:"detect_bins,omitempty"`
+	DetectPaths       []string         `json:"detect_paths,omitempty"`
+	Version           *string          `json:"version"`
+	ManifestFile      string           `json:"manifest_file,omitempty"`
+	Notes             string           `json:"notes,omitempty"`
+	Tagline           string           `json:"tagline,omitempty"`
+	Homepage          string           `json:"homepage,omitempty"`
+	DocsURL           string           `json:"docs_url,omitempty"`
+	ConfigFile        string           `json:"config_file,omitempty"`
+	Platforms         []string         `json:"platforms,omitempty"`
+	CatalogSource     string           `json:"catalog_source"`
+	SourceURL         string           `json:"source_url,omitempty"`
+	SourcePackage     string           `json:"source_package,omitempty"`
+	InstallCommands   []CatalogCommand `json:"install_commands,omitempty"`
+	DownloadURL       string           `json:"download_url,omitempty"`
+	// CanSetup is true when the console can install the agent itself on this
+	// computer: it is not detected yet and has a command for this platform.
+	CanSetup     bool                 `json:"can_setup"`
+	Integrations []CatalogIntegration `json:"integrations"`
+	KitInstalled bool                 `json:"kit_installed"`
+	KitDir       string               `json:"kit_dir,omitempty"`
+	Drive        *CatalogDrive        `json:"drive,omitempty"`
 }
 
 // CatalogPayload is the GET /api/agent-catalog response.
@@ -545,6 +577,7 @@ func catalogEntryFor(ctx context.Context, spec catalogSpec, live agent.Agent, se
 		SourceURL:       spec.SourceURL,
 		SourcePackage:   spec.SourcePackage,
 		InstallCommands: append([]CatalogCommand(nil), spec.InstallCommands...),
+		DownloadURL:     spec.DownloadURL,
 	}
 	switch spec.Readiness {
 	case ReadinessBuiltin:
@@ -586,6 +619,15 @@ func catalogEntryFor(ctx context.Context, spec catalogSpec, live agent.Agent, se
 	entry.Connected = agentconfig.EffectiveConnected(settings, spec.Readiness == ReadinessBuiltin, detected)
 	entry.Available = entry.Available || entry.ManifestInstalled
 	entry.CanConnect = entry.Available && detected
+	runnable := setupCommandsFor(spec)
+	for index := range entry.InstallCommands {
+		for _, candidate := range runnable {
+			if candidate.Command == entry.InstallCommands[index].Command {
+				entry.InstallCommands[index].Runnable = true
+			}
+		}
+	}
+	entry.CanSetup = !detected && len(runnable) > 0
 	if entry.HookFile != "" {
 		entry.HookFile = tildifyPath(expandHome(entry.HookFile))
 	}

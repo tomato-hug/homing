@@ -55,6 +55,7 @@ func init() {
 		mux.HandleFunc("DELETE /api/devices/{id}", guarded(d, removeDevice))
 
 		mux.HandleFunc("GET /apk", downloadAPK)
+		mux.HandleFunc("GET /get", serveGetPage)
 		mux.HandleFunc("HEAD /apk", downloadAPK)
 		mux.HandleFunc("GET /f/{token}", func(w http.ResponseWriter, r *http.Request) { capabilityFile(d, w, r) })
 		mux.HandleFunc("HEAD /f/{token}", func(w http.ResponseWriter, r *http.Request) { capabilityFile(d, w, r) })

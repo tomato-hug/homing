@@ -48,6 +48,8 @@ async function openMainWindow() {
   window.open("/console/", "_blank", "noopener,noreferrer");
 }
 
+const PAIR_IN_MAIN_WINDOW: boolean = true;
+
 export function renderTray(ctx: PageContext): PageResult {
   const root = h("div", { class: "tray-panel" });
   let home: Home | null = null;
@@ -225,6 +227,12 @@ export function renderTray(ctx: PageContext): PageResult {
   }
 
   async function openPairing() {
+    // 托盘面板太窄：配对（二维码 + 核对四个校验词）在主窗口首页的手机卡上完成。
+    // 旧的 /api/pair/offer 二维码 App 不认，下面的旧流程保留给没有主窗口的场景。
+    if (PAIR_IN_MAIN_WINDOW) {
+      await openMainWindow();
+      return;
+    }
     pairing = { open: true, offer: null, qr: "", loading: true, error: "" };
     paint();
     try {

@@ -77,8 +77,12 @@ fun AgentApp(
     viewModel: AgentViewModel,
     pendingSessionId: String?,
     onPendingSessionConsumed: () -> Unit,
+    pendingPairLink: String? = null,
+    onPendingPairLinkConsumed: () -> Unit = {},
 ) {
     val navController = rememberNavController()
+    // 配对链接先交给「添加电脑」页，由它自动开始配对
+    var pairLinkForScreen by remember { mutableStateOf<String?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
     val snackbarMessage = viewModel.snackbar.collectAsStateWithLifecycle().value
     val appState = viewModel.state.collectAsStateWithLifecycle().value
@@ -92,6 +96,13 @@ fun AgentApp(
         val message = snackbarMessage ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(message)
         viewModel.consumeSnackbar()
+    }
+
+    LaunchedEffect(pendingPairLink) {
+        val link = pendingPairLink ?: return@LaunchedEffect
+        pairLinkForScreen = link
+        onPendingPairLinkConsumed()
+        navController.navigate(ROUTE_ADD_COMPUTER) { launchSingleTop = true }
     }
 
     LaunchedEffect(pendingSessionId, splashDone) {
@@ -249,6 +260,8 @@ fun AgentApp(
                 AddComputerScreen(
                     onBack = { navController.popBackStack() },
                     onPaired = { navController.popBackStack() },
+                    initialInvite = pairLinkForScreen,
+                    onInviteConsumed = { pairLinkForScreen = null },
                 )
             }
             composable(

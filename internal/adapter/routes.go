@@ -156,6 +156,7 @@ func mount(mux *http.ServeMux, d *api.Deps) {
 	})
 	registerIngestReplyTransport()
 	mountCatalogRoutes(mux, d)
+	mountCatalogSetupRoutes(mux, d)
 
 	// GET /api/adapters
 	mux.HandleFunc("GET /api/adapters", func(w http.ResponseWriter, r *http.Request) {

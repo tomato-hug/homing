@@ -458,6 +458,7 @@ func postRoomMessage(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 		writeRoomError(w, err)
 		return
 	}
+	d.Audit(r, "room_say", map[string]any{"room_id": room.ID})
 	api.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "room": room})
 }
 

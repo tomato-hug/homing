@@ -131,6 +131,65 @@ export type CatalogReadiness = "builtin" | "adapter" | "hook" | "unverified";
 export interface CatalogCommand {
   label: string;
   command: string;
+  /** 这台电脑上有对应程序（curl / brew / npm），控制台可以直接执行 */
+  runnable?: boolean;
+}
+
+export interface SetupJob {
+  id: string;
+  agent_id: string;
+  agent_name: string;
+  label: string;
+  command: string;
+  status: "running" | "ok" | "failed";
+  exit_code?: number;
+  error?: string;
+  log: string;
+  detected: boolean;
+  started_at: string;
+  ended_at?: string;
+}
+
+export interface CloudPairInvite {
+  mode: "lan" | "cloud";
+  server: string;
+  pair_token: string;
+  code6: string;
+  expires_in: number;
+  host_id: string;
+  host_fingerprint: string;
+  uri: string;
+}
+
+export interface CloudPairRequest {
+  client_id: string;
+  name?: string;
+  platform?: string;
+  fingerprint: string;
+  sas: string[];
+  received_at: string;
+}
+
+export interface FlowHop {
+  seq: number;
+  at: string;
+  kind: "event" | "notify" | "reply" | "dispatch" | "result" | "room" | "output" | "turn" | "action" | string;
+  from: string;
+  to: string;
+  source?: string;
+  session_id?: string;
+  title: string;
+  preview?: string;
+  status?: "ok" | "wait" | "fail";
+  via?: "lan" | "cloud" | "local";
+  bytes?: number;
+}
+
+export interface FlowNodeInfo {
+  id: string;
+  kind: "phone" | "homing" | "console" | "agent" | "room";
+  label: string;
+  detail?: string;
 }
 
 export interface CatalogIntegration {
@@ -196,6 +255,8 @@ export interface AgentCatalogEntry {
   kit_installed: boolean;
   kit_dir?: string;
   drive?: CatalogDrive;
+  download_url?: string;
+  can_setup?: boolean;
 }
 
 export interface AgentCatalogSummary {
@@ -1129,6 +1190,14 @@ export const endpoints = {
   installCatalogAgent: (id: string) => api.post<CatalogInstallResult>(`/api/agent-catalog/${id}/install`),
   installCatalogKit: (id: string) => api.post<CatalogKitResult>(`/api/agent-catalog/${id}/kit`),
   quickConnectCatalogAgent: (id: string) => api.post<CatalogQuickResult>(`/api/agent-catalog/${id}/quick`),
+  setupCatalogAgent: (id: string, index: number) =>
+    api.post<{ ok: boolean; job: SetupJob }>(`/api/agent-catalog/${id}/setup`, { index }),
+  setupJob: (job: string) => api.get<{ ok: boolean; job: SetupJob }>(`/api/agent-setup/${job}`),
+  cloudPairStart: () => api.post<CloudPairInvite>("/api/cloud/pair/start", {}),
+  cloudPairRequests: () => api.get<{ mode: string; requests: CloudPairRequest[] }>("/api/cloud/pair/requests"),
+  cloudPairDecision: (clientId: string, accept: boolean) =>
+    api.post<{ ok: boolean }>("/api/cloud/pair/decision", { client_id: clientId, accept }),
+  flow: (since = 0) => api.get<{ seq: number; hops: FlowHop[]; nodes: FlowNodeInfo[] }>(`/api/flow?since=${since}`),
   enableCatalogDrive: (id: string) => api.post<CatalogDriveResult>(`/api/agent-catalog/${id}/drive`),
   removeCatalogDrive: (id: string) => api.del<CatalogDriveRemoveResult>(`/api/agent-catalog/${id}/drive`),
   removeCatalogKit: (id: string) => api.del<CatalogKitRemoveResult>(`/api/agent-catalog/${id}/kit`),

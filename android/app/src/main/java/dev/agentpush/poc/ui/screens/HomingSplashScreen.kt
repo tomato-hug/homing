@@ -41,8 +41,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.agentpush.poc.ConnectionState
 import dev.agentpush.poc.TransportKind
-import dev.agentpush.poc.ui.HomingPigeon
-import dev.agentpush.poc.ui.PigeonState
+import dev.agentpush.poc.ui.HomingPigeonScene
+import dev.agentpush.poc.ui.PigeonScene
 import dev.agentpush.poc.ui.isReducedMotion
 import dev.agentpush.poc.ui.theme.HomingMono
 import dev.agentpush.poc.ui.theme.HomingPalette
@@ -51,10 +51,10 @@ import kotlinx.coroutines.launch
 
 /** 启动页大鸽子的尺寸，以及它最后要落到的顶栏鸽子（InboxTopBar）的尺寸和位置。 */
 private val SplashPigeonSize = 148.dp
-private val TopBarPigeonSize = 28.dp
-// InboxTopBar：左内边距 16dp，鸽子 28dp → 中心 x = 30dp；
+private val TopBarPigeonSize = 32.dp
+// InboxTopBar：左内边距 16dp，鸽子 32dp → 中心 x = 32dp；
 // 上内边距 6dp，行高由 48dp 的按钮撑开 → 中心 y = 状态栏 + 6 + 24 = 状态栏 + 30dp。
-private val TopBarPigeonCenterX = 30.dp
+private val TopBarPigeonCenterX = 32.dp
 private val TopBarPigeonCenterYBelowStatusBar = 30.dp
 
 /**
@@ -158,10 +158,11 @@ fun HomingSplashScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Spacer(Modifier.weight(1f))
-            HomingPigeon(
-                state = PigeonState.ArriveThenIdle,
+            // pigeon_v2「收信」：衔着信从左上飞进来、刹车、落地、把信递出去，
+            // 然后整只鸽子飞到收件箱顶栏。
+            HomingPigeonScene(
+                scene = PigeonScene.RECV,
                 size = SplashPigeonSize,
-                showTile = false,
                 contentDescription = "Homing 鸽子",
                 modifier = Modifier
                     .onGloballyPositioned { coordinates ->
@@ -214,10 +215,11 @@ fun HomingSplashScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                HomingPigeon(
-                    state = PigeonState.Flap,
+                // 连接状态的小鸽子：连上时「唤醒」，还在连就「离线」打盹
+                HomingPigeonScene(
+                    scene = if (connection == ConnectionState.CONNECTED) PigeonScene.WAKE else PigeonScene.SLEEP,
                     size = 26.dp,
-                    showTile = false,
+                    loop = connection != ConnectionState.CONNECTED,
                     contentDescription = null,
                 )
                 Column {

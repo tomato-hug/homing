@@ -92,6 +92,12 @@ func (c *pairControl) start(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		c.hub.SetServerURL(body.Server)
+	} else if c.hub.ServerURL() == "" {
+		// The console starts LAN pairing without knowing the LAN address;
+		// derive the same ws:// URL `homing pair` would print.
+		if derived, err := lanWebSocketURL("http://"+r.Host, ""); err == nil {
+			c.hub.SetServerURL(derived)
+		}
 	}
 	invite, err := c.hub.BeginPairing()
 	if err != nil {

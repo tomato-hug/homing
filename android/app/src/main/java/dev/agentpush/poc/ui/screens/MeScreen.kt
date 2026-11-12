@@ -80,6 +80,9 @@ import dev.agentpush.poc.ui.accentColor
 import dev.agentpush.poc.ui.serverHostLabel
 import dev.agentpush.poc.ui.theme.HomingMono
 import dev.agentpush.poc.ui.theme.HomingPalette
+import dev.agentpush.poc.ui.HomingPigeonScene
+import dev.agentpush.poc.ui.PigeonScene
+import androidx.compose.runtime.mutableIntStateOf
 
 @Composable
 fun MeScreen(
@@ -187,11 +190,16 @@ fun MeScreen(
                 .padding(bottom = 28.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            HomingPigeon(
-                state = PigeonState.Idle,
-                size = 46.dp,
-                showTile = false,
+            // 「我的」页的品牌标：点一下播 pigeon_v2「轻点」
+            var tapKey by remember { mutableIntStateOf(0) }
+            HomingPigeonScene(
+                scene = if (tapKey > 0) PigeonScene.TAP else null,
+                size = 52.dp,
+                playKey = tapKey,
                 contentDescription = "Homing",
+                modifier = Modifier
+                    .clip(RoundedCornerShape(14.dp))
+                    .clickable { tapKey += 1 },
             )
             Text(
                 text = "Homing ${BuildConfig.VERSION_NAME}",

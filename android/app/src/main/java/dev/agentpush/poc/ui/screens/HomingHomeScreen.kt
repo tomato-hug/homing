@@ -76,8 +76,13 @@ fun HomingHomeScreen(
             delay(1_000)
         }
     }
-    LaunchedEffect(home.generatedAt) {
-        animationKey += 1
+    // 顶栏鸽子只在「新动态变多」时播收信，普通的定时刷新不打扰
+    var lastAttentionCount by remember { mutableIntStateOf(-1) }
+    LaunchedEffect(home.attention.size) {
+        if (lastAttentionCount >= 0 && home.attention.size > lastAttentionCount) {
+            animationKey += 1
+        }
+        lastAttentionCount = home.attention.size
     }
     LaunchedEffect(state.mobileInbox.enabled, state.mobileInbox.sinceMillis) {
         attentionExpanded = false
@@ -139,6 +144,9 @@ fun HomingHomeScreen(
                 onToggleInboxMode = {
                     viewModel.setInboxMode(!state.mobileInbox.enabled)
                 },
+                waitingCount = if (state.mobileInbox.enabled) attentionCount else 0,
+                // 连接状态挪到下面的概览卡里，顶栏只留品牌和两个按钮
+                showStatusPill = false,
             )
             if (searchOpen) {
                 InboxSearchField(value = search, onValueChange = { search = it })
@@ -163,34 +171,29 @@ fun HomingHomeScreen(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     item(key = "headline") {
-                        Column(modifier = Modifier.padding(top = 4.dp)) {
-                            Text(
-                                text = when {
-                                    !state.mobileInbox.enabled -> "收件箱是空的"
-                                    attentionCount > 0 -> "$attentionCount 件新动态"
-                                    else -> "暂时没有新动态"
-                                },
-                                style = MaterialTheme.typography.displaySmall.copy(
-                                    fontSize = 28.sp,
-                                    lineHeight = 34.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                ),
-                                color = HomingPalette.Text,
-                            )
-                            Text(
-                                text = when {
-                                    !state.mobileInbox.enabled ->
-                                        "开启后只接收开启之后的新动态"
-                                    home.runningCount > 0 ->
-                                        "另有 ${home.runningCount} 个在运行"
-                                    else ->
-                                        "保持开启，新回复会自动出现"
-                                },
-                                modifier = Modifier.padding(top = 3.dp),
-                                style = MaterialTheme.typography.bodySmall.copy(fontSize = 13.sp),
-                                color = HomingPalette.Muted,
-                            )
-                        }
+                        HomeSummaryCard(
+                            connection = state.connection,
+                            transportKind = state.transportKind,
+                            computerLabel = when {
+                                home.computers.size > 1 -> "${home.computers.size} 台电脑"
+                                else -> home.computers.firstOrNull()?.name?.takeIf { it.isNotBlank() } ?: "我的 Mac"
+                            },
+                            headline = when {
+                                !state.mobileInbox.enabled -> "收件箱是空的"
+                                attentionCount > 0 -> "$attentionCount 件新动态"
+                                else -> "暂时没有新动态"
+                            },
+                            subtitle = when {
+                                !state.mobileInbox.enabled -> "开启后只接收开启之后的新动态"
+                                home.runningCount > 0 -> "另有 ${home.runningCount} 个在运行"
+                                else -> "保持开启，新回复会自动出现"
+                            },
+                            attentionCount = if (state.mobileInbox.enabled) attentionCount else 0,
+                            runningCount = home.runningCount,
+                            recentCount = home.resume.size + home.earlierCount,
+                            onAttention = { attentionExpanded = true },
+                            onOpenAll = onOpenAllSessions,
+                        )
                     }
                     if (state.connection != ConnectionState.CONNECTED) {
                         item(key = "offline") {

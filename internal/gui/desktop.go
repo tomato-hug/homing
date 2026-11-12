@@ -44,6 +44,7 @@ type trayController struct {
 	mu       sync.Mutex
 	state    string
 	snapshot traySnapshot
+	tapping  bool
 }
 
 func run(ctx context.Context, options Options) error {
@@ -155,6 +156,12 @@ func run(ctx context.Context, options Options) error {
 		log:     options.Log,
 		state:   "ok",
 	}
+	// 点击托盘图标：先播一遍「轻点」鸽子动画（pigeon_v2 tap，20 帧约 0.6 秒），
+	// 同时照常弹出面板。
+	tray.OnClick(func() {
+		controller.playTap(tray)
+		tray.ToggleWindow()
+	})
 	go controller.poll(ctx, app, tray, awayItem, pauseItem, statusItem)
 
 	if ctx.Done() != nil {
@@ -233,10 +240,11 @@ func (c *trayController) apply(
 	if !changed {
 		return
 	}
-	if runtime.GOOS == "darwin" {
-		tray.SetTemplateIcon(mustAsset("assets/tray/mac/" + state + "@2x.png"))
-	} else {
-		tray.SetIcon(mustAsset("assets/tray/win/" + state + ".ico"))
+	c.mu.Lock()
+	tapping := c.tapping
+	c.mu.Unlock()
+	if !tapping {
+		setTrayFrame(tray, state)
 	}
 	switch {
 	case !snapshot.online:
@@ -356,6 +364,42 @@ func tokenFromDataDir(dataDir string) string {
 		return ""
 	}
 	return strings.TrimSpace(config.Token)
+}
+
+// setTrayFrame shows one tray image: a state (ok/new/wait/error/off) or a
+// tap animation frame (tap-01 … tap-20).
+func setTrayFrame(tray *application.SystemTray, name string) {
+	if runtime.GOOS == "darwin" {
+		tray.SetTemplateIcon(mustAsset("assets/tray/mac/" + name + "@2x.png"))
+	} else {
+		tray.SetIcon(mustAsset("assets/tray/win/" + name + ".ico"))
+	}
+}
+
+// playTap plays the 20-frame tap animation once, then restores whatever
+// state the poller last saw. A second click while it plays is ignored.
+func (c *trayController) playTap(tray *application.SystemTray) {
+	c.mu.Lock()
+	if c.tapping {
+		c.mu.Unlock()
+		return
+	}
+	c.tapping = true
+	c.mu.Unlock()
+	go func() {
+		for frame := 1; frame <= 20; frame++ {
+			setTrayFrame(tray, fmt.Sprintf("tap-%02d", frame))
+			time.Sleep(30 * time.Millisecond)
+		}
+		c.mu.Lock()
+		c.tapping = false
+		state := c.state
+		c.mu.Unlock()
+		if state == "" {
+			state = "ok"
+		}
+		setTrayFrame(tray, state)
+	}()
 }
 
 func mustAsset(name string) []byte {

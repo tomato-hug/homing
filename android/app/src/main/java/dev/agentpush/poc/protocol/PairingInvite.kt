@@ -20,7 +20,7 @@ data class PairingInvite(
 
     companion object {
         fun parse(value: String): PairingInvite {
-            val uri = URI(value)
+            val uri = URI(unwrapLandingLink(value.trim()))
             require(uri.scheme == "homing" && uri.host == "pair") {
                 "不是 Homing 配对二维码"
             }
@@ -33,6 +33,20 @@ data class PairingInvite(
                 !hostId.isNullOrBlank() && !fingerprint.isNullOrBlank()
             ) { "配对二维码字段不完整" }
             return PairingInvite(server, token, hostId, fingerprint)
+        }
+
+        /**
+         * 电脑控制台的二维码是 http://<电脑>:18787/get#p=<homing://pair?…>&c=<6 位码>，
+         * 这样系统相机扫了能打开下载页；App 里扫到时从片段里取出真正的配对链接。
+         */
+        fun unwrapLandingLink(value: String): String {
+            if (value.startsWith("homing://")) return value
+            val lower = value.lowercase()
+            if (!lower.startsWith("http://") && !lower.startsWith("https://")) return value
+            val fragment = value.substringAfter('#', "")
+            val query = value.substringAfter('?', "").substringBefore('#')
+            val params = parseQuery(fragment) + parseQuery(query).filterKeys { it !in parseQuery(fragment) }
+            return params["p"]?.takeIf { it.startsWith("homing://") } ?: value
         }
 
         private fun parseQuery(query: String): Map<String, String> {

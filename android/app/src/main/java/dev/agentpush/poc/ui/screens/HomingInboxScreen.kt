@@ -11,6 +11,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -98,6 +99,9 @@ import dev.agentpush.poc.sessionSummaryLine
 import dev.agentpush.poc.ui.AgentAvatar
 import dev.agentpush.poc.ui.HomingCard
 import dev.agentpush.poc.ui.HomingPigeon
+import dev.agentpush.poc.ui.HomingPigeonScene
+import dev.agentpush.poc.ui.PigeonNeck
+import dev.agentpush.poc.ui.PigeonScene
 import dev.agentpush.poc.ui.MacStatusPill
 import dev.agentpush.poc.ui.PendingTag
 import dev.agentpush.poc.ui.PigeonState
@@ -322,6 +326,7 @@ fun HomingInboxScreen(
                 onToggleInboxMode = {
                     viewModel.setInboxMode(!mobileInbox.enabled)
                 },
+                waitingCount = attentionCount,
             )
             if (searchOpen) {
                 InboxSearchField(
@@ -517,39 +522,104 @@ internal fun InboxTopBar(
     onToggleSearch: () -> Unit,
     inboxModeEnabled: Boolean? = null,
     onToggleInboxMode: (() -> Unit)? = null,
+    waitingCount: Int = 0,
+    showStatusPill: Boolean = true,
 ) {
+    // 顶栏鸽子按 pigeon_v2 场景切换：
+    // 离线打盹（sleep 循环）→ 重连时唤醒（wake）→ 有事等你衔信张望（wait 循环）；
+    // 来新动态播一次收信（recv），点品牌标或下拉刷新播一次轻点（tap）。
+    var oneShot by remember { mutableStateOf<PigeonScene?>(null) }
+    var oneShotKey by remember { mutableIntStateOf(0) }
+    var seenAnimationKey by remember { mutableIntStateOf(animationKey) }
+    LaunchedEffect(animationKey) {
+        if (animationKey != seenAnimationKey) {
+            seenAnimationKey = animationKey
+            if (pigeonState == PigeonState.BobOnce || pigeonState == PigeonState.Idle) {
+                oneShot = PigeonScene.RECV
+                oneShotKey += 1
+            }
+        }
+    }
+    LaunchedEffect(pigeonState) {
+        if (pigeonState == PigeonState.Flap) {
+            oneShot = PigeonScene.TAP
+            oneShotKey += 1
+        }
+    }
+    var wasOffline by remember { mutableStateOf(false) }
+    LaunchedEffect(connection) {
+        if (connection == ConnectionState.CONNECTED && wasOffline) {
+            oneShot = PigeonScene.WAKE
+            oneShotKey += 1
+        }
+        wasOffline = connection != ConnectionState.CONNECTED
+    }
+    val loopScene = when {
+        connection == ConnectionState.DISCONNECTED -> PigeonScene.SLEEP
+        connection == ConnectionState.RECONNECTING -> PigeonScene.WAKE
+        waitingCount > 0 -> PigeonScene.WAIT
+        else -> null
+    }
+    val scene = oneShot ?: loopScene
+    val neck = when {
+        connection == ConnectionState.DISCONNECTED -> PigeonNeck.OFFLINE
+        waitingCount > 0 -> PigeonNeck.WAITING
+        else -> PigeonNeck.NORMAL
+    }
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 4.dp),
+            .heightIn(min = 56.dp)
+            .padding(start = 16.dp, end = 6.dp, top = 6.dp, bottom = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(9.dp),
     ) {
-        HomingPigeon(
-            state = pigeonState,
-            size = 28.dp,
-            showTile = false,
-            animationKey = animationKey,
-            contentDescription = "Homing",
-        )
-        // 品牌名永远单行：空间不够时让右侧的连接胶囊先缩短，而不是把 Homing 折成两行。
-        Text(
-            text = "Homing",
-            style = MaterialTheme.typography.titleLarge.copy(
-                fontSize = 18.sp,
-                fontWeight = FontWeight.SemiBold,
-            ),
-            color = HomingPalette.Text,
-            maxLines = 1,
-            softWrap = false,
-            modifier = Modifier.testTag("inbox-brand-title"),
-        )
-        Spacer(Modifier.weight(1f))
-        MacStatusPill(
-            connection = connection,
-            transportKind = transportKind,
-            modifier = Modifier.weight(1f, fill = false),
-        )
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(12.dp))
+                .clickable {
+                    oneShot = PigeonScene.TAP
+                    oneShotKey += 1
+                }
+                .padding(end = 6.dp)
+                .testTag("inbox-brand"),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(9.dp),
+        ) {
+            HomingPigeonScene(
+                scene = scene,
+                size = 32.dp,
+                loop = oneShot == null && loopScene != null,
+                neck = neck,
+                playKey = if (oneShot != null) oneShotKey else loopScene,
+                contentDescription = "Homing",
+                onFinished = { if (oneShot != null) oneShot = null },
+            )
+            // 品牌名永远单行
+            Text(
+                text = "Homing",
+                style = MaterialTheme.typography.titleLarge.copy(
+                    fontSize = 21.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = (-0.2).sp,
+                ),
+                color = HomingPalette.Text,
+                maxLines = 1,
+                softWrap = false,
+                modifier = Modifier.testTag("inbox-brand-title"),
+            )
+        }
+        // 连接胶囊独占品牌名和按钮之间的全部空间（以前和一个 Spacer 平分，被压成一半）
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .padding(horizontal = 6.dp),
+            contentAlignment = Alignment.CenterEnd,
+        ) {
+            if (showStatusPill) {
+                MacStatusPill(connection = connection, transportKind = transportKind)
+            }
+        }
         if (inboxModeEnabled != null && onToggleInboxMode != null) {
             IconButton(
                 onClick = onToggleInboxMode,
@@ -569,6 +639,7 @@ internal fun InboxTopBar(
                         "开启收件箱模式"
                     },
                     tint = if (inboxModeEnabled) HomingPalette.Brand else HomingPalette.Muted,
+                    modifier = Modifier.size(24.dp),
                 )
             }
         }
@@ -580,6 +651,7 @@ internal fun InboxTopBar(
                 imageVector = if (searchOpen) Icons.Outlined.Close else Icons.Outlined.Search,
                 contentDescription = if (searchOpen) "关闭搜索" else "搜索",
                 tint = HomingPalette.Body,
+                modifier = Modifier.size(24.dp),
             )
         }
     }

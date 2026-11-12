@@ -20,6 +20,7 @@ import dev.agentpush.poc.ui.theme.AgentInboxTheme
 class MainActivity : ComponentActivity() {
     private val viewModel: AgentViewModel by viewModels()
     private var pendingSessionId by mutableStateOf<String?>(null)
+    private var pendingPairLink by mutableStateOf<String?>(null)
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) {
@@ -31,6 +32,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         NotificationHelper.createChannels(this)
         pendingSessionId = intent.getStringExtra(NotificationHelper.EXTRA_SESSION_ID)
+        pendingPairLink = pairLinkOf(intent)
 
         setContent {
             AgentInboxTheme {
@@ -38,6 +40,8 @@ class MainActivity : ComponentActivity() {
                     viewModel = viewModel,
                     pendingSessionId = pendingSessionId,
                     onPendingSessionConsumed = { pendingSessionId = null },
+                    pendingPairLink = pendingPairLink,
+                    onPendingPairLinkConsumed = { pendingPairLink = null },
                 )
             }
         }
@@ -49,6 +53,14 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         pendingSessionId = intent.getStringExtra(NotificationHelper.EXTRA_SESSION_ID)
+        pairLinkOf(intent)?.let { pendingPairLink = it }
+    }
+
+    /** homing://pair?… 由电脑二维码的落地页或系统相机打开 */
+    private fun pairLinkOf(intent: Intent?): String? {
+        val data = intent?.data ?: return null
+        if (intent.action != Intent.ACTION_VIEW) return null
+        return if (data.scheme == "homing" && data.host == "pair") data.toString() else null
     }
 
     private fun requestNotificationsAndStart() {

@@ -348,7 +348,7 @@ func downloadAPK(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/vnd.android.package-archive")
-	w.Header().Set("Content-Disposition", `attachment; filename="agent-inbox.apk"`)
+	w.Header().Set("Content-Disposition", `attachment; filename="homing.apk"`)
 	w.Header().Set("Cache-Control", "no-store")
 	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
 }
