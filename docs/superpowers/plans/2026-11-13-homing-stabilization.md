@@ -278,6 +278,8 @@
 
 程式碼提交：`ee299a1`（首頁／平台用例／桌面服務生命週期）、`518a202`（手機介面與圖片處理）。`ee299a1` 的 Linux Go CI 已轉綠；包含手機變更的完整 CI：<https://github.com/tomato-hug/homing/actions/runs/43466942110>。
 
+**完整遠端 CI 已通過：** 上述 `518a202` 的 Go backend vet／tests、協議向量、Node 22 雲中繼、Android tests／Debug APK 四個 job 均為 success。其後提交僅更新進度文件。提交歷史的 gitleaks 掃描亦通過；本機及遠端 main 均未移動。
+
 本機驗證：Go build／全套測試／vet、headless 全套測試與相關 race 檢查通過；Android **164 項測試、零失敗**，Debug APK 組裝及簽章檢查通過。獨立審查指出的三項問題（相對資料目錄、引用式圖片、轉義 URL）均先用回歸重現再修正。
 
 候選產物：
