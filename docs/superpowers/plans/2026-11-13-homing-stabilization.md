@@ -258,3 +258,5 @@
 | `internal/relayapi.TestAutoAwaySettingsRoundTrip` | Linux 啟用自動離開回 409 `auto_away_unavailable`，測試卻一律期待 200 | relayapi 負責人依 GET 回報的 available 分別驗證支援及不支援情況；不應在 Linux 假裝支援 macOS 探測 |
 
 以上位於既有 WorkBuddy／尚未指定負責人的目錄；遵守 `AGENTS.md`，本批僅定位及交接，沒有代改，也沒有為了 CI 綠燈略過這些測試。完整假 Agent 回覆／授權回路、反向換路與晚到事件整合、真機驗收仍列為 Task 2 待辦。
+
+第二輪 CI 已全部結束：Android 測試／Debug APK、協議向量、Node 雲中繼均成功；Go vet 成功，Go 測試因上表兩項失敗而使整體 CI 保持 failure。程式碼驗證目標為 `43ef680`；其後只有進度文件提交。
