@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -95,6 +97,41 @@ func TestHomeAwayOnlyShowsNewActivityAndKeepsFinishedInResume(t *testing.T) {
 	}
 	if home.Counts.AwayNew != 1 {
 		t.Fatalf("away_new = %d, want 1", home.Counts.AwayNew)
+	}
+}
+
+func TestHomeAwayUsesEventOrderWhenTimestampsMatch(t *testing.T) {
+	d := writeStore(t, ``, `{"version":1,"sessions":{}}`)
+	s, err := d.Store()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sameTimestamp = "2099-01-01T00:00:00.000Z"
+	if _, err := s.AppendEvent(store.Event{Source: "claude", Kind: "done", SessionID: "demo-before-away", Ts: sameTimestamp}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartAway("manual", "demo-phone"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AppendEvent(store.Event{Source: "claude", Kind: "done", SessionID: "demo-after-away", Ts: sameTimestamp}); err != nil {
+		t.Fatal(err)
+	}
+	home := d.buildHome(httptest.NewRequest(http.MethodGet, "/api/home", nil))
+	if len(home.Attention) != 1 || home.Attention[0].Session.SessionID != "demo-after-away" {
+		t.Fatalf("same-timestamp attention = %+v, want only demo-after-away", home.Attention)
+	}
+}
+
+func TestHomeLegacyAwayPeriodKeepsTimestampFallback(t *testing.T) {
+	d := writeStore(t, `{"id":1,"ts":"2026-01-01T00:00:00.000Z","source":"claude","kind":"done","session_id":"demo-legacy-before"}
+{"id":2,"ts":"2026-01-01T02:00:00.000Z","source":"claude","kind":"done","session_id":"demo-legacy-after"}
+`, `{"version":1,"sessions":{}}`)
+	if err := os.WriteFile(filepath.Join(d.DataDir, "away-periods.jsonl"), []byte(`{"id":"awp_demo_legacy","started_at":"2026-01-01T01:00:00.000Z","source":"manual"}`+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	home := d.buildHome(httptest.NewRequest(http.MethodGet, "/api/home", nil))
+	if len(home.Attention) != 1 || home.Attention[0].Session.SessionID != "demo-legacy-after" {
+		t.Fatalf("legacy attention = %+v", home.Attention)
 	}
 }
 

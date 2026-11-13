@@ -167,11 +167,18 @@ func (s *Store) StartAway(source, deviceID string) (AwayPeriod, error) {
 	if strings.TrimSpace(source) == "" {
 		source = "manual"
 	}
+	var eventWatermark int64
+	for _, event := range s.events {
+		if event.ID > eventWatermark {
+			eventWatermark = event.ID
+		}
+	}
 	period := AwayPeriod{
-		ID:        "awp_" + randomID(10),
-		StartedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
-		Source:    source,
-		DeviceID:  truncateRunes(strings.TrimSpace(deviceID), 80),
+		StartedAfterEventID: &eventWatermark,
+		ID:                  "awp_" + randomID(10),
+		StartedAt:           time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		Source:              source,
+		DeviceID:            truncateRunes(strings.TrimSpace(deviceID), 80),
 	}
 	s.away = append(s.away, period)
 	s.config.Away.Enabled = true

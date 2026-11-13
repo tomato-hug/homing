@@ -16,6 +16,7 @@ func TestAutoAwaySettingsRoundTrip(t *testing.T) {
 	var initial struct {
 		Enabled     bool `json:"enabled"`
 		IdleMinutes int  `json:"idle_minutes"`
+		Available   bool `json:"available"`
 	}
 	if err := json.Unmarshal(raw, &initial); err != nil {
 		t.Fatal(err)
@@ -26,11 +27,27 @@ func TestAutoAwaySettingsRoundTrip(t *testing.T) {
 
 	response, raw = relay.do(t, http.MethodPatch, "/api/away/settings",
 		[]byte(`{"enabled":true,"idle_minutes":7}`), true)
+	if !initial.Available {
+		var rejected struct {
+			Code string `json:"code"`
+		}
+		if err := json.Unmarshal(raw, &rejected); err != nil {
+			t.Fatal(err)
+		}
+		if response.StatusCode != http.StatusConflict || rejected.Code != "auto_away_unavailable" {
+			t.Fatalf("unsupported platform PATCH status=%d body=%s", response.StatusCode, raw)
+		}
+		if enabled, minutes := relay.store.AutoAwaySettings(); enabled || minutes != 5 {
+			t.Fatalf("rejected enable changed settings: enabled=%v minutes=%d", enabled, minutes)
+		}
+		response, raw = relay.do(t, http.MethodPatch, "/api/away/settings",
+			[]byte(`{"enabled":false,"idle_minutes":7}`), true)
+	}
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("PATCH status=%d body=%s", response.StatusCode, raw)
 	}
 	enabled, minutes := relay.store.AutoAwaySettings()
-	if !enabled || minutes != 7 {
+	if enabled != initial.Available || minutes != 7 {
 		t.Fatalf("stored settings enabled=%v minutes=%d", enabled, minutes)
 	}
 }

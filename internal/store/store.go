@@ -105,12 +105,14 @@ type DispatchResult struct {
 // AwayPeriod is one stretch of "away from the Mac" mode. The file is
 // append-only; the last line for an id wins, like dispatches.jsonl.
 type AwayPeriod struct {
-	ID        string `json:"id"`
-	StartedAt string `json:"started_at"`
-	EndedAt   string `json:"ended_at,omitempty"`
-	Source    string `json:"source"`
-	DeviceID  string `json:"device_id,omitempty"`
-	ClearedAt string `json:"cleared_at,omitempty"`
+	// Nil identifies legacy periods that only recorded a timestamp.
+	StartedAfterEventID *int64 `json:"started_after_event_id,omitempty"`
+	ID                  string `json:"id"`
+	StartedAt           string `json:"started_at"`
+	EndedAt             string `json:"ended_at,omitempty"`
+	Source              string `json:"source"`
+	DeviceID            string `json:"device_id,omitempty"`
+	ClearedAt           string `json:"cleared_at,omitempty"`
 }
 
 // State is the governance triple plus archived, exactly as session-state.json stores it.

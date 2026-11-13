@@ -1,10 +1,58 @@
 package store
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/tomato-hug/homing/internal/platform"
 )
+
+func TestAwayStartEventWatermarkSurvivesReload(t *testing.T) {
+	for _, hasEvent := range []bool{false, true} {
+		t.Run(map[bool]string{false: "empty", true: "existing-event"}[hasEvent], func(t *testing.T) {
+			paths := platform.NewPaths(t.TempDir())
+			s, err := Open(paths)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var want int64
+			if hasEvent {
+				e, err := s.AppendEvent(Event{Source: "codex", Kind: "done", SessionID: "demo-before-away"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				want = e.ID
+			}
+			period, err := s.StartAway("manual", "demo-phone")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := Open(paths)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = reopened.Close() })
+			loaded, ok := reopened.CurrentAwayPeriod()
+			if !ok || loaded.ID != period.ID {
+				t.Fatal("away period not restored")
+			}
+			raw, err := json.Marshal(loaded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]any
+			if err := json.Unmarshal(raw, &fields); err != nil {
+				t.Fatal(err)
+			}
+			if got, ok := fields["started_after_event_id"]; !ok || got != float64(want) {
+				t.Fatalf("persisted event watermark = %v present=%v, want %d", got, ok, want)
+			}
+		})
+	}
+}
 
 func TestSeenWatermarkBecomesUnreadOnNewEvent(t *testing.T) {
 	dir := t.TempDir()

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -106,59 +107,19 @@ func desktop(args []string) error {
 		}
 		*dataDir = d
 	}
-	if err := os.MkdirAll(*dataDir, 0o700); err != nil {
-		return err
-	}
-
-	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	deps := &api.Deps{Log: log, DataDir: *dataDir, Version: version}
-	defer func() {
-		service.Flush(deps)
-		_ = deps.Close()
-	}()
-
-	listener, err := net.Listen("tcp", *addr)
-	if err != nil {
-		return fmt.Errorf("本机服务无法监听 %s：%w（若 Node 中继仍在运行，先停掉它（scripts/switch-to-go.sh 会处理），或临时用 `homing --addr 127.0.0.1:18791`）", *addr, err)
-	}
-	srv := &http.Server{Handler: api.NewMux(deps), ReadHeaderTimeout: 10 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	if st, storeErr := deps.Store(); storeErr == nil {
-		go awayauto.New(st, log).Run(ctx)
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	local, err := startDesktopService(ctx, *addr, *dataDir, version, log)
+	if err != nil {
+		return err
 	}
-
-	serverErr := make(chan error, 1)
-	go func() {
-		err := srv.Serve(listener)
-		if errors.Is(err, http.ErrServerClosed) {
-			err = nil
-		}
-		serverErr <- err
-		if err != nil {
-			cancel()
-		}
-	}()
-	log.Info("homing desktop", "addr", *addr, "data", *dataDir, "version", version)
-
-	url := "http://" + browserAddress(listener.Addr().String())
-	guiErr := gui.Run(ctx, gui.Options{
-		URL: url, DataDir: *dataDir, Version: version, Log: log,
+	defer local.Close()
+	log.Info("homing desktop", "url", local.URL, "owns_service", local.owned)
+	guiErr := gui.Run(local.ctx, gui.Options{
+		URL: local.URL, DataDir: *dataDir, Version: version, Log: log,
 	})
-	stop()
-	shutdown, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer shutdownCancel()
-	_ = srv.Shutdown(shutdown)
-	select {
-	case err := <-serverErr:
-		if err != nil {
-			return err
-		}
-	default:
-	}
-	return guiErr
+	return errors.Join(guiErr, local.Close())
 }
 
 func browserAddress(addr string) string {
@@ -198,6 +159,11 @@ func serve(args []string) error {
 		}
 		*dataDir = d
 	}
+	absoluteDir, err := filepath.Abs(*dataDir)
+	if err != nil {
+		return err
+	}
+	*dataDir = absoluteDir
 	if err := os.MkdirAll(*dataDir, 0o700); err != nil {
 		return err
 	}

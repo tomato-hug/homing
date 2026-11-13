@@ -196,7 +196,11 @@ func (d *Deps) buildHome(r *http.Request) Home {
 		if out.Away.Period != nil && out.Away.Period.ClearedAt == "" {
 			start := out.Away.Period.StartedAt
 			for _, event := range unseen {
-				if event.Ts >= start {
+				afterStart := event.Ts >= start
+				if watermark := out.Away.Period.StartedAfterEventID; watermark != nil {
+					afterStart = event.ID > *watermark
+				}
+				if afterStart {
 					sinceAway = true
 					break
 				}
