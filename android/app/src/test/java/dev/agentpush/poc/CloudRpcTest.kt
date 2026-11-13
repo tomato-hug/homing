@@ -7,6 +7,11 @@ import dev.agentpush.poc.protocol.HomingCrypto
 import dev.agentpush.poc.protocol.HomingEnvelope
 import dev.agentpush.poc.protocol.PairedComputer
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.supervisorScope
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
@@ -27,6 +32,7 @@ import java.util.Base64
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicInteger
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -41,6 +47,119 @@ class CloudRpcTest {
         deviceId = crypto.deviceId(clientKeys.publicKey),
         fingerprint = crypto.fingerprint(clientKeys.publicKey),
     )
+
+    @Test
+    fun mutationWithLostReceiptIsNotRetriedOnAnotherAddress() = runBlocking {
+        verifyAddressFallback("POST", expectFallback = false)
+    }
+
+    @Test
+    fun readWithLostReceiptCanUseAnotherAddress() = runBlocking {
+        verifyAddressFallback("GET", expectFallback = true)
+    }
+
+    @Test
+    fun cancelledRpcDoesNotContactAnotherAddress() = runBlocking {
+        verifyAddressFallback("GET", expectFallback = false, cancelAfterSend = true)
+    }
+
+    private suspend fun verifyAddressFallback(method: String, expectFallback: Boolean, cancelAfterSend: Boolean = false) {
+        val connected = CountDownLatch(2)
+        val firstReceived = CountDownLatch(1)
+        val backupReceived = CountDownLatch(1)
+        val calls = listOf(AtomicInteger(), AtomicInteger())
+        val serverError = AtomicReference<Throwable>()
+        val sockets = java.util.concurrent.ConcurrentLinkedQueue<WebSocket>()
+        val servers = List(2) { index ->
+            MockWebServer().apply {
+                enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                    override fun onOpen(webSocket: WebSocket, response: Response) {
+                        sockets.add(webSocket)
+                        webSocket.send(JSONObject().put("t", "challenge")
+                            .put("nonce", crypto.toBase64(ByteArray(32) { 7 })).toString())
+                    }
+
+                    override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                        webSocket.close(code, reason)
+                    }
+
+                    override fun onMessage(webSocket: WebSocket, text: String) {
+                        try {
+                            val message = JSONObject(text)
+                            when (message.optString("t")) {
+                                "hello" -> webSocket.send("""{"t":"hello.ok"}""")
+                                "msg" -> {
+                                    val request = JSONObject(crypto.openEnvelope(
+                                        message.toEnvelope(), clientIdentity.publicKey, hostKeys.secretKey,
+                                    ))
+                                    assertEquals(method, request.getString("method"))
+                                    assertEquals("/api/demo", request.getString("path"))
+                                    calls[index].incrementAndGet()
+                                    if (index == 0) {
+                                        firstReceived.countDown()
+                                        // Simulate an executed request whose acknowledgement is lost.
+                                        if (!cancelAfterSend) webSocket.close(1011, "demo acknowledgement lost")
+                                    } else {
+                                        backupReceived.countDown()
+                                        val envelope = crypto.createEnvelope(
+                                            from = hostId, to = clientIdentity.deviceId,
+                                            payloadJson = JSONObject().put("type", "rpc_result")
+                                                .put("rid", request.getString("rid")).put("status", 200)
+                                                .put("body", JSONObject().put("ok", true)).toString(),
+                                            sender = hostKeys, recipientPublicKey = clientKeys.publicKey,
+                                        )
+                                        webSocket.send(envelope.toRelayJson().toString())
+                                    }
+                                }
+                            }
+                        } catch (error: Throwable) {
+                            serverError.set(error)
+                        }
+                    }
+                }))
+                start()
+            }
+        }
+        val computer = pairedComputer(servers[0]).copy(
+            lanServers = listOf(servers[1].url("/v1/ws").toString()),
+        )
+        val client = CloudNotificationClient(
+            identity = clientIdentity, computersProvider = { listOf(computer) }, crypto = crypto,
+            listener = object : CloudNotificationClient.Listener {
+                override fun onNotification(computer: PairedComputer, payload: NotifyPayload) = true
+                override fun onStateChanged(server: String, state: CloudNotificationClient.State, detail: String?) {
+                    if (state == CloudNotificationClient.State.CONNECTED) connected.countDown()
+                }
+            },
+        )
+        try {
+            client.start()
+            assertTrue("both demo addresses must connect", connected.await(3, TimeUnit.SECONDS))
+            val result = supervisorScope {
+                val pending = async(start = CoroutineStart.UNDISPATCHED) {
+                    client.requestRPC(computer, method, "/api/demo", timeoutMillis = 3_000)
+                }
+                if (cancelAfterSend) {
+                    assertTrue(firstReceived.await(3, TimeUnit.SECONDS))
+                    pending.cancelAndJoin()
+                    assertTrue(pending.isCancelled)
+                    assertFalse("cancelled RPC must not reach another address", backupReceived.await(200, TimeUnit.MILLISECONDS))
+                    Result.failure<CloudRpcResult>(CancellationException("demo cancellation"))
+                } else {
+                    runCatching { pending.await() }
+                }
+            }
+            serverError.get()?.let { throw AssertionError("demo websocket failed", it) }
+            if (expectFallback) assertEquals(200, result.getOrThrow().status)
+            else assertTrue("uncertain mutation must be reported", result.isFailure)
+            assertEquals(1, calls[0].get())
+            assertEquals(if (expectFallback) 1 else 0, calls[1].get())
+        } finally {
+            client.stop()
+            sockets.forEach { it.close(1000, "demo done") }
+            servers.forEach { it.shutdown() }
+        }
+    }
 
     @Test
     fun encryptedAgentsRpcRoundTrip(): Unit = runBlocking {

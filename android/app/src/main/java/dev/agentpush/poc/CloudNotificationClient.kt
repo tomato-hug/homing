@@ -9,6 +9,7 @@ import dev.agentpush.poc.protocol.HomingKeyPair
 import dev.agentpush.poc.protocol.PairedComputer
 import dev.agentpush.poc.protocol.ProtocolUrls
 import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
@@ -177,7 +178,9 @@ class CloudNotificationClient(
 
         val startedAt = System.currentTimeMillis()
         var lastError: Throwable? = null
-        for (candidate in candidates.sortedByDescending { it.second.isConnected() }) {
+        val ordered = candidates.sortedByDescending { it.second.isConnected() }
+        val attempts = if (canReplayTransportRequest(normalizedMethod)) ordered else ordered.take(1)
+        for (candidate in attempts) {
             val remaining = timeoutMillis - (System.currentTimeMillis() - startedAt)
             if (remaining <= 0) break
             try {
@@ -189,7 +192,9 @@ class CloudNotificationClient(
                     payload = payload,
                     timeoutMillis = remaining,
                 )
-            } catch (error: Throwable) {
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
                 lastError = error
             }
         }
@@ -517,6 +522,11 @@ class CloudNotificationClient(
                             currentGeneration,
                             "${t.javaClass.simpleName}: ${t.message.orEmpty()}".trim(),
                         )
+                    }
+
+                    override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                        webSocket.close(code, reason)
+                        connectionLost(currentGeneration, "连接关闭 $code")
                     }
 
                     override fun onClosed(

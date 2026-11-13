@@ -7,7 +7,9 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.job
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.withContext
 import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
@@ -62,97 +64,97 @@ class LanTransport(
     }
 
     override fun events(sessionId: String?): Flow<TransportEvent> = channelFlow {
-        var backoffMillis = INITIAL_RECONNECT_MILLIS
-        var lastEventId = ""
-        while (isActive) {
-            val settings = settingsProvider()
-            if (settings.token.isBlank()) {
-                delay(backoffMillis)
-                backoffMillis = nextBackoff(backoffMillis)
-                continue
-            }
-            val activeCall = AtomicReference<Call?>(null)
-            val cancellation = currentCoroutineContext().job.invokeOnCompletion {
-                activeCall.get()?.cancel()
-            }
-            try {
-                val query = sessionId?.takeIf { it.isNotBlank() }?.let {
-                    "?session_id=${URLEncoder.encode(it, Charsets.UTF_8.name())}"
-                }.orEmpty()
-                val requestBuilder = Request.Builder()
-                    .url(settings.baseUrl.trimEnd('/') + "/api/stream$query")
-                    .header("Authorization", "Bearer ${settings.token}")
-                    .header("Accept", "text/event-stream")
-                    .header("Cache-Control", "no-cache")
-                if (lastEventId.isNotBlank()) {
-                    requestBuilder.header("Last-Event-ID", lastEventId)
+        val activeCall = AtomicReference<Call?>(null)
+        launch {
+            var backoffMillis = INITIAL_RECONNECT_MILLIS
+            var lastEventId = ""
+            while (isActive) {
+                val settings = settingsProvider()
+                if (settings.token.isBlank()) {
+                    delay(backoffMillis)
+                    backoffMillis = nextBackoff(backoffMillis)
+                    continue
                 }
-                val call = httpClient.newCall(requestBuilder.build())
-                activeCall.set(call)
-                call.execute().use { response ->
-                    if (response.code !in 200..299) {
-                        throw AgentApiException(
-                            response.code,
-                            "HTTP ${response.code}",
-                        )
+                try {
+                    val query = sessionId?.takeIf { it.isNotBlank() }?.let {
+                        "?session_id=${URLEncoder.encode(it, Charsets.UTF_8.name())}"
+                    }.orEmpty()
+                    val requestBuilder = Request.Builder()
+                        .url(settings.baseUrl.trimEnd('/') + "/api/stream$query")
+                        .header("Authorization", "Bearer ${settings.token}")
+                        .header("Accept", "text/event-stream")
+                        .header("Cache-Control", "no-cache")
+                    if (lastEventId.isNotBlank()) {
+                        requestBuilder.header("Last-Event-ID", lastEventId)
                     }
-                    backoffMillis = INITIAL_RECONNECT_MILLIS
-                    val source = response.body?.source()
-                        ?: throw EOFException("SSE 响应没有正文")
-                    val dataLines = mutableListOf<String>()
-                    var eventName = ""
-                    var eventId = ""
+                    val call = httpClient.newCall(requestBuilder.build())
+                    activeCall.set(call)
+                    currentCoroutineContext().ensureActive()
+                    call.execute().use { response ->
+                        if (response.code !in 200..299) {
+                            throw AgentApiException(
+                                response.code,
+                                "HTTP ${response.code}",
+                            )
+                        }
+                        backoffMillis = INITIAL_RECONNECT_MILLIS
+                        val source = response.body?.source()
+                            ?: throw EOFException("SSE 响应没有正文")
+                        val dataLines = mutableListOf<String>()
+                        var eventName = ""
+                        var eventId = ""
 
-                    suspend fun dispatch() {
-                        if (dataLines.isEmpty()) {
+                        suspend fun dispatch() {
+                            if (dataLines.isEmpty()) {
+                                eventName = ""
+                                eventId = ""
+                                return
+                            }
+                            val raw = dataLines.joinToString("\n")
+                            val name = eventName.ifBlank { "message" }
+                            val id = eventId
+                            dataLines.clear()
                             eventName = ""
                             eventId = ""
-                            return
+                            val data = runCatching { JSONObject(raw) }.getOrNull() ?: return
+                            if (id.isNotBlank()) {
+                                lastEventId = id
+                            }
+                            send(TransportEvent(name = name, data = data, id = id))
                         }
-                        val raw = dataLines.joinToString("\n")
-                        val name = eventName.ifBlank { "message" }
-                        val id = eventId
-                        dataLines.clear()
-                        eventName = ""
-                        eventId = ""
-                        val data = runCatching { JSONObject(raw) }.getOrNull() ?: return
-                        if (id.isNotBlank()) {
-                            lastEventId = id
-                        }
-                        send(TransportEvent(name = name, data = data, id = id))
-                    }
 
-                    while (isActive) {
-                        val line = source.readUtf8Line() ?: break
-                        when {
-                            line.isEmpty() -> dispatch()
-                            line.startsWith(":") -> Unit
-                            line.startsWith("event:") ->
-                                eventName = line.substringAfter("event:").trim()
-                            line.startsWith("id:") ->
-                                eventId = line.substringAfter("id:").trim()
-                            line.startsWith("data:") ->
-                                dataLines.add(line.substringAfter("data:").removePrefix(" "))
+                        while (isActive) {
+                            val line = source.readUtf8Line() ?: break
+                            when {
+                                line.isEmpty() -> dispatch()
+                                line.startsWith(":") -> Unit
+                                line.startsWith("event:") ->
+                                    eventName = line.substringAfter("event:").trim()
+                                line.startsWith("id:") ->
+                                    eventId = line.substringAfter("id:").trim()
+                                line.startsWith("data:") ->
+                                    dataLines.add(line.substringAfter("data:").removePrefix(" "))
+                            }
                         }
+                        dispatch()
                     }
-                    dispatch()
+                    if (isActive) {
+                        throw EOFException("中继关闭了 SSE 连接")
+                    }
+                } catch (error: Exception) {
+                    if (!isActive) break
+                    if (error is AgentApiException && error.statusCode !in 0..599) {
+                        throw error
+                    }
+                } finally {
+                    activeCall.getAndSet(null)?.cancel()
                 }
-                if (isActive) {
-                    throw EOFException("中继关闭了 SSE 连接")
-                }
-            } catch (error: Exception) {
                 if (!isActive) break
-                if (error is AgentApiException && error.statusCode !in 0..599) {
-                    throw error
-                }
-            } finally {
-                cancellation.dispose()
-                activeCall.getAndSet(null)?.cancel()
+                delay(backoffMillis)
+                backoffMillis = nextBackoff(backoffMillis)
             }
-            if (!isActive) break
-            delay(backoffMillis)
-            backoffMillis = nextBackoff(backoffMillis)
         }
+        awaitClose { activeCall.getAndSet(null)?.cancel() }
     }.flowOn(Dispatchers.IO)
 
     override suspend fun upload(
@@ -207,6 +209,8 @@ class LanTransport(
 
     suspend fun probeHealth(): Boolean = withContext(Dispatchers.IO) {
         val settings = settingsProvider()
+        // E2E-only pairing uses encrypted RPC, not legacy HTTP bearer auth.
+        if (settings.token.isBlank()) return@withContext false
         val request = Request.Builder()
             .url(settings.baseUrl.trimEnd('/') + "/health")
             .get()

@@ -43,6 +43,10 @@ interface HomingTransport {
     val kind: TransportKind
 }
 
+// Mutations can have executed even when their acknowledgement was lost.
+internal fun canReplayTransportRequest(method: String): Boolean =
+    method.trim().uppercase().ifBlank { "GET" } in setOf("GET", "HEAD")
+
 internal fun parseTransportBody(raw: String): Any? {
     if (raw.isBlank()) return null
     return runCatching { JSONTokener(raw).nextValue() }.getOrNull()

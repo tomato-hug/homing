@@ -1,16 +1,20 @@
 package dev.agentpush.poc
 
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flatMapLatest
-import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
+import java.io.IOException
 
 class TransportRouter(
     private val lan: HomingTransport,
@@ -39,7 +43,7 @@ class TransportRouter(
             ) {
                 return
             }
-            val lanAvailable = runCatching { probeLan() }.getOrDefault(false)
+            val lanAvailable = probeLanSafely()
             _kind.value = when {
                 lanAvailable -> TransportKind.LAN
                 cloudAvailable() -> TransportKind.CLOUD
@@ -65,7 +69,8 @@ class TransportRouter(
         return try {
             lan.request(method, path, body).also { clearLanFailures() }
         } catch (error: Exception) {
-            if (recordLanFailure()) {
+            if (error !is IOException || error is AgentApiException) throw error
+            if (recordLanFailure() && canReplayTransportRequest(method)) {
                 requestCloud(method, path, body)
             } else {
                 throw error
@@ -74,16 +79,24 @@ class TransportRouter(
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
-    fun events(sessionId: String? = null): Flow<TransportEvent> = flow {
+    fun events(sessionId: String? = null): Flow<TransportEvent> = channelFlow {
         ensureRoute()
-        emitAll(
+        val monitor = launch {
+            while (isActive) {
+                delay(ROUTE_CACHE_MILLIS)
+                ensureRoute(force = true)
+            }
+        }
+        try {
             kind.flatMapLatest { current ->
                 when (current) {
                     TransportKind.LAN -> lan.events(sessionId)
                     TransportKind.CLOUD -> cloud.events(sessionId)
                 }
-            },
-        )
+            }.collect { send(it) }
+        } finally {
+            monitor.cancel()
+        }
     }
 
     suspend fun upload(
@@ -122,16 +135,29 @@ class TransportRouter(
         return try {
             cloud.request(method, path, body)
         } catch (error: Exception) {
-            if (runCatching { probeLan() }.getOrDefault(false)) {
+            if (error is CancellationException ||
+                error !is IOException && error !is CloudRpcException ||
+                error is AgentApiException
+            ) throw error
+            if (probeLanSafely()) {
                 _kind.value = TransportKind.LAN
                 routeInitialized = true
                 lastProbeAt = clock()
                 clearLanFailures()
-                lan.request(method, path, body)
+                // A lost response does not prove a mutation failed to execute.
+                if (canReplayTransportRequest(method)) lan.request(method, path, body) else throw error
             } else {
                 throw error
             }
         }
+    }
+
+    private suspend fun probeLanSafely(): Boolean = try {
+        probeLan()
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
+        false
     }
 
     private fun recordLanFailure(): Boolean {
@@ -152,7 +178,7 @@ class TransportRouter(
     }
 
     companion object {
-        private const val ROUTE_CACHE_MILLIS = 8_000L
+        private const val ROUTE_CACHE_MILLIS = 3_000L
         private const val LAN_FAILURES_BEFORE_SWITCH = 2
         private const val CLOUD_FILE_LIMIT_BYTES = 20 * 1024 * 1024
     }

@@ -243,7 +243,7 @@ class HomingUiRenderTest {
         compose.onNodeWithText("我的").assertExists()
         compose.onNodeWithText("重新配对").assertExists()
         compose.onNodeWithText("Codex").assertExists()
-        compose.onNodeWithText("Homing 0.11.0").performScrollTo().assertExists()
+        compose.onNodeWithText("Homing ${BuildConfig.VERSION_NAME}").performScrollTo().assertExists()
         compose.onNodeWithText("添加 Agent").performScrollTo().assertExists()
         compose.onNodeWithText("等你回复").performScrollTo().assertExists()
         compose.onNodeWithText("离开模式").assertDoesNotExist()

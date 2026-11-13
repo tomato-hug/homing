@@ -114,3 +114,6 @@
   是最可靠的送達證據。多條 queued 必須一對一消費，不能一條回覆事件就清空全部。
 - Android 負數樂觀 reply 收到第一個帶正數 reply_id 的 SSE 時要立刻重映射 key；
   否則 POST 回執較晚到達會刪掉負數 key，再以舊 queued 覆蓋已 injected 的狀態。
+- 回覆或新建請求的回執丟失，不代表服務端沒有執行；HTTP／加密 RPC 換路只自動重送讀取請求，取消必須直接向上傳遞。
+- SSE 卡在阻塞讀取時，普通 invokeOnCompletion 要等協程結束才取消 socket，會拖住 flatMapLatest 換路；用 awaitClose 立即取消活躍的 OkHttp Call，並在 execute 前檢查取消。
+- E2E 配對只保存公鑰和電腦資料，不提供舊式 HTTP token；公開 /health 成功不能讓無 token 的手機選中 HTTP，應走加密 RPC。
