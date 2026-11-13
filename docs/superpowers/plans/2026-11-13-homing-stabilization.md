@@ -243,3 +243,9 @@
 **執行決策：** 遵守共用工作樹規則，未切分支或建 worktree；遠端保存使用現有分支名 `homing-v3`，避免把舊 main 誤當成本輪內容。沒有跨目錄接手桌面／控制台及尚未指定負責人的 relayapi 改動。每個活躍事件收集器會增加每 3 秒一次的輕量探測；寫入結果不明時需要使用者先核對狀態，避免自動重送。
 
 **仍待完成：** Task 1 的其餘作者修改／運行版本對齊；真機掃碼、行動網切換、通知、離線冷啟動與多電腦驗收；cloud→LAN 反向串流及晚到／重複事件整合覆蓋；Task 3–7。桌面／控制台由既有負責人繼續，relayapi／orchestrator／發佈流水線仍需整合者確認歸屬。本批未重啟服務、安裝手機 App、發佈 Release 或向真實會話發消息；對外服務及 `/apk` 仍使用原版本。
+
+### 遠端 CI 跟進
+
+已手動觸發程式碼提交 `070536d` 的 CI：<https://github.com/tomato-hug/homing/actions/runs/43456131412>。協議向量、Node 雲中繼與 Android 單元測試已通過；Go job 在 vet 階段因 Ubuntu 缺 Wails 所需的 GTK／WebKit 開發套件失敗，未進入 Go 測試。
+
+已準備 `output/homing-v3-stabilization/ci-headless.patch`：將 Ubuntu Go job 的 vet／test 改用已存在的 `headless` build tag，並更正 job 名稱。補丁套用檢查、本機 headless vet／全套測試及 Linux amd64 靜態交叉編譯皆通過。用戶已確認由 Codex 接手此項，現已套用補丁，準備推送並重跑 CI。此授權範圍是本次 CI 修正，桌面／控制台及其餘發佈工作仍沿用既有分工。

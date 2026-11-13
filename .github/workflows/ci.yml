@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   go:
-    name: Go vet and tests
+    name: Go backend vet and tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,9 +20,9 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Vet
-        run: go vet ./...
+        run: go vet -tags headless ./...
       - name: Test
-        run: go test ./...
+        run: go test -tags headless ./...
 
   protocol:
     name: Protocol vectors (Node 22)
