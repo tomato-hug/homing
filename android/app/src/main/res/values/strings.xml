@@ -1,4 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Homing</string>
+    <string name="model_search">搜索模型名称或 ID</string>
+    <string name="model_search_empty">没有匹配的模型</string>
+    <string name="model_list_unavailable">这台电脑暂未提供可选模型。</string>
+    <string name="model_info">模型说明</string>
+    <string name="close">关闭</string>
+    <string name="rename_session">重命名</string>
+    <string name="image_unavailable">📎 %1$s\n图片暂时无法显示，请重试或在电脑上查看。</string>
 </resources>

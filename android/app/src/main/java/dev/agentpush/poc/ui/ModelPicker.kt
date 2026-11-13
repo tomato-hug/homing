@@ -27,6 +27,7 @@ import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -39,11 +40,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.agentpush.poc.AgentModel
 import dev.agentpush.poc.AgentProfile
+import dev.agentpush.poc.R
 import dev.agentpush.poc.ui.theme.HomingMono
 
 @Composable
@@ -61,7 +65,7 @@ fun ModelPill(
         shape = RoundedCornerShape(50),
         color = when {
             !enabled -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
-            overridden -> ClaudeOrange.copy(alpha = 0.14f)
+            overridden -> MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
             else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f)
         },
         border = BorderStroke(
@@ -80,7 +84,7 @@ fun ModelPill(
         ) {
             Text(
                 text = label.ifBlank { "未选择模型" },
-                style = MaterialTheme.typography.labelMedium.copy(fontFamily = HomingMono),
+                style = MaterialTheme.typography.labelMedium,
                 color = if (enabled) {
                     MaterialTheme.colorScheme.onSurface
                 } else {
@@ -103,7 +107,7 @@ fun ModelPill(
                 Text(
                     text = "下一条",
                     style = MaterialTheme.typography.labelSmall,
-                    color = ClaudeOrange,
+                    color = MaterialTheme.colorScheme.primary,
                     fontWeight = FontWeight.Bold,
                 )
             }
@@ -130,7 +134,11 @@ fun ModelPickerSheet(
         mutableStateOf(currentEffort)
     }
     val selected = profile.models.firstOrNull { it.id == selectedId }
-    val providers = profile.models.groupBy { it.provider.ifBlank { "默认" } }
+    var search by remember(profile.source, profile.models.size) { mutableStateOf("") }
+    val visibleModels = profile.models.filter {
+        it.id.contains(search.trim(), ignoreCase = true) || it.displayName.contains(search.trim(), ignoreCase = true)
+    }
+    val providers = visibleModels.groupBy { it.provider.ifBlank { "默认" } }
         .toSortedMap(compareBy { if (it == "默认") "" else it })
 
     ModalBottomSheet(
@@ -140,6 +148,7 @@ fun ModelPickerSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .testTag("model-picker")
                 .navigationBarsPadding()
                 .padding(bottom = 8.dp),
         ) {
@@ -163,6 +172,13 @@ fun ModelPickerSheet(
                 }
                 TextButton(onClick = onDismiss) { Text("取消") }
             }
+            if (profile.models.size > 12) {
+                OutlinedTextField(
+                    value = search, onValueChange = { search = it }, singleLine = true,
+                    placeholder = { Text(stringResource(R.string.model_search)) },
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp).testTag("model-search"),
+                )
+            }
             if (profile.models.isEmpty()) {
                 Box(
                     modifier = Modifier
@@ -171,12 +187,13 @@ fun ModelPickerSheet(
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        text = "中继还没有提供这个 Agent 的模型列表。",
+                        text = stringResource(R.string.model_list_unavailable),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             } else {
+                if (visibleModels.isEmpty()) Text(stringResource(R.string.model_search_empty), modifier = Modifier.padding(20.dp))
                 LazyColumn(modifier = Modifier.weight(1f, fill = false)) {
                     providers.forEach { (provider, models) ->
                         item(key = "provider-$provider") {
@@ -325,7 +342,7 @@ private fun ModelRow(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     text = model.displayName,
-                    style = MaterialTheme.typography.bodyLarge.copy(fontFamily = HomingMono),
+                    style = MaterialTheme.typography.bodyLarge,
                     fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,

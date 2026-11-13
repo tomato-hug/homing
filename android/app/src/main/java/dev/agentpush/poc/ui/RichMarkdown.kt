@@ -32,12 +32,14 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.platform.UriHandler
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -47,7 +49,10 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import com.mikepenz.markdown.coil3.Coil3ImageTransformerImpl
+import coil3.compose.AsyncImagePainter
+import coil3.compose.rememberAsyncImagePainter
+import com.mikepenz.markdown.model.ImageTransformer
+import com.mikepenz.markdown.model.ImageData
 import com.mikepenz.markdown.compose.Markdown
 import com.mikepenz.markdown.compose.components.markdownComponents
 import com.mikepenz.markdown.compose.elements.MarkdownCodeFence
@@ -56,6 +61,7 @@ import com.mikepenz.markdown.m3.markdownTypography
 import dev.agentpush.poc.AgentApi
 import dev.agentpush.poc.AppSettings
 import dev.agentpush.poc.Attachment
+import dev.agentpush.poc.R
 import dev.agentpush.poc.ui.theme.HomingMono
 import java.net.URLDecoder
 
@@ -81,8 +87,23 @@ fun RichMarkdown(
     var previewHtml by remember { mutableStateOf<String?>(null) }
     val renderLimit = 80_000
     val truncated = source.length > renderLimit
-    val renderedSource = remember(source) {
-        if (source.length > renderLimit) source.take(renderLimit) else source
+    val failedImages = remember(source) { mutableStateMapOf<String, Boolean>() }
+    val failedLinks = failedImages.keys.toSet()
+    val unavailableImage = stringResource(R.string.image_unavailable)
+    val renderedSource = remember(source, failedLinks, unavailableImage) {
+        markdownImageFallbacks(source.take(renderLimit), failedLinks) { String.format(unavailableImage, it) }
+    }
+    val images = remember(source) {
+        object : ImageTransformer {
+            @Composable
+            override fun transform(link: String): ImageData {
+                val url = link.trim('<', '>')
+                val painter = rememberAsyncImagePainter(url, onState = { state ->
+                    if (state is AsyncImagePainter.State.Error) failedImages[url] = true
+                })
+                return ImageData(painter)
+            }
+        }
     }
 
     SelectionContainer {
@@ -93,7 +114,7 @@ fun RichMarkdown(
                     modifier = Modifier.fillMaxWidth(),
                     colors = markdownColor(),
                     typography = markdownTypography(),
-                    imageTransformer = Coil3ImageTransformerImpl,
+                    imageTransformer = images,
                     components = markdownComponents(
                         codeFence = { model ->
                             MarkdownCodeFence(

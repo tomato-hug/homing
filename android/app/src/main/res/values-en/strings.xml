@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="model_search">Search model names or IDs</string>
+    <string name="model_search_empty">No matching models</string>
+    <string name="model_list_unavailable">This computer has no model list available yet.</string>
+    <string name="model_info">Model details</string>
+    <string name="close">Close</string>
+    <string name="rename_session">Rename</string>
+    <string name="image_unavailable">📎 %1$s\nImage unavailable. Retry or view it on your computer.</string>
+</resources>

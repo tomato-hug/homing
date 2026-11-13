@@ -117,3 +117,6 @@
 - 回覆或新建請求的回執丟失，不代表服務端沒有執行；HTTP／加密 RPC 換路只自動重送讀取請求，取消必須直接向上傳遞。
 - SSE 卡在阻塞讀取時，普通 invokeOnCompletion 要等協程結束才取消 socket，會拖住 flatMapLatest 換路；用 awaitClose 立即取消活躍的 OkHttp Call，並在 execute 前檢查取消。
 - E2E 配對只保存公鑰和電腦資料，不提供舊式 HTTP token；公開 /health 成功不能讓無 token 的手機選中 HTTP，應走加密 RPC。
+- 離開起點與事件可能落在同一毫秒；新時段記錄 started_after_event_id，以事件水位分先後，舊時段保留時間相容判斷。
+- 桌面共用常駐服務時，要核對 Go 身分、本機令牌與絕對資料目錄；附著的視窗不能另開 Store，也不能在退出時關閉外部服務。
+- Markdown 圖片降級要解析引用定義並沿用渲染器反轉義；將引用與角括號網址轉成渲染器可用的行內格式，程式碼範例維持原文。

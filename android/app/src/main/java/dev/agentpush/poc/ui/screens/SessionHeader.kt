@@ -48,6 +48,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -59,6 +60,7 @@ import dev.agentpush.poc.ContextUsage
 import dev.agentpush.poc.SessionItemsState
 import dev.agentpush.poc.SessionStatus
 import dev.agentpush.poc.SessionSummary
+import dev.agentpush.poc.R
 import dev.agentpush.poc.titleSourceLabel
 import dev.agentpush.poc.ui.AgentGlyph
 import dev.agentpush.poc.ui.ClaudeOrange
@@ -93,6 +95,7 @@ internal fun SessionHeader(
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
     var renameOpen by remember { mutableStateOf(false) }
+    var titleDetailsOpen by remember { mutableStateOf(false) }
     var renameText by remember { mutableStateOf("") }
     Surface(
         color = MaterialTheme.colorScheme.background.copy(alpha = 0.98f),
@@ -132,12 +135,11 @@ internal fun SessionHeader(
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.onSurface,
                             ),
-                            maxLines = 2,
+                            maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.combinedClickable(
                                 onClick = {
-                                    renameText = session.title
-                                    renameOpen = true
+                                    titleDetailsOpen = true
                                 },
                                 onLongClick = onToggleInfo,
                             ).testTag("session-title"),
@@ -156,7 +158,6 @@ internal fun SessionHeader(
                                 }
                             },
                             style = TextStyle(
-                                fontFamily = HomingMono,
                                 fontSize = 11.5.sp,
                                 lineHeight = 16.sp,
                                 color = HomingPalette.Muted,
@@ -457,6 +458,18 @@ internal fun SessionHeader(
                 }
             }
         }
+    }
+    if (titleDetailsOpen && session != null) {
+        AlertDialog(
+            onDismissRequest = { titleDetailsOpen = false },
+            text = { Text(session.title, modifier = Modifier.testTag("session-title-details")) },
+            confirmButton = { TextButton(onClick = { titleDetailsOpen = false }) { Text(stringResource(R.string.close)) } },
+            dismissButton = { TextButton(onClick = {
+                titleDetailsOpen = false
+                renameText = session.title
+                renameOpen = true
+            }) { Text(stringResource(R.string.rename_session)) } },
+        )
     }
     if (renameOpen && session != null) {
         AlertDialog(

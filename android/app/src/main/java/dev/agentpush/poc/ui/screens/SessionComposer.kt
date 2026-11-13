@@ -31,9 +31,11 @@ import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Mic
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -60,6 +62,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -71,6 +74,7 @@ import dev.agentpush.poc.AgentProfile
 import dev.agentpush.poc.CompletedPath
 import dev.agentpush.poc.ComposeResult
 import dev.agentpush.poc.SessionCommand
+import dev.agentpush.poc.R
 import dev.agentpush.poc.agentMentionOptionKey
 import dev.agentpush.poc.media.PendingAttachment
 import dev.agentpush.poc.ui.CodexGreen
@@ -268,11 +272,21 @@ internal fun SessionComposer(
     var attachMenu by remember { mutableStateOf(false) }
     var mentionMenu by remember { mutableStateOf(false) }
     var permissionMenu by remember { mutableStateOf(false) }
+    var modelInfoOpen by remember { mutableStateOf(false) }
     var commandMenu by remember { mutableStateOf(false) }
     var fileCompletions by remember { mutableStateOf<List<CompletedPath>>(emptyList()) }
     var filesLoading by remember { mutableStateOf(false) }
     var now by remember { mutableStateOf(System.currentTimeMillis()) }
     val scope = rememberCoroutineScope()
+
+    if (modelInfoOpen) {
+        AlertDialog(
+            onDismissRequest = { modelInfoOpen = false },
+            title = { Text(stringResource(R.string.model_info)) },
+            text = { Text(modelDisabledReason) },
+            confirmButton = { TextButton(onClick = { modelInfoOpen = false }) { Text(stringResource(R.string.close)) } },
+        )
+    }
 
     fun loadFileCompletions(prefix: String) {
         if (cwd.isBlank()) {
@@ -406,18 +420,14 @@ internal fun SessionComposer(
                         }
                     }
                     if (!canSwitchModel && modelDisabledReason.isNotBlank()) {
-                        Text(
-                            text = modelDisabledReason,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.outline,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+                        IconButton(onClick = { modelInfoOpen = true }, modifier = Modifier.size(32.dp).testTag("model-info")) {
+                            Icon(Icons.Outlined.Info, contentDescription = stringResource(R.string.model_info), tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
+                        }
                     } else if (modelOverride) {
                         Text(
                             text = "仅下一条",
                             style = MaterialTheme.typography.labelSmall,
-                            color = dev.agentpush.poc.ui.ClaudeOrange,
+                            color = MaterialTheme.colorScheme.primary,
                             maxLines = 1,
                         )
                     }
@@ -524,7 +534,7 @@ internal fun SessionComposer(
                     )
                 },
                 enabled = enabled,
-                minLines = 2,
+                minLines = 1,
                 maxLines = 6,
                 shape = RoundedCornerShape(18.dp),
                 textStyle = MaterialTheme.typography.bodyLarge,
