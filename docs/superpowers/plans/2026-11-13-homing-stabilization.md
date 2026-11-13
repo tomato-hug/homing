@@ -229,7 +229,7 @@
 
 ## 7. 首批執行記錄（2026-11-13）
 
-用戶已要求「按你的建議繼續推進」。本批完成 Task 1 的遠端保存，以及 Task 2 的 Codex 範圍實作與自動化回歸，沒有把整輪計畫標成完成。
+用戶已要求「按你的建議繼續推進」。本批完成 Task 1 的遠端保存，以及 Task 2 的一批 Codex 範圍修正與自動化回歸，沒有把整輪計畫標成完成。
 
 - 原有 10 個提交已經 gitleaks 掃描並保存到 `origin/homing-v3`；本機及遠端 main 未移動。
 - `0b59be9`：保存 `Hub.RevokePeer`，新增真實本機 relay／LAN 測試，確認撤銷關閉 LAN、阻擋雲端 RPC，重新載入 peers 後仍拒絕。
@@ -246,6 +246,15 @@
 
 ### 遠端 CI 跟進
 
-已手動觸發程式碼提交 `070536d` 的 CI：<https://github.com/tomato-hug/homing/actions/runs/43456131412>。協議向量、Node 雲中繼與 Android 單元測試已通過；Go job 在 vet 階段因 Ubuntu 缺 Wails 所需的 GTK／WebKit 開發套件失敗，未進入 Go 測試。
+已手動觸發程式碼提交 `070536d` 的 CI：<https://github.com/tomato-hug/homing/actions/runs/43456131412>。協議向量、Node 雲中繼、Android 單元測試與 Debug APK 組裝均已通過；Go job 在 vet 階段因 Ubuntu 缺 Wails 所需的 GTK／WebKit 開發套件失敗，未進入 Go 測試。
 
-已準備 `output/homing-v3-stabilization/ci-headless.patch`：將 Ubuntu Go job 的 vet／test 改用已存在的 `headless` build tag，並更正 job 名稱。補丁套用檢查、本機 headless vet／全套測試及 Linux amd64 靜態交叉編譯皆通過。用戶已確認由 Codex 接手此項，現已套用補丁，準備推送並重跑 CI。此授權範圍是本次 CI 修正，桌面／控制台及其餘發佈工作仍沿用既有分工。
+已準備 `output/homing-v3-stabilization/ci-headless.patch`：將 Ubuntu Go job 的 vet／test 改用已存在的 `headless` build tag，並更正 job 名稱。補丁套用檢查、本機 headless vet／全套測試及 Linux amd64 靜態交叉編譯皆通過。用戶已確認由 Codex 接手此項，已在 `43ef680` 套用補丁並推送，重跑 CI：<https://github.com/tomato-hug/homing/actions/runs/43457398616>。此授權範圍是本次 CI 修正，桌面／控制台及其餘發佈工作仍沿用既有分工。
+
+修正後的 Ubuntu Go job 已能通過 vet 並執行完整測試；`internal/cloud`（含本批撤銷測試）通過。但這次 Linux CI 暴露另外兩個未由本批改動的問題：
+
+| 測試 | CI 現象 | 交接處理 |
+|---|---|---|
+| `internal/api.TestHomeAwayOnlyShowsNewActivityAndKeepsFinishedInResume` | 離開前完成的 `demo-home-done` 也進入 attention，預期 1 張卡得到 2 張；本機重跑 100 次未重現 | WorkBuddy 檢查 `home.go` 的 `event.Ts >= StartedAt` 毫秒邊界及測試時鐘；必要時用開始離開時的事件水位區分，不用延長 sleep 掩蓋 |
+| `internal/relayapi.TestAutoAwaySettingsRoundTrip` | Linux 啟用自動離開回 409 `auto_away_unavailable`，測試卻一律期待 200 | relayapi 負責人依 GET 回報的 available 分別驗證支援及不支援情況；不應在 Linux 假裝支援 macOS 探測 |
+
+以上位於既有 WorkBuddy／尚未指定負責人的目錄；遵守 `AGENTS.md`，本批僅定位及交接，沒有代改，也沒有為了 CI 綠燈略過這些測試。完整假 Agent 回覆／授權回路、反向換路與晚到事件整合、真機驗收仍列為 Task 2 待辦。
