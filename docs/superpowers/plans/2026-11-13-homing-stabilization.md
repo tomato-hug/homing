@@ -132,11 +132,11 @@
 
 **Interfaces:** 保持 `gui.Run(ctx, gui.Options{URL, DataDir, Version, Log})`。建議新增內部函式 `probeDesktopService(ctx context.Context, baseURL, token string, client *http.Client) (bool, error)`：可驗證的同一 Go 服務返回 true；確無服務返回 false；端口被其他服務占用或鑑權不符返回錯誤。
 
-- [ ] 寫 `TestDesktopAttachesToExistingGoService`：已有同一 Homing 時沿用 URL，沒有第二次 listen／store 開啟，退出殼不呼叫外部 server shutdown。
-- [ ] 寫 `TestDesktopRejectsForeignOrUnauthenticatedService` 和 `TestDesktopStartsOwnedServiceWhenAbsent`，使用本地假 HTTP server／臨時資料，覆蓋 Node、其他程序、錯誤 token、無監聽及啟動競態。
-- [ ] 實作服務探測與 owned／attached 生命週期分支；健康檢查之外核對本機鑑權，不自動停止占用端口的程序。
-- [ ] 保留無服務時的自啟動，僅由建立服務的一方執行 Flush／Close／Shutdown。關窗維持既有隱藏語義。
-- [ ] 執行 `go test ./cmd/homing ./internal/gui -count=1`、`go build ./...`，在隔離端口實際開關視窗和托盤驗收。
+- [x] 寫 `TestDesktopAttachesToExistingGoService`：已有同一 Homing 時沿用 URL，沒有第二次 listen／store 開啟，退出殼不呼叫外部 server shutdown。
+- [x] 寫 `TestDesktopRejectsForeignOrUnauthenticatedService` 和 `TestDesktopStartsOwnedServiceWhenAbsent`，使用本地假 HTTP server／臨時資料，覆蓋 Node、其他程序、錯誤 token、無監聽及啟動競態。
+- [x] 實作服務探測與 owned／attached 生命週期分支；健康檢查之外核對本機鑑權，不自動停止占用端口的程序。
+- [x] 保留無服務時的自啟動，僅由建立服務的一方執行 Flush／Close／Shutdown。關窗維持既有隱藏語義。
+- [x] 執行 `go test ./cmd/homing ./internal/gui -count=1`、`go build ./...`，在隔離端口實際開關視窗和托盤驗收。
 
 ### Task 4：手機閱讀與輸入優化
 
@@ -260,3 +260,31 @@
 以上位於既有 WorkBuddy／尚未指定負責人的目錄；遵守 `AGENTS.md`，本批僅定位及交接，沒有代改，也沒有為了 CI 綠燈略過這些測試。完整假 Agent 回覆／授權回路、反向換路與晚到事件整合、真機驗收仍列為 Task 2 待辦。
 
 第二輪 CI 已全部結束：Android 測試／Debug APK、協議向量、Node 雲中繼均成功；Go vet 成功，Go 測試因上表兩項失敗而使整體 CI 保持 failure。程式碼驗證目標為 `43ef680`；其後只有進度文件提交。
+
+## 8. 第二批執行記錄（2026-11-13）
+
+用戶明確要求接續 CI、桌面啟動與手機介面優化。本批已完成以下開發及驗證：
+
+| 範圍 | 結果 | 驗證 |
+|---|---|---|
+| 離開期間事件邊界 | 新時段在 Store 同一把鎖內記錄 `started_after_event_id`，按事件順序分類；空事件庫的零水位也會保存；舊時段缺欄位仍用原時間相容邏輯 | 同時間戳／偏移時間的確定性回歸、零與非零水位重開、舊資料相容測試 |
+| 自動離開跨平台 | 用例依 `/api/away/settings.available` 驗證；不支援平台應回 409 且不能改動設定，仍可保存停用設定 | 本機 Go 測試及 Linux CI 通過 |
+| 桌面啟動 | 已有服務時驗證 loopback、Go 身分、令牌和絕對資料目錄；共用已驗證服務，沒有才自行啟動；只關閉自己建立的服務 | 附著、不同 profile、錯誤令牌、redirect、相對路徑與自建／退出測試；競態檢查通過 |
+| 原生桌面驗收 | 以獨立 `.app` 共用 18820 隔離服務，主視窗可用；關窗只隱藏，退出殼後外部服務仍回 200 | CUA 實際視窗／關閉／退出 + HTTP；沒有操作真實會話 |
+| 手機輸入／標題 | 輸入框單行起始、最多 6 行；標題單行，點擊可查看全文並選擇重命名；模型唯讀原因在說明視窗 | 390 dp 合成場景的尺寸、文字佈局與點擊測試；原生圖形渲染截圖 |
+| 模型選擇 | 超過 12 個模型可按友好名稱或 ID 搜尋，保留選擇；清單縮小時不保留看不見的篩選；使用 Homing 主色 | 大清單、搜尋無結果、清單刷新、選中／套用回歸 |
+| 圖片降級 | 本機無法讀取及網絡載入失敗時顯示檔名和提示；支援引用式圖片、轉義與角括號網址；不改寫程式碼範例 | AST 單元測試、真實 MockWebServer 404 → UI 提示測試 |
+| 文案資源 | 新增／修改的提示抽入簡體及英文資源 | 既有文字未作全量國際化遷移 |
+
+程式碼提交：`ee299a1`（首頁／平台用例／桌面服務生命週期）、`518a202`（手機介面與圖片處理）。`ee299a1` 的 Linux Go CI 已轉綠；包含手機變更的完整 CI：<https://github.com/tomato-hug/homing/actions/runs/43466942110>。
+
+本機驗證：Go build／全套測試／vet、headless 全套測試與相關 race 檢查通過；Android **164 項測試、零失敗**，Debug APK 組裝及簽章檢查通過。獨立審查指出的三項問題（相對資料目錄、引用式圖片、轉義 URL）均先用回歸重現再修正。
+
+候選產物：
+
+- Android `0.11.2-dev`／versionCode `14`：`output/homing-v3-stabilization/android/app/outputs/apk/debug/app-debug.apk`。
+- APK SHA-256：`df6fde7c2897adfd8c40a02db2de5bbb02abd9885cab4b8943dd8973f1850566`。
+- 桌面原生候選：`output/homing-v3-stabilization/homing-desktop`，從 `518a202` 的乾淨 git archive 建置，沒有混入其他作者尚未提交的設備／控制台修改。
+- 來源／校驗清單：`output/homing-v3-stabilization/manifest.json`；輸入區截圖：`output/homing-v3-stabilization/ui/composer.png`。
+
+本批沒有重啟 18787、安裝手機 APK 或發佈 Release；對外服務仍是 `fb38f5e-dirty`，原 `/apk` 未被替換。剩餘驗收是新版本真機的鍵盤／大字體、同版本掃碼、行動網切換與離線／通知；下一個功能工作包仍是會議室 R1 補齊。正式簽名／公證與安裝器另按發佈計畫處理。
