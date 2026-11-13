@@ -259,6 +259,31 @@ func (h *Hub) Reject(clientID string) error {
 	return nil
 }
 
+// RevokePeer removes one paired device and tells any live LAN sockets that the
+// pairing is no longer valid. The same PeerStore is shared with the cloud
+// connector, so the peer also stops receiving relayed notifications.
+func (h *Hub) RevokePeer(peerID string) error {
+	if _, ok := h.peers.Get(peerID); !ok {
+		return errors.New("cloud: no such peer")
+	}
+	if err := h.peers.Remove(peerID); err != nil {
+		return err
+	}
+	h.sendTo(peerID, map[string]any{
+		"t": "pair.revoked", "peer_id": h.identity.DeviceID(),
+	})
+	h.mu.Lock()
+	conns := make([]*hostConn, 0, len(h.conns[peerID]))
+	for conn := range h.conns[peerID] {
+		conns = append(conns, conn)
+	}
+	h.mu.Unlock()
+	for _, conn := range conns {
+		conn.close(websocket.StatusPolicyViolation, "pairing revoked")
+	}
+	return nil
+}
+
 // SendEvent pushes an SSE-shaped event to every paired phone.
 func (h *Hub) SendEvent(ctx context.Context, name string, data any) (int, error) {
 	sent := 0
