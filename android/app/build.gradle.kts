@@ -31,8 +31,8 @@ android {
         applicationId = "dev.agentpush.poc"
         minSdk = 26
         targetSdk = 35
-        versionCode = 14
-        versionName = "0.11.2-dev"
+        versionCode = 15
+        versionName = "0.11.3-dev"
 
         buildConfigField(
             "String",

@@ -9,6 +9,28 @@ import java.net.URLDecoder
 import java.util.Locale
 import com.mikepenz.markdown.utils.getUnescapedTextInNode
 
+// Rewrite parsed destinations only; Markdown-looking text in code is literal.
+internal fun rewriteMarkdownDestinations(source: String, imagesOnly: Boolean = false, rewrite: (String) -> String?): String {
+    val tree = MarkdownParser(CommonMarkFlavourDescriptor()).buildMarkdownTreeFromString(source)
+    val replacements = mutableListOf<Pair<IntRange, String>>()
+    fun visit(node: ASTNode, image: Boolean = false) {
+        val eligible = image || node.type == MarkdownElementTypes.IMAGE || node.type == MarkdownElementTypes.LINK_DEFINITION
+        if (node.type == MarkdownElementTypes.LINK_DESTINATION && (!imagesOnly || eligible)) {
+            val raw = source.substring(node.startOffset, node.endOffset)
+            val link = node.getUnescapedTextInNode(source).trim('<', '>')
+            rewrite(link)?.let { replacement ->
+                val safe = replacement.replace("\\", "%5C").replace("<", "%3C").replace(">", "%3E").replace(" ", "%20")
+                val destination = if (raw.startsWith('<')) "<$safe>" else safe.replace("(", "\\(").replace(")", "\\)")
+                replacements += (node.startOffset until node.endOffset) to destination
+            }
+        } else node.children.forEach { visit(it, eligible) }
+    }
+    visit(tree)
+    val out = StringBuilder(source)
+    replacements.asReversed().forEach { (range, replacement) -> out.replace(range.first, range.last + 1, replacement) }
+    return out.toString()
+}
+
 // Parse image nodes so examples inside code fences, inline code and indented
 // code remain byte-for-byte unchanged. This never opens local filesystem paths.
 internal fun markdownImageFallbacks(source: String, failed: Set<String>, label: (String) -> String): String {

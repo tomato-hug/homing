@@ -1026,8 +1026,9 @@ private fun toolStatusLabel(item: SessionItem): String {
 fun absolutizeMarkdown(source: String, settings: AppSettings): String {
     val base = settings.baseUrl.trimEnd('/')
     if (base.isBlank()) return source
-    return Regex("(!?\\[[^\\]]*]\\((?!https?://|data:|content:)/)([^)]+)")
-        .replace(source) { match ->
-            "${match.groupValues[1]}$base/${match.groupValues[2].trimStart('/')}"
-        }
+    return rewriteMarkdownDestinations(source) { link ->
+        // Only Homing routes are server-relative; /tmp and other computer
+        // filesystem paths must remain local-image fallbacks.
+        if (listOf("/f/", "/p/", "/api/", "/uploads/").any(link::startsWith)) "$base$link" else null
+    }
 }

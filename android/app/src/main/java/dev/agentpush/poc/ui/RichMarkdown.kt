@@ -113,7 +113,14 @@ fun RichMarkdown(
                     content = renderedSource,
                     modifier = Modifier.fillMaxWidth(),
                     colors = markdownColor(),
-                    typography = markdownTypography(),
+                    typography = markdownTypography(
+                        h1 = MaterialTheme.typography.headlineMedium,
+                        h2 = MaterialTheme.typography.headlineSmall,
+                        h3 = MaterialTheme.typography.titleLarge,
+                        h4 = MaterialTheme.typography.titleMedium,
+                        h5 = MaterialTheme.typography.titleSmall,
+                        h6 = MaterialTheme.typography.labelLarge,
+                    ),
                     imageTransformer = images,
                     components = markdownComponents(
                         codeFence = { model ->
@@ -242,21 +249,19 @@ fun rewriteMarkdownImageUrls(
 ): String {
     val images = attachments.filter { it.isImage }
     if (images.isEmpty() || !source.contains("![")) return source
-    return Regex("!\\[([^\\]]*)]\\(([^)\\s]+)(?:\\s+\"[^\"]*\")?\\)")
-        .replace(source) { match ->
-            val rawUrl = match.groupValues[2].trim('<', '>')
-            val decoded = runCatching {
-                URLDecoder.decode(rawUrl, Charsets.UTF_8.name())
-            }.getOrDefault(rawUrl)
-            val image = images.firstOrNull { attachment ->
-                decoded == attachment.name || decoded.endsWith("/${attachment.name}")
-            }
-            if (image != null) {
-                "![${match.groupValues[1]}](${AgentApi.attachmentUrl(settings, image)})"
-            } else {
-                match.value
-            }
+    return rewriteMarkdownDestinations(source, imagesOnly = true) { rawUrl ->
+        val decoded = runCatching {
+            URLDecoder.decode(rawUrl.replace("+", "%2B"), Charsets.UTF_8.name())
+        }.getOrDefault(rawUrl)
+        val image = images.firstOrNull { attachment ->
+            decoded == attachment.name || decoded.endsWith("/${attachment.name}")
         }
+        if (image != null) {
+            AgentApi.attachmentUrl(settings, image)
+        } else {
+            null
+        }
+    }
 }
 
 @Composable

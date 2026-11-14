@@ -1,5 +1,7 @@
 package dev.agentpush.poc
 
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.activity.ComponentActivity
 import androidx.compose.material3.Surface
@@ -36,6 +38,15 @@ import org.robolectric.annotation.GraphicsMode
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class MobilePolishTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
+
+    @Test
+    fun shortMarkdownHeadingDoesNotDominatePhoneReadingArea() {
+        compose.setContent { AgentInboxTheme {
+            RichMarkdown("# demo-phone 真機驗收\n\n這是合成資料，不是真實工作會話。", modifier = Modifier.testTag("phone-markdown"), onCopyCode = {}, onOpenUrl = {})
+        } }
+        val height = compose.onNodeWithTag("phone-markdown").fetchSemanticsNode().size.height / compose.density.density
+        assertTrue("short heading and paragraph should leave room for conversation: $height dp", height <= 120f)
+    }
 
     @Test
     fun unavailableMarkdownImageShowsFilenameInsteadOfEmptyImage() {
