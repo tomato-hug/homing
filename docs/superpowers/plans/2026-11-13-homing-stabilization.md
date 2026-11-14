@@ -159,15 +159,17 @@
 
 **Interfaces:** 沿用 `/api/rooms`、`/api/rooms/{id}`、`/messages`、`/control` 與現有 `roomSpeaker.Speak` 假實作注入點。新增 `/control` 請求 `{"action":"call","agent":"codex"}`，在當前發言完成後優先請指定參會者發言；暫停時只記錄選擇，需按繼續才執行。新增 `renderRooms(ctx: PageContext, query: URLSearchParams): PageResult`，掛到 `/console/rooms`。R1 維持只讀輪流討論和紀要；現有上限為 2–4 人、預設 2 輪、最多 5 輪。
 
-- [ ] 新增 `TestRoomCallSchedulesParticipantWithoutInterrupting`：只接受房內可發言參與者，當前回合不被中斷、不重複計輪；非參與者返回 400，已結束／正在生成紀要返回 409，暫停時不自行恢復。依此補 additive 點名控制與兩端入口。
-- [ ] 建立控制台房間列表、建房、討論／紀要和操作區，直接使用既有 Room JSON 欄位及 API；補 `main.ts` 路由／導航與 `lib/api.ts` 型別／請求。採目前原生 TS 樣式，窄屏切為單欄；頁面 dispose 時停止輪詢。
-- [ ] 新增 `TestRoomPauseResumeDoesNotDuplicateTurn`，以可阻塞的 fakeRoomSpeaker 固定暫停時機，驗證同一發言只落盤一次，恢復後沿用原子會話。
-- [ ] 新增 `TestRoomReloadPausesRunningRoom`、`TestRoomEndProducesMinutesOnce`，覆蓋 running／summarizing 恢復及連續點結束。
-- [ ] 補全部參與者失敗、發言超時、授權掛起時的可恢復狀態；顯示下一步，避免永久轉圈。
-- [ ] 依測試修正現有狀態機；不以新增 R2 或大搬目錄解決 R1 問題。
-- [ ] 執行 `go test ./internal/relayapi -run 'TestRoom|TestNextRoom' -count=1`、console build 和 Android 測試；兩端完成 2 人 2 輪、點名、暫停／繼續、結束和重連操作。
+- [x] 新增 `TestRoomCallSchedulesParticipantWithoutInterrupting`：只接受房內可發言參與者，當前回合不被中斷、不重複計輪；非參與者返回 400，已結束／正在生成紀要返回 409，暫停時不自行恢復。依此補 additive 點名控制與兩端入口。
+- [x] 建立控制台房間列表、建房、討論／紀要和操作區，直接使用既有 Room JSON 欄位及 API；補 `main.ts` 路由／導航與 `lib/api.ts` 型別／請求。採目前原生 TS 樣式，窄屏切為單欄；頁面 dispose 時停止輪詢。
+- [x] 新增 `TestRoomPauseResumeDoesNotDuplicateTurn`，以可阻塞的 fakeRoomSpeaker 固定暫停時機，驗證同一發言只落盤一次，恢復後沿用原子會話。
+- [x] 新增 `TestRoomReloadPausesRunningRoom`、`TestRoomEndProducesMinutesOnce`，覆蓋 running／summarizing 恢復及連續點結束。
+- [x] 補全部參與者失敗、發言超時、授權掛起時的可恢復狀態；顯示下一步，避免永久轉圈。
+- [x] 依測試修正現有狀態機；不以新增 R2 或大搬目錄解決 R1 問題。
+- [x] 執行 `go test ./internal/relayapi -run 'TestRoom|TestNextRoom' -count=1`、console build 和 Android 測試；兩端完成 2 人 2 輪、點名、暫停／繼續、結束和重連操作。
 
 **真回合邊界：** 先用假 Agent 完成自動化；不得直接使用 `acceptance.md` 裡「真實 Codex 會話」字樣向用戶正在工作的會話發話。涉及 Codex／Claude 雙方的真回合，先落實隔離會話授權和目錄。
+
+本批兩端驗收使用控制台及 Android API 35 模擬器，手機不可連線已由使用者同意先推進其他工作；R1 實機與公網行動數據仍待驗收。重啟原派發回收、紀要恢復入口、寫盤失敗停排程的回歸已補齊。詳見 `docs/homing-v3/r1-acceptance-2026-11-13.md`。
 
 ### Task 6：逐家能力核實，作為後續接入的依據
 
@@ -290,3 +292,11 @@
 - 來源／校驗清單：`output/homing-v3-stabilization/manifest.json`；輸入區截圖：`output/homing-v3-stabilization/ui/composer.png`。
 
 本批沒有重啟 18787、安裝手機 APK 或發佈 Release；對外服務仍是 `fb38f5e-dirty`，原 `/apk` 未被替換。剩餘驗收是新版本真機的鍵盤／大字體、同版本掃碼、行動網切換與離線／通知；下一個功能工作包仍是會議室 R1 補齊。正式簽名／公證與安裝器另按發佈計畫處理。
+
+## 9. 會議室 R1 執行記錄（2026-11-13）
+
+R1 點名、Android 控制、控制台入口、暫停恢復與紀要已完成實作。Go build／vet／全套 headless test 與房間 race、Android 173 項測試和 Debug APK、控制台 build 均通過。隔離來源另完成完整 Go 驗證及嵌入控制台建置，未混入其他作者待提交的設備修改。
+
+兩端以合成 Agent 完成兩人兩輪四個唯一發言槽位、暫停點名、跨端插話／恢復、結束及一份紀要；整理中重啟測試服務後，Android 的「繼續整理紀要」可完成收尾。審查指出的恢復及持久化問題均已回歸修正。
+
+手機目前無法連線，使用者已同意先推進其他工作；本輪 Android R1 操作證據來自 API 35 模擬器，實機複驗、公網行動數據和真實原生 Agent 回合仍待驗收，沒有移除這些待辦。18787 與 8787 未重啟；完整範圍、產物 SHA-256 與證據見 `docs/homing-v3/r1-acceptance-2026-11-13.md`。

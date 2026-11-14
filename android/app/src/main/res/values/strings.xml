@@ -8,4 +8,11 @@
     <string name="close">关闭</string>
     <string name="rename_session">重命名</string>
     <string name="image_unavailable">📎 %1$s\n图片暂时无法显示，请重试或在电脑上查看。</string>
+    <string name="room_call">点名</string>
+    <string name="room_call_title">请谁下一位发言？</string>
+    <string name="room_call_hint">只调整既定发言顺序，不增加轮次；暂停时须点「继续」。</string>
+    <string name="room_call_pending">下一位：%1$s</string>
+    <string name="room_summarizing">正在整理纪要，完成后会显示在这里</string>
+    <string name="room_ending">当前发言结束后整理纪要</string>
+    <string name="room_resume_minutes">继续整理纪要</string>
 </resources>

@@ -35,6 +35,7 @@ import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Groups
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -60,6 +61,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -68,6 +70,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.agentpush.poc.AgentBrand
 import dev.agentpush.poc.AgentViewModel
 import dev.agentpush.poc.Room
+import dev.agentpush.poc.R
 import dev.agentpush.poc.RoomAgentChoice
 import dev.agentpush.poc.RoomApi
 import dev.agentpush.poc.RoomMessage
@@ -501,20 +504,21 @@ fun RoomScreen(
 ) {
     val state = viewModel.state.collectAsStateWithLifecycle().value
     val scope = rememberCoroutineScope()
-    var room by remember { mutableStateOf<Room?>(null) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var draft by remember { mutableStateOf("") }
-    var busy by remember { mutableStateOf(false) }
+    var room by remember(roomId) { mutableStateOf<Room?>(null) }
+    var error by remember(roomId) { mutableStateOf<String?>(null) }
+    var draft by remember(roomId) { mutableStateOf("") }
+    var busy by remember(roomId) { mutableStateOf(false) }
+    var revision by remember(roomId) { mutableStateOf(0) }
     val listState = rememberLazyListState()
 
     LaunchedEffect(roomId, state.settings) {
         while (true) {
+            val observed = revision
             runCatching { RoomApi.get(state.settings, roomId) }
                 .onSuccess {
-                    room = it
-                    error = null
+                    if (observed == revision) { room = it; error = null }
                 }
-                .onFailure { error = roomErrorText(it) }
+                .onFailure { if (observed == revision) error = roomErrorText(it) }
             delay(if (room?.ended == true) 15_000 else 2_500)
         }
     }
@@ -525,16 +529,20 @@ fun RoomScreen(
         if (total > 0) listState.animateScrollToItem(total - 1)
     }
 
-    fun act(block: suspend () -> Room) {
+    fun act(afterSuccess: () -> Unit = {}, block: suspend () -> Room) {
+        if (busy) return
         busy = true
+        revision++
         scope.launch {
             runCatching { block() }
                 .onSuccess {
                     room = it
                     error = null
+                    afterSuccess()
                 }
                 .onFailure { error = roomErrorText(it) }
             busy = false
+            revision++
         }
     }
 
@@ -619,11 +627,13 @@ fun RoomScreen(
                 onSend = {
                     val text = draft.trim()
                     if (text.isNotEmpty()) {
-                        draft = ""
-                        act { RoomApi.say(state.settings, current.id, text) }
+                        act(afterSuccess = { if (draft.trim() == text) draft = "" }) {
+                            RoomApi.say(state.settings, current.id, text)
+                        }
                     }
                 },
                 onAction = { action -> act { RoomApi.control(state.settings, current.id, action) } },
+                onCall = { agent -> act { RoomApi.control(state.settings, current.id, "call", agent) } },
             )
         }
     }
@@ -800,14 +810,18 @@ private fun SpeakingRow(p: RoomParticipant) {
 }
 
 @Composable
-private fun RoomControls(
+@OptIn(ExperimentalLayoutApi::class)
+internal fun RoomControls(
     room: Room,
     draft: String,
     busy: Boolean,
     onDraftChange: (String) -> Unit,
     onSend: () -> Unit,
     onAction: (String) -> Unit,
+    onCall: (String) -> Unit = {},
 ) {
+    var choosing by remember(room.id) { mutableStateOf(false) }
+    val canControl = room.status in listOf("running", "paused") && !room.endRequested
     Surface(color = HomingPalette.NavBackground) {
         Column(
             modifier = Modifier
@@ -817,15 +831,30 @@ private fun RoomControls(
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            if (room.ended) {
+            if (!canControl) {
+                if (room.status == "paused" && room.endRequested) {
+                    OutlinedButton(onClick = { onAction("resume") }, enabled = !busy) {
+                        Text(stringResource(R.string.room_resume_minutes))
+                    }
+                }
                 Text(
-                    text = "会议已结束，纪要在上方",
+                    text = when {
+                        room.ended -> "会议已结束，纪要在上方"
+                        room.endRequested -> stringResource(R.string.room_ending)
+                        else -> stringResource(R.string.room_summarizing)
+                    },
                     style = MaterialTheme.typography.labelMedium,
                     color = HomingPalette.Muted,
                 )
                 return@Column
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (room.nextSpeaker.isNotBlank()) {
+                Text(stringResource(R.string.room_call_pending, room.participants.firstOrNull { it.agent == room.nextSpeaker }?.name ?: room.nextSpeaker), style = MaterialTheme.typography.labelMedium)
+            }
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                OutlinedButton(onClick = { choosing = true }, enabled = !busy && room.callableParticipants.isNotEmpty(), modifier = Modifier.testTag("room-call")) {
+                    Text(stringResource(R.string.room_call))
+                }
                 when (room.status) {
                     "paused" -> OutlinedButton(onClick = { onAction("resume") }, enabled = !busy) { Text("继续") }
                     "running" -> OutlinedButton(onClick = { onAction("pause") }, enabled = !busy) { Text("暂停") }
@@ -862,6 +891,19 @@ private fun RoomControls(
                 }
             }
         }
+    }
+    if (choosing && canControl) {
+        AlertDialog(
+            onDismissRequest = { choosing = false },
+            title = { Text(stringResource(R.string.room_call_title)) },
+            text = { Column {
+                Text(stringResource(R.string.room_call_hint))
+                room.callableParticipants.forEach { participant ->
+                    TextButton(onClick = { choosing = false; onCall(participant.agent) }, enabled = !busy) { Text(participant.label) }
+                }
+            } },
+            confirmButton = { TextButton(onClick = { choosing = false }) { Text(stringResource(R.string.close)) } },
+        )
     }
 }
 

@@ -1184,7 +1184,32 @@ export interface LibraryPackInstallation {
 
 // ---------------------------------------------------------------- 便捷方法
 
+export interface RoomParticipant {
+  agent: string; name: string; role?: string; status: string; session_id?: string;
+}
+export interface RoomMessage {
+  seq: number; from: string; name: string; kind: string; round: number; text: string; at: string;
+}
+export interface Room {
+  id: string; title: string; topic: string; cwd: string; rounds: number; round: number;
+  status: "running" | "paused" | "summarizing" | "ended";
+  speaking?: string; next_speaker?: string; end_requested?: boolean;
+  participants: RoomParticipant[]; messages?: RoomMessage[]; minutes?: string;
+  message_count?: number; preview?: string; note?: string; updated_at: string;
+}
+export interface RoomAgentChoice { id: string; name: string }
+export interface NewRoom {
+  topic: string; cwd: string; rounds: number;
+  participants: Array<{ agent: string; role: string }>;
+}
+
 export const endpoints = {
+  rooms: () => api.get<{ rooms: Room[]; agents: RoomAgentChoice[] }>("/api/rooms"),
+  room: (id: string) => api.get<{ room: Room }>(`/api/rooms/${encodeURIComponent(id)}`),
+  createRoom: (body: NewRoom) => api.post<{ room: Room }>("/api/rooms", body),
+  sayInRoom: (id: string, text: string) => api.post<{ room: Room }>(`/api/rooms/${encodeURIComponent(id)}/messages`, { text }),
+  controlRoom: (id: string, action: string, agent?: string) => api.post<{ room: Room }>(`/api/rooms/${encodeURIComponent(id)}/control`, { action, ...(agent ? { agent } : {}) }),
+
   agents: () => api.get<{ agents: Agent[]; generated_at: string }>("/api/agents"),
   agentCatalog: () => api.get<AgentCatalogPayload>("/api/agent-catalog"),
   installCatalogAgent: (id: string) => api.post<CatalogInstallResult>(`/api/agent-catalog/${id}/install`),

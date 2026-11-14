@@ -68,10 +68,27 @@ data class Room(
     val messageCount: Int,
     val preview: String,
     val updatedAt: String,
+    val nextSpeaker: String = "",
+    val endRequested: Boolean = false,
 ) {
     val ended: Boolean get() = status == "ended"
     val speakingParticipant: RoomParticipant?
         get() = participants.firstOrNull { it.agent == speaking && speaking.isNotBlank() }
+
+    /** Reorder an existing slot in the next unfinished round; never add a turn. */
+    val callableParticipants: List<RoomParticipant>
+        get() {
+            if (status !in listOf("running", "paused") || endRequested) return emptyList()
+            val spoken = messages.filter { it.kind == "statement" || it.kind == "system" }
+                .map { "${it.from}#${it.round}" }.toMutableSet()
+            if (speaking.isNotBlank() && round > 0) spoken += "$speaking#$round"
+            val nextRound = (1..rounds).firstOrNull { n ->
+                participants.any { it.status != "failed" && "${it.agent}#$n" !in spoken }
+            } ?: return emptyList()
+            return participants.filter {
+                it.agent != speaking && it.status != "failed" && "${it.agent}#$nextRound" !in spoken
+            }
+        }
 
     /** 列表和房间页顶部用的一句话状态。 */
     val statusLabel: String
@@ -103,6 +120,8 @@ data class Room(
                 messageCount = json.optInt("message_count", messages.size),
                 preview = json.optString("preview"),
                 updatedAt = json.optString("updated_at"),
+                nextSpeaker = json.optString("next_speaker"),
+                endRequested = json.optBoolean("end_requested"),
             )
         }
     }
@@ -162,9 +181,12 @@ object RoomApi {
         return Room.fromJson(json.optJSONObject("room") ?: JSONObject())
     }
 
-    /** action：pause | resume | end | extend */
-    suspend fun control(settings: AppSettings, id: String, action: String): Room {
-        val body = JSONObject().put("action", action).toString()
+    /** action：call | pause | resume | end | extend */
+    suspend fun control(settings: AppSettings, id: String, action: String, agent: String? = null): Room {
+        require(action != "call" || !agent.isNullOrBlank()) { "请选择要点名的参会者" }
+        val body = JSONObject().put("action", action).apply {
+            if (agent != null) put("agent", agent)
+        }.toString()
         val json = JSONObject(
             AgentApi.roomRequest(settings, "/api/rooms/${encodePath(id)}/control", "POST", body),
         )

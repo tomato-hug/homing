@@ -62,13 +62,26 @@ type Room struct {
 	Round        int               `json:"round"`
 	Status       string            `json:"status"`
 	Speaking     string            `json:"speaking,omitempty"`
+	NextSpeaker  string            `json:"next_speaker,omitempty"`
 	EndRequested bool              `json:"end_requested,omitempty"`
+	ActiveTurn   *RoomTurnState    `json:"active_turn,omitempty"`
 	Participants []RoomParticipant `json:"participants"`
 	Messages     []RoomMessage     `json:"messages"`
 	Minutes      string            `json:"minutes,omitempty"`
 	Note         string            `json:"note,omitempty"`
 	CreatedAt    string            `json:"created_at"`
 	UpdatedAt    string            `json:"updated_at"`
+}
+
+// RoomTurnState is the durable execution slot. Once submitting is saved, recovery
+// only observes the existing dispatch: it must never replay a native operation.
+type RoomTurnState struct {
+	Agent      string `json:"agent"`
+	Round      int    `json:"round"`
+	Kind       string `json:"kind"`
+	Phase      string `json:"phase"` // claimed (safe to submit), submitting, uncertain
+	DispatchID string `json:"dispatch_id,omitempty"`
+	Baseline   string `json:"baseline,omitempty"`
 }
 
 // RoomParticipant 是一位参会的 Agent。
@@ -155,6 +168,18 @@ func ensureRoomsLoaded(d *api.Deps) {
 			continue
 		}
 		if room.Status == roomStatusRunning || room.Status == roomStatusSummarizing {
+			if room.Status == roomStatusSummarizing {
+				room.EndRequested = true
+			}
+			// Legacy files did not record whether the native operation was sent.
+			// Preserve that uncertainty instead of automatically replaying it.
+			if room.ActiveTurn == nil && room.Speaking != "" {
+				kind := "statement"
+				if room.Status == roomStatusSummarizing {
+					kind = "minutes"
+				}
+				room.ActiveTurn = &RoomTurnState{Agent: room.Speaking, Round: room.Round, Kind: kind, Phase: "uncertain"}
+			}
 			room.Status = roomStatusPaused
 			room.Speaking = ""
 			room.Note = "电脑端服务重启过，会议已暂停；点「继续」接着开"
@@ -162,6 +187,9 @@ func ensureRoomsLoaded(d *api.Deps) {
 				if room.Participants[i].Status == "speaking" {
 					room.Participants[i].Status = "waiting"
 				}
+			}
+			if err := saveRoomLocked(d, &room); err != nil && d.Log != nil {
+				d.Log.Warn("save recovered room", "room", room.ID, "err", err)
 			}
 		}
 		copied := room
@@ -187,6 +215,10 @@ func saveRoomLocked(d *api.Deps, room *Room) error {
 
 func cloneRoom(room *Room) Room {
 	out := *room
+	if room.ActiveTurn != nil {
+		active := *room.ActiveTurn
+		out.ActiveTurn = &active
+	}
 	out.Participants = append([]RoomParticipant(nil), room.Participants...)
 	out.Messages = append([]RoomMessage(nil), room.Messages...)
 	return out
@@ -201,19 +233,46 @@ func mutateRoom(d *api.Deps, id string, fn func(*Room) error) (Room, error) {
 		roomsMu.Unlock()
 		return Room{}, errRoomNotFound
 	}
-	if err := fn(room); err != nil {
+	candidate := cloneRoom(room)
+	if err := fn(&candidate); err != nil {
 		roomsMu.Unlock()
 		return Room{}, err
 	}
-	room.UpdatedAt = roomStamp()
-	saveErr := saveRoomLocked(d, room)
-	snapshot := cloneRoom(room)
-	roomsMu.Unlock()
-	if saveErr != nil {
-		d.Log.Error("save room", "room", id, "err", saveErr)
+	candidate.UpdatedAt = roomStamp()
+	if err := saveRoomLocked(d, &candidate); err != nil {
+		roomsMu.Unlock()
+		return Room{}, fmt.Errorf("%w：%v", errRoomPersistence, err)
 	}
+	roomsByID[id] = &candidate
+	snapshot := cloneRoom(&candidate)
+	roomsMu.Unlock()
 	api.PublishNamed("room", "", roomSummary(snapshot))
 	return snapshot, nil
+}
+
+// A worker cannot advance after failing to commit its slot/result. Even when the
+// disk remains unavailable, expose a paused state in memory and retain the last
+// durable active slot so a restart can collect the original result.
+func pauseRoomOnError(d *api.Deps, id string, cause error) {
+	roomsMu.Lock()
+	room := roomsByID[id]
+	if room == nil {
+		roomsMu.Unlock()
+		return
+	}
+	candidate := cloneRoom(room)
+	candidate.Status = roomStatusPaused
+	candidate.Speaking = ""
+	candidate.Note = cause.Error() + "；会议已暂停，请检查后继续；投递状态不明时可结束并汇总已有记录"
+	if errors.Is(cause, errRoomTurnUncertain) && candidate.ActiveTurn != nil {
+		candidate.ActiveTurn.Phase = "uncertain"
+	}
+	candidate.UpdatedAt = roomStamp()
+	_ = saveRoomLocked(d, &candidate)
+	roomsByID[id] = &candidate
+	snapshot := cloneRoom(&candidate)
+	roomsMu.Unlock()
+	api.PublishNamed("room", "", roomSummary(snapshot))
 }
 
 func loadRoom(d *api.Deps, id string) (Room, bool) {
@@ -228,6 +287,10 @@ func loadRoom(d *api.Deps, id string) (Room, bool) {
 }
 
 var errRoomNotFound = errors.New("会议不存在")
+var errRoomInvalidParticipant = errors.New("点名对象无效")
+var errRoomPersistence = errors.New("会议保存失败")
+var errRoomTurnUncertain = errors.New("无法确认上次投递状态，未重复发送")
+var errRoomIdle = errors.New("会议当前不需要发言")
 
 // ---- 接口 --------------------------------------------------------------------
 
@@ -275,6 +338,8 @@ func roomSummary(room Room) map[string]any {
 		"round":         room.Round,
 		"status":        room.Status,
 		"speaking":      room.Speaking,
+		"next_speaker":  room.NextSpeaker,
+		"end_requested": room.EndRequested,
 		"participants":  room.Participants,
 		"message_count": len(room.Messages),
 		"preview":       preview,
@@ -338,8 +403,10 @@ func createRoom(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 
 	roomsMu.Lock()
 	ensureRoomsLoaded(d)
-	roomsByID[room.ID] = &room
 	saveErr := saveRoomLocked(d, &room)
+	if saveErr == nil {
+		roomsByID[room.ID] = &room
+	}
 	snapshot := cloneRoom(&room)
 	roomsMu.Unlock()
 	if saveErr != nil {
@@ -448,8 +515,8 @@ func postRoomMessage(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	room, err := mutateRoom(d, strings.TrimSpace(r.PathValue("id")), func(room *Room) error {
-		if room.Status == roomStatusEnded {
-			return errors.New("会议已经结束")
+		if room.Status == roomStatusEnded || room.Status == roomStatusSummarizing || room.EndRequested {
+			return errors.New("会议已经在收尾或已结束，不能再插话")
 		}
 		appendRoomMessage(room, RoomMessage{From: "user", Name: "你", Kind: "user", Round: room.Round, Text: text})
 		return nil
@@ -476,8 +543,38 @@ func controlRoom(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 	start := false
 	room, err := mutateRoom(d, id, func(room *Room) error {
 		switch action {
+		case "call":
+			if (room.Status != roomStatusRunning && room.Status != roomStatusPaused) || room.EndRequested {
+				return errors.New("会议已经在收尾或已结束")
+			}
+			target := strings.ToLower(strings.TrimSpace(stringField(body, "agent")))
+			idx := -1
+			for i, p := range room.Participants {
+				if p.Agent == target {
+					idx = i
+					break
+				}
+			}
+			if idx < 0 {
+				return fmt.Errorf("%w：请选择房内的参会者", errRoomInvalidParticipant)
+			}
+			if room.Participants[idx].Status == "failed" {
+				return errors.New("这位参会者已失败，请查看发言记录中的原因")
+			}
+			if room.Speaking == target {
+				return errors.New("这位参会者正在发言，无需再次点名")
+			}
+			afterCurrent := cloneRoom(room)
+			if room.Speaking != "" {
+				afterCurrent.Messages = append(afterCurrent.Messages, RoomMessage{From: room.Speaking, Kind: "statement", Round: room.Round})
+			}
+			_, round := nextRoomSpeaker(afterCurrent)
+			if round == 0 || roomHasSpoken(afterCurrent, target, round) {
+				return errors.New("这位参会者在本轮已发言，下一轮再点名")
+			}
+			room.NextSpeaker = target
 		case "pause":
-			if room.Status != roomStatusRunning {
+			if room.Status != roomStatusRunning || room.EndRequested {
 				return errors.New("会议不在进行中")
 			}
 			room.Status = roomStatusPaused
@@ -500,7 +597,7 @@ func controlRoom(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 			}
 			start = true
 		case "extend":
-			if room.Status == roomStatusEnded || room.Status == roomStatusSummarizing {
+			if room.Status == roomStatusEnded || room.Status == roomStatusSummarizing || room.EndRequested {
 				return errors.New("会议已经在收尾或已结束")
 			}
 			if room.Rounds >= roomMaxRounds {
@@ -508,7 +605,7 @@ func controlRoom(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 			}
 			room.Rounds++
 		default:
-			return errors.New("action 只能是 pause / resume / end / extend")
+			return errors.New("action 只能是 call / pause / resume / end / extend")
 		}
 		return nil
 	})
@@ -527,6 +624,10 @@ func writeRoomError(w http.ResponseWriter, err error) {
 	status := http.StatusConflict
 	if errors.Is(err, errRoomNotFound) {
 		status = http.StatusNotFound
+	} else if errors.Is(err, errRoomPersistence) {
+		status = http.StatusInternalServerError
+	} else if errors.Is(err, errRoomInvalidParticipant) {
+		status = http.StatusBadRequest
 	}
 	api.WriteJSON(w, status, map[string]any{"ok": false, "error": err.Error()})
 }
@@ -558,13 +659,23 @@ func startRoomEngine(d *api.Deps, id string) {
 	roomsMu.Unlock()
 	go func() {
 		defer func() {
-			roomsMu.Lock()
-			delete(roomEngines, id)
-			roomsMu.Unlock()
+			finishRoomEngine(ctx, d, id)
 			cancel()
 		}()
 		runRoom(ctx, d, id, roomSpeakers(d))
 	}()
+}
+
+func finishRoomEngine(ctx context.Context, d *api.Deps, id string) {
+	roomsMu.Lock()
+	delete(roomEngines, id)
+	room := roomsByID[id]
+	restart := ctx.Err() == nil && room != nil && room.Status == roomStatusRunning
+	roomsMu.Unlock()
+	// Resume may have seen our old marker after we observed paused.
+	if restart {
+		startRoomEngine(d, id)
+	}
 }
 
 // nextRoomSpeaker 返回下一位发言者的下标和轮次；没有了返回 -1。
@@ -577,16 +688,34 @@ func nextRoomSpeaker(room Room) (int, int) {
 		}
 	}
 	for round := 1; round <= room.Rounds; round++ {
+		first := -1
 		for i, p := range room.Participants {
 			if p.Status == "failed" {
 				continue
 			}
 			if !spoke[fmt.Sprintf("%s#%d", p.Agent, round)] {
-				return i, round
+				if p.Agent == room.NextSpeaker {
+					return i, round
+				}
+				if first < 0 {
+					first = i
+				}
 			}
+		}
+		if first >= 0 {
+			return first, round
 		}
 	}
 	return -1, 0
+}
+
+func roomHasSpoken(room Room, source string, round int) bool {
+	for _, msg := range room.Messages {
+		if msg.From == source && msg.Round == round && (msg.Kind == "statement" || msg.Kind == "system") {
+			return true
+		}
+	}
+	return false
 }
 
 func runRoom(ctx context.Context, d *api.Deps, id string, speaker roomSpeaker) {
@@ -594,19 +723,66 @@ func runRoom(ctx context.Context, d *api.Deps, id string, speaker roomSpeaker) {
 		if ctx.Err() != nil {
 			return
 		}
-		room, ok := loadRoom(d, id)
-		if !ok || room.Status == roomStatusEnded {
+		idx, round, finish := -1, 0, false
+		// Select and claim the turn under the same lock as pause/call/end.
+		room, claimErr := mutateRoom(d, id, func(room *Room) error {
+			if room.Status != roomStatusRunning {
+				return errRoomIdle
+			}
+			if active := room.ActiveTurn; active != nil {
+				if active.Phase == "uncertain" && room.EndRequested {
+					for i := range room.Participants {
+						if room.Participants[i].Agent == active.Agent {
+							room.Participants[i].Status = "failed"
+						}
+					}
+					appendRoomMessage(room, RoomMessage{From: active.Agent, Name: active.Agent, Kind: "system", Round: active.Round, Text: "上次投递状态不明，结束会议时保留已有记录；未重新发送"})
+					room.ActiveTurn = nil
+				} else {
+					if active.Kind == "minutes" {
+						finish = true
+						room.Status = roomStatusSummarizing
+						room.EndRequested = true
+						return nil
+					}
+					for i := range room.Participants {
+						if room.Participants[i].Agent == active.Agent {
+							idx = i
+							break
+						}
+					}
+					if idx < 0 {
+						return errRoomTurnUncertain
+					}
+					round = active.Round
+					room.Round = round
+					room.Speaking = active.Agent
+					room.Participants[idx].Status = "speaking"
+					return nil
+				}
+			}
+			idx, round = nextRoomSpeaker(*room)
+			if room.EndRequested || idx < 0 {
+				finish = true
+				room.Status = roomStatusSummarizing
+				room.NextSpeaker = ""
+				room.Note = "正在整理会议纪要"
+				return nil
+			}
+			room.ActiveTurn = &RoomTurnState{Agent: room.Participants[idx].Agent, Round: round, Kind: "statement", Phase: "claimed"}
+			room.Round = round
+			room.Speaking = room.Participants[idx].Agent
+			room.Participants[idx].Status = "speaking"
+			room.NextSpeaker = ""
+			return nil
+		})
+		if claimErr != nil {
+			if !errors.Is(claimErr, errRoomIdle) {
+				pauseRoomOnError(d, id, claimErr)
+			}
 			return
 		}
-		if room.EndRequested {
-			summarizeRoom(ctx, d, id, speaker)
-			return
-		}
-		if room.Status != roomStatusRunning {
-			return
-		}
-		idx, round := nextRoomSpeaker(room)
-		if idx < 0 {
+		if finish {
 			summarizeRoom(ctx, d, id, speaker)
 			return
 		}
@@ -616,15 +792,9 @@ func runRoom(ctx context.Context, d *api.Deps, id string, speaker roomSpeaker) {
 		if n := len(room.Messages); n > 0 {
 			promptSeq = room.Messages[n-1].Seq
 		}
-		room, _ = mutateRoom(d, id, func(room *Room) error {
-			room.Round = round
-			room.Speaking = participant.Agent
-			room.Participants[idx].Status = "speaking"
-			return nil
-		})
-
+		var stateErr error
 		turn, err := speaker.Speak(ctx, room, participant, prompt, func(state string) {
-			_, _ = mutateRoom(d, id, func(room *Room) error {
+			_, stateErr = mutateRoom(d, id, func(room *Room) error {
 				if idx < len(room.Participants) {
 					room.Participants[idx].Status = state
 				}
@@ -634,7 +804,16 @@ func runRoom(ctx context.Context, d *api.Deps, id string, speaker roomSpeaker) {
 		if ctx.Err() != nil {
 			return
 		}
-		_, _ = mutateRoom(d, id, func(room *Room) error {
+		if stateErr != nil {
+			pauseRoomOnError(d, id, stateErr)
+			return
+		}
+		if errors.Is(err, errRoomPersistence) || errors.Is(err, errRoomTurnUncertain) {
+			pauseRoomOnError(d, id, err)
+			return
+		}
+		_, commitErr := mutateRoom(d, id, func(room *Room) error {
+			room.ActiveTurn = nil
 			p := &room.Participants[idx]
 			if turn.DispatchID != "" {
 				p.DispatchID = turn.DispatchID
@@ -666,35 +845,56 @@ func runRoom(ctx context.Context, d *api.Deps, id string, speaker roomSpeaker) {
 			p.LastSeen = msg.Seq
 			return nil
 		})
+		if commitErr != nil {
+			pauseRoomOnError(d, id, commitErr)
+			return
+		}
 	}
 }
 
 func summarizeRoom(ctx context.Context, d *api.Deps, id string, speaker roomSpeaker) {
+	chair := -1
 	room, err := mutateRoom(d, id, func(room *Room) error {
+		if room.Status == roomStatusEnded || room.Minutes != "" {
+			return errRoomIdle
+		}
 		room.Status = roomStatusSummarizing
+		room.EndRequested = true
 		room.Note = "正在整理会议纪要"
+		for i, p := range room.Participants {
+			if room.ActiveTurn != nil {
+				if p.Agent == room.ActiveTurn.Agent {
+					chair = i
+					break
+				}
+			} else if p.Status != "failed" && p.DispatchID != "" {
+				chair = i
+				break
+			}
+		}
+		if chair >= 0 {
+			if room.ActiveTurn == nil {
+				room.ActiveTurn = &RoomTurnState{Agent: room.Participants[chair].Agent, Round: room.Round, Kind: "minutes", Phase: "claimed"}
+			}
+			room.Speaking = room.Participants[chair].Agent
+			room.Participants[chair].Status = "speaking"
+		}
 		return nil
 	})
 	if err != nil {
-		return
-	}
-	chair := -1
-	for i, p := range room.Participants {
-		if p.Status != "failed" && p.DispatchID != "" {
-			chair = i
-			break
+		if !errors.Is(err, errRoomIdle) {
+			pauseRoomOnError(d, id, err)
 		}
+		return
 	}
 	minutes := ""
 	if chair >= 0 {
-		p := room.Participants[chair]
-		_, _ = mutateRoom(d, id, func(room *Room) error {
-			room.Speaking = p.Agent
-			room.Participants[chair].Status = "speaking"
-			return nil
-		})
-		turn, speakErr := speaker.Speak(ctx, room, p, buildMinutesPrompt(room), func(string) {})
+		turn, speakErr := speaker.Speak(ctx, room, room.Participants[chair], buildMinutesPrompt(room), func(string) {})
 		if ctx.Err() != nil {
+			return
+		}
+		if errors.Is(speakErr, errRoomPersistence) || errors.Is(speakErr, errRoomTurnUncertain) {
+			pauseRoomOnError(d, id, speakErr)
 			return
 		}
 		if speakErr == nil {
@@ -705,9 +905,8 @@ func summarizeRoom(ctx context.Context, d *api.Deps, id string, speaker roomSpea
 	if fallback {
 		minutes = fallbackMinutes(room)
 	}
-	_, _ = mutateRoom(d, id, func(room *Room) error {
-		name := "Homing"
-		from := "homing"
+	_, err = mutateRoom(d, id, func(room *Room) error {
+		name, from := "Homing", "homing"
 		if chair >= 0 && !fallback {
 			name = room.Participants[chair].Name
 			from = room.Participants[chair].Agent
@@ -720,6 +919,7 @@ func summarizeRoom(ctx context.Context, d *api.Deps, id string, speaker roomSpea
 		appendRoomMessage(room, RoomMessage{From: from, Name: name, Kind: "minutes", Round: room.Round, Text: minutes})
 		room.Minutes = minutes
 		room.Status = roomStatusEnded
+		room.ActiveTurn = nil
 		room.Speaking = ""
 		room.EndRequested = false
 		room.Note = ""
@@ -728,6 +928,9 @@ func summarizeRoom(ctx context.Context, d *api.Deps, id string, speaker roomSpea
 		}
 		return nil
 	})
+	if err != nil {
+		pauseRoomOnError(d, id, err)
+	}
 }
 
 // ---- 提示词 --------------------------------------------------------------------
@@ -857,62 +1060,113 @@ func (sp dispatchRoomSpeaker) Speak(ctx context.Context, room Room, p RoomPartic
 	d := sp.d
 	s, err := d.Store()
 	if err != nil {
-		return roomTurn{}, errors.New("数据目录不可用")
+		return roomTurn{}, fmt.Errorf("%w：数据目录不可用", errRoomPersistence)
 	}
 	turn := roomTurn{DispatchID: p.DispatchID, SessionID: p.SessionID}
-	baseline := ""
-
-	if p.DispatchID == "" {
-		service := orchestrator.Service{Store: s, Launcher: dispatchLauncher}
-		dispatch, dispatchErr := service.Dispatch(ctx, orchestrator.Request{
-			ParentSessionID: room.ID,
-			ParentSource:    "room",
-			TargetAgent:     p.Agent,
-			Cwd:             room.Cwd,
-			Text:            truncateRunes("会议室「"+room.Title+"」发言", 200),
-			Prompt:          prompt,
-			Mode:            "parallel",
-			Preset:          "ask",
-			Workspace:       "readonly",
-			Return:          "none",
-		})
-		if dispatchErr != nil {
-			return turn, dispatchErr
+	if room.ActiveTurn == nil || room.ActiveTurn.Agent != p.Agent {
+		return turn, errRoomTurnUncertain
+	}
+	active := *room.ActiveTurn
+	if active.Phase == "uncertain" {
+		return turn, errRoomTurnUncertain
+	}
+	if active.Phase == "claimed" {
+		if p.DispatchID == "" {
+			active.DispatchID = "dispatch-" + randomHex(12)
+		} else {
+			dispatch, ok := findDispatch(s, p.DispatchID)
+			if !ok || dispatch.TargetSessionID == "" {
+				return turn, errors.New("找不到这位参会者的会话")
+			}
+			active.DispatchID = p.DispatchID
+			active.Baseline, _ = roomAssistantTail(ctx, dispatch.TargetAgent, dispatch.TargetSessionID)
+			// Clear the previous result before saving the submission boundary.
+			// A crash here is still a claimed (never sent) slot.
+			dispatch.Status = "running"
+			dispatch.Message = "会议室：等待发言"
+			dispatch.Result = nil
+			if _, err := s.SaveDispatch(dispatch); err != nil {
+				return turn, fmt.Errorf("%w：%v", errRoomPersistence, err)
+			}
 		}
-		publishDispatch(d, dispatch)
-		turn.DispatchID = dispatch.ID
-		turn.SessionID = dispatch.TargetSessionID
-		if dispatch.Status == "failed" {
-			return turn, errors.New(firstNonEmptyString(dispatch.Message, "子会话启动失败"))
+		active.Phase = "submitting"
+		if _, err := mutateRoom(d, room.ID, func(current *Room) error { current.ActiveTurn = &active; return nil }); err != nil {
+			return turn, err
 		}
-	} else {
-		dispatch, ok := findDispatch(s, p.DispatchID)
-		if !ok || dispatch.TargetSessionID == "" {
-			return turn, errors.New("找不到这位参会者的会话")
-		}
-		baseline, _ = roomAssistantTail(ctx, dispatch.TargetAgent, dispatch.TargetSessionID)
-		// 先清掉上一轮的结果再投递，免得新一轮的完成事件被当成重复而丢掉。
-		dispatch.Status = "running"
-		dispatch.Message = "会议室：等待发言"
-		dispatch.Result = nil
-		if saved, saveErr := s.SaveDispatch(dispatch); saveErr == nil {
-			publishDispatch(d, saved)
-		}
-		request, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, "http://127.0.0.1/api/rooms/"+room.ID, nil)
-		if reqErr != nil {
-			return turn, reqErr
-		}
-		request.RemoteAddr = "127.0.0.1:0"
-		_, _, _, replyErr := sendComposeReply(
-			d, api.WithTrustedLocalRPC(request), s,
-			dispatch.TargetAgent, dispatch.TargetSessionID, dispatch.Cwd,
-			nil, prompt, nil, "", "", "read_only",
-		)
-		if replyErr != nil {
-			return turn, replyErr
+		if p.DispatchID == "" {
+			service := orchestrator.Service{Store: s, Launcher: dispatchLauncher, NewID: func() string { return active.DispatchID }}
+			dispatch, dispatchErr := service.Dispatch(ctx, orchestrator.Request{
+				ParentSessionID: room.ID, ParentSource: "room", TargetAgent: p.Agent, Cwd: room.Cwd,
+				Text: truncateRunes("会议室「"+room.Title+"」发言", 200), Prompt: prompt,
+				Mode: "parallel", Preset: "ask", Workspace: "readonly", Return: "none",
+			})
+			if dispatchErr != nil {
+				if dispatch.Status == "failed" {
+					return turn, dispatchErr
+				}
+				return turn, errRoomTurnUncertain
+			}
+			publishDispatch(d, dispatch)
+		} else {
+			dispatch, _ := findDispatch(s, p.DispatchID)
+			request, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, "http://127.0.0.1/api/rooms/"+room.ID, nil)
+			if reqErr != nil {
+				return turn, errRoomTurnUncertain
+			}
+			request.RemoteAddr = "127.0.0.1:0"
+			_, _, _, replyErr := sendComposeReply(d, api.WithTrustedLocalRPC(request), s,
+				dispatch.TargetAgent, dispatch.TargetSessionID, dispatch.Cwd, nil, prompt, nil, "", "", "read_only")
+			if replyErr != nil {
+				return turn, errRoomTurnUncertain
+			}
 		}
 	}
-	text, sessionID, err := waitRoomTurn(ctx, s, turn.DispatchID, baseline, onState)
+	// Submitting is a durable one-way boundary. On restart, consume/wait for the
+	// original dispatch, even if its result completed before transcript commit.
+	turn.DispatchID = active.DispatchID
+	dispatch, ok := findDispatch(s, turn.DispatchID)
+	if !ok || dispatch.ParentSessionID != room.ID || dispatch.TargetAgent != p.Agent {
+		return turn, errRoomTurnUncertain
+	}
+	if dispatch.TargetSessionID == "" && dispatch.RequestID == "" && dispatch.Status != "completed" && dispatch.Status != "failed" && dispatch.Status != "cancelled" {
+		return turn, errRoomTurnUncertain
+	}
+	turn.SessionID = dispatch.TargetSessionID
+	syncSession := func() error {
+		_, err := mutateRoom(d, room.ID, func(current *Room) error {
+			for i := range current.Participants {
+				participant := &current.Participants[i]
+				if participant.Agent == p.Agent {
+					participant.DispatchID = turn.DispatchID
+					if turn.SessionID != "" {
+						participant.SessionID = turn.SessionID
+					}
+					break
+				}
+			}
+			return nil
+		})
+		return err
+	}
+	if err := syncSession(); err != nil {
+		return turn, err
+	}
+	waitCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var syncErr error
+	text, sessionID, err := waitRoomTurn(waitCtx, s, turn.DispatchID, active.Baseline, func(state string) {
+		if dispatch, ok := findDispatch(s, turn.DispatchID); ok && dispatch.TargetSessionID != "" {
+			turn.SessionID = dispatch.TargetSessionID
+		}
+		if syncErr = syncSession(); syncErr != nil {
+			cancel()
+			return
+		}
+		onState(state)
+	})
+	if syncErr != nil {
+		return turn, syncErr
+	}
 	if sessionID != "" {
 		turn.SessionID = sessionID
 	}

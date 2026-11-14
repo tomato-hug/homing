@@ -9310,3 +9310,47 @@ body.tray-mode #app {
   flex-direction: column;
   gap: 12px;
 }
+
+/* R1 rooms share the existing console palette and controls. */
+.rooms-page [hidden] { display: none !important; }
+.rooms-head, .room-heading, .room-actions, .room-message-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.rooms-head { justify-content: space-between; margin-bottom: 20px; }
+.rooms-grid { display: grid; grid-template-columns: minmax(190px, .8fr) minmax(300px, 2fr) minmax(220px, 1fr); gap: 16px; align-items: start; }
+.rooms-grid > *, .room-discussion, .room-list-item { min-width: 0; }
+.rooms-list { display: grid; gap: 8px; padding: 12px; max-height: 72vh; overflow: auto; }
+.room-list-item { display: grid; gap: 5px; text-align: left; padding: 12px; border: 1px solid transparent; border-radius: 8px; background: var(--raised); color: var(--text); cursor: pointer; }
+.room-list-item.selected, .room-list-item:hover { border-color: var(--brand); }
+.room-list-item strong, .room-list-item .note { overflow-wrap: anywhere; }
+.room-discussion { padding: 18px; }
+.room-heading { justify-content: space-between; align-items: flex-start; }
+.room-heading h2 { margin: 0; overflow-wrap: anywhere; }
+.room-topic { color: var(--body); white-space: pre-wrap; overflow-wrap: anywhere; }
+.room-participants { display: flex; flex-wrap: wrap; gap: 10px; margin: 16px 0; }
+.room-participant { display: grid; gap: 4px; border: 1px solid var(--stroke); border-radius: 9px; padding: 10px; max-width: 100%; }
+.room-participant.speaking { border-color: var(--brand); }
+.room-participant.needs_you { border-color: var(--amber); }
+.room-participant.failed { border-color: var(--red); }
+.room-transcript { display: grid; gap: 12px; }
+.room-message { padding: 12px; border-radius: 9px; background: var(--raised); }
+.room-message-head { justify-content: space-between; margin-bottom: 8px; }
+.room-message-text, .room-minutes, .room-metadata { white-space: pre-wrap; overflow-wrap: anywhere; }
+.room-message.system { border-left: 3px solid var(--amber); }
+.room-message.user { border-left: 3px solid var(--brand); }
+.room-controls { display: grid; gap: 12px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--stroke); }
+.room-actions select { min-width: 0; max-width: 100%; }
+.room-message-form { display: grid; gap: 10px; }
+.room-message-form .btn { justify-self: end; }
+.room-minutes, .room-metadata { padding: 14px; }
+.rooms-error { color: var(--red); margin-bottom: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.room-create-dialog { width: min(600px, calc(100vw - 32px)); max-height: 90vh; overflow: auto; background: var(--card); color: var(--text); border: 1px solid var(--stroke); border-radius: 12px; padding: 24px; }
+.room-create-dialog::backdrop { background: #0009; }
+.room-create-form { display: grid; gap: 12px; }
+.room-create-form h2 { margin-top: 0; }
+.room-create-seat { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 10px 0; }
+.room-create-seat label { display: flex; align-items: center; gap: 8px; flex: 1; }
+.room-create-seat input[type="text"] { min-width: 120px; flex: 1; }
+.rooms-page textarea { width: 100%; resize: vertical; min-height: 80px; }
+.rooms-page input[type="text"], .rooms-page textarea, .rooms-page select { background: var(--bg); color: var(--text); border: 1px solid var(--stroke); border-radius: 8px; padding: 8px 10px; font: inherit; }
+.room-create-seat input[type="checkbox"] { width: auto; }
+@media (max-width: 1200px) { .rooms-grid { grid-template-columns: minmax(180px, .7fr) minmax(300px, 2fr); } .rooms-grid > .card:last-child { grid-column: 1 / -1; } }
+@media (max-width: 800px) { .rooms-grid { grid-template-columns: minmax(0, 1fr); } .rooms-grid > .card:last-child { grid-column: auto; } .rooms-list { max-height: 280px; } .room-discussion { padding: 12px; } }

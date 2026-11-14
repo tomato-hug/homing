@@ -9,6 +9,7 @@ import { renderHome } from "./pages/home";
 import { renderHub } from "./pages/hub";
 import { renderFlow } from "./pages/flow";
 import { renderCollab } from "./pages/collab";
+import { renderRooms } from "./pages/rooms";
 import { renderSessions } from "./pages/sessions";
 import { renderAgents } from "./pages/agents";
 import { renderDevices } from "./pages/devices";
@@ -53,6 +54,7 @@ const routes: Route[] = [
   { path: "/console/flow", crumbs: ["使用", "实时流"], iconSvg: icons.bolt, render: renderFlow },
   { path: "/console/inbox", crumbs: ["使用", "收件箱"], iconSvg: icons.inbox, render: renderInbox },
   { path: "/console/sessions", crumbs: ["使用", "会话"], iconSvg: icons.chat, render: renderSessions },
+  { path: "/console/rooms", crumbs: ["使用", "会议室"], iconSvg: icons.chat, render: renderRooms },
   { path: "/console/collab", crumbs: ["使用", "协作"], iconSvg: icons.cornerDown, render: renderCollab },
   { path: "/console/agents", crumbs: ["Agent", "全部 Agent"], iconSvg: icons.puzzle, render: renderAgents },
   { path: "/console/devices", crumbs: ["手机", "设备"], iconSvg: icons.phone, render: renderDevices },
@@ -122,6 +124,7 @@ const navGroups: NavGroup[] = [
       { path: "/console/overview", label: "总览", iconSvg: icons.overview, badge: "waiting" },
       { path: "/console/sessions", label: "会话", iconSvg: icons.chat },
       { path: "/console/flow", label: "实时流", iconSvg: icons.bolt },
+      { path: "/console/rooms", label: "会议室", iconSvg: icons.chat },
       { path: "/console/collab", label: "协作", iconSvg: icons.cornerDown },
     ],
   },
@@ -456,6 +459,7 @@ function renderRoute() {
           route.path === "/console/flow" ||
           route.path === "/console/agents" ||
           route.path === "/console/library" ||
+          route.path === "/console/rooms" ||
           route.path === "/console/collab"
         ? "content content-wide"
         : "content";

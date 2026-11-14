@@ -32,6 +32,34 @@ class RoomsTest {
         )
 
     @Test
+    fun pointNameDoesNotAddATurnOrChooseTheCurrentSpeaker() {
+        val room = Room.fromJson(sampleRoomJson("running", "codex").put("next_speaker", "claude"))
+        assertEquals("claude", room.nextSpeaker)
+        assertEquals(listOf("claude"), room.callableParticipants.map { it.agent })
+        assertTrue(Room.fromJson(sampleRoomJson("ended")).callableParticipants.isEmpty())
+        assertTrue(Room.fromJson(sampleRoomJson("running").put("end_requested", true)).callableParticipants.isEmpty())
+    }
+
+    @Test
+    fun sendsNamedParticipantOverActualRoomControlEndpoint() = kotlinx.coroutines.runBlocking {
+        val server = okhttp3.mockwebserver.MockWebServer()
+        server.enqueue(okhttp3.mockwebserver.MockResponse().setBody(JSONObject().put("room", sampleRoomJson("paused").put("next_speaker", "claude")).toString()))
+        server.start()
+        try {
+            AgentApi.bindTransport(null)
+            val room = RoomApi.control(AppSettings(server.url("/").toString().trimEnd('/'), "demo-room-token"), "room-demo", "call", "claude")
+            val request = server.takeRequest(3, java.util.concurrent.TimeUnit.SECONDS)!!
+            assertEquals("POST", request.method)
+            assertEquals("/api/rooms/room-demo/control", request.path)
+            val body = JSONObject(request.body.readUtf8())
+            assertEquals("call", body.getString("action"))
+            assertEquals("claude", body.getString("agent"))
+            assertEquals("paused", room.status)
+            assertEquals("claude", room.nextSpeaker)
+        } finally { server.shutdown() }
+    }
+
+    @Test
     fun parsesRoomAndDescribesState() {
         val room = Room.fromJson(sampleRoomJson("running", speaking = "codex"))
         assertEquals("room-demo", room.id)

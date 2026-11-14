@@ -7,4 +7,11 @@
     <string name="close">Close</string>
     <string name="rename_session">Rename</string>
     <string name="image_unavailable">📎 %1$s\nImage unavailable. Retry or view it on your computer.</string>
+    <string name="room_call">Call on</string>
+    <string name="room_call_title">Who should speak next?</string>
+    <string name="room_call_hint">Reorders scheduled turns without adding rounds. A paused meeting still requires Resume.</string>
+    <string name="room_call_pending">Next: %1$s</string>
+    <string name="room_summarizing">Preparing minutes. They will appear here when ready.</string>
+    <string name="room_ending">Minutes will follow the current turn.</string>
+    <string name="room_resume_minutes">Resume minutes</string>
 </resources>
