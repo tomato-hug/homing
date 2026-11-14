@@ -8,7 +8,9 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/tomato-hug/homing/internal/api"
 	"github.com/tomato-hug/homing/internal/platform"
+	"github.com/tomato-hug/homing/internal/store"
 )
 
 var roomCodexSessionsDir = func() string { return filepath.Join(platform.Home(), ".codex", "sessions") }
@@ -98,4 +100,24 @@ func roomCodexFinished(root, session, cwd string) (string, bool) {
 		return "", false
 	}
 	return result, true
+}
+
+// Reconcile a Codex meeting dispatch only after the room has consumed the
+// same native completed answer. Silence or an intermediate message alone is
+// not sufficient evidence to publish a completed dispatch.
+func reconcileRoomCodexTurn(d *api.Deps, dispatchID, observed string) {
+	s, err := d.Store()
+	if err != nil {
+		return
+	}
+	dispatch, ok := findDispatch(s, dispatchID)
+	if !ok || dispatch.ParentSource != "room" || dispatch.TargetAgent != "codex" || dispatch.Result != nil ||
+		(dispatch.Status != "starting" && dispatch.Status != "started" && dispatch.Status != "running" && dispatch.Status != "waiting_session") {
+		return
+	}
+	text, completed := roomCodexFinished(roomCodexSessionsDir(), dispatch.TargetSessionID, dispatch.Cwd)
+	if !completed || strings.TrimSpace(truncateRunes(strings.TrimSpace(text), 4000)) != strings.TrimSpace(observed) {
+		return
+	}
+	trackDispatchLifecycleFor(d, store.Event{Source: dispatch.TargetAgent, SessionID: dispatch.TargetSessionID, Kind: "done", Text: text}, dispatchID)
 }

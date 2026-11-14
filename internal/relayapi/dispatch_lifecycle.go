@@ -26,6 +26,11 @@ var dispatchWaitingKinds = map[string]bool{
 var dispatchLifecycleMu sync.Mutex
 
 func trackDispatchLifecycle(d *api.Deps, event store.Event) {
+	trackDispatchLifecycleFor(d, event, "")
+}
+
+// A nonempty ID restricts native room reconciliation to the claimed dispatch.
+func trackDispatchLifecycleFor(d *api.Deps, event store.Event, dispatchID string) {
 	dispatchLifecycleMu.Lock()
 	defer dispatchLifecycleMu.Unlock()
 	if event.SessionID == "" {
@@ -37,7 +42,7 @@ func trackDispatchLifecycle(d *api.Deps, event store.Event) {
 	}
 	var matched *store.Dispatch
 	for _, dispatch := range s.Dispatches() {
-		if dispatch.TargetSessionID != event.SessionID || dispatch.TargetAgent != event.Source {
+		if (dispatchID != "" && dispatch.ID != dispatchID) || dispatch.TargetSessionID != event.SessionID || dispatch.TargetAgent != event.Source {
 			continue
 		}
 		found := dispatch
@@ -47,6 +52,9 @@ func trackDispatchLifecycle(d *api.Deps, event store.Event) {
 		return
 	}
 	dispatch := *matched
+	if dispatchID != "" && dispatch.Status != "starting" && dispatch.Status != "started" && dispatch.Status != "running" && dispatch.Status != "waiting_session" {
+		return
+	}
 	switch {
 	case dispatchDoneKinds[event.Kind]:
 		if dispatch.Result != nil || dispatch.Status == "cancelled" || dispatch.Status == "failed" {

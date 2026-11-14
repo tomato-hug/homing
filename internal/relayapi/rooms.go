@@ -1215,6 +1215,9 @@ func (sp dispatchRoomSpeaker) Speak(ctx context.Context, room Room, p RoomPartic
 		turn.SessionID = sessionID
 	}
 	turn.Text = text
+	if err == nil && text != "" {
+		reconcileRoomCodexTurn(d, turn.DispatchID, text)
+	}
 	return turn, err
 }
 

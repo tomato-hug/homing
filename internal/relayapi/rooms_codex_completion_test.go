@@ -122,3 +122,71 @@ func TestCompletionHookDoesNotReviveCancelledDispatch(t *testing.T) {
 		t.Fatalf("late completion changed terminal status: %s", got.Status)
 	}
 }
+
+func TestRoomCodexTurnReconcilesOnlyMatchingNativeCompletion(t *testing.T) {
+	relay := newTestRelay(t, nil)
+	root := t.TempDir()
+	cwd := t.TempDir()
+	id := "12345678-1234-1234-1234-123456789abc"
+	previous := roomCodexSessionsDir
+	roomCodexSessionsDir = func() string { return root }
+	t.Cleanup(func() { roomCodexSessionsDir = previous })
+	dir := filepath.Join(root, "2026", "11", "14")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "rollout-2026-11-14T12-00-00-"+id+".jsonl")
+	meta := fmt.Sprintf(`{"type":"session_meta","payload":{"id":%q,"cwd":%q}}`+"\n", id, cwd)
+	start := `{"type":"event_msg","payload":{"type":"task_started","turn_id":"demo-turn-1"}}` + "\n"
+	done := `{"type":"event_msg","payload":{"type":"task_complete","turn_id":"demo-turn-1","last_agent_message":"demo meeting result"}}` + "\n"
+	dispatch := store.Dispatch{ID: "demo-meeting-dispatch", ParentSessionID: "demo-room", ParentSource: "room", TargetAgent: "codex", TargetSessionID: id, Cwd: cwd, Status: "running", Return: "none"}
+	if _, err := relay.store.SaveDispatch(dispatch); err != nil {
+		t.Fatal(err)
+	}
+	write := func(data string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := func(want string) {
+		t.Helper()
+		got, _ := findDispatch(relay.store, dispatch.ID)
+		if got.Status != want {
+			t.Fatalf("dispatch status=%s want=%s", got.Status, want)
+		}
+	}
+	write(meta + start)
+	reconcileRoomCodexTurn(relay.deps, dispatch.ID, "demo meeting result")
+	check("running")
+	write(meta + start + done)
+	reconcileRoomCodexTurn(relay.deps, dispatch.ID, "different result")
+	check("running")
+	for _, terminal := range []string{"needs_you", "cancelled", "failed"} {
+		dispatch.Status = terminal
+		if _, err := relay.store.SaveDispatch(dispatch); err != nil {
+			t.Fatal(err)
+		}
+		reconcileRoomCodexTurn(relay.deps, dispatch.ID, "demo meeting result")
+		check(terminal)
+	}
+	dispatch.Status = "running"
+	if _, err := relay.store.SaveDispatch(dispatch); err != nil {
+		t.Fatal(err)
+	}
+	other := dispatch
+	other.ID = "demo-other-dispatch"
+	if _, err := relay.store.SaveDispatch(other); err != nil {
+		t.Fatal(err)
+	}
+	reconcileRoomCodexTurn(relay.deps, dispatch.ID, "demo meeting result")
+	check("completed")
+	untouched, _ := findDispatch(relay.store, other.ID)
+	if untouched.Status != "running" {
+		t.Fatal("reconciled a different dispatch for the same session")
+	}
+	got, _ := findDispatch(relay.store, dispatch.ID)
+	if got.Result == nil || got.Result.Text != "demo meeting result" {
+		t.Fatal("matching result was not persisted")
+	}
+}

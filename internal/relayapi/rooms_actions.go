@@ -33,14 +33,66 @@ type RoomAction struct {
 }
 
 var roomActionLine = regexp.MustCompile(`^\s*(?:[-*+]\s+|[0-9]+[.)]\s+)(?:\[[ xX]\]\s*)?(\S.*)$`)
+var roomActionTableSeparator = regexp.MustCompile(`^:?-{3,}:?$`)
+
+// roomTableCells handles escaped pipes without treating them as column breaks.
+func roomTableCells(line string) []string {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "|") {
+		return nil
+	}
+	line = strings.TrimPrefix(line, "|")
+	if strings.HasSuffix(line, "|") {
+		line = strings.TrimSuffix(line, "|")
+	}
+	var cells []string
+	var cell strings.Builder
+	runes := []rune(line)
+	for i := 0; i < len(runes); i++ {
+		if runes[i] == '\\' && i+1 < len(runes) && runes[i+1] == '|' {
+			cell.WriteRune('|')
+			i++
+			continue
+		}
+		if runes[i] == '|' {
+			cells = append(cells, strings.TrimSpace(cell.String()))
+			cell.Reset()
+			continue
+		}
+		cell.WriteRune(runes[i])
+	}
+	cells = append(cells, strings.TrimSpace(cell.String()))
+	if len(cells) < 2 {
+		return nil
+	}
+	return cells
+}
+
+func roomActionTableTaskColumn(headers []string) int {
+	for i, header := range headers {
+		h := strings.ToLower(strings.Trim(strings.TrimSpace(header), " *_`：:"))
+		switch h {
+		case "行动", "行动项", "行动内容", "行動", "行動項", "行動內容", "任务", "任务内容", "任務", "任務內容", "事项", "事項", "工作内容", "工作內容", "action", "action item", "action items", "task", "tasks":
+			return i
+		}
+	}
+	return -1
+}
 
 func proposedRoomActions(minutes string) []RoomAction {
-	actions := []RoomAction{}
+	// List IDs retain their historical ordinal even when a minutes table is
+	// present, so already-dispatched list actions never shift to another item.
+	lists, tables := []RoomAction{}, []RoomAction{}
 	inActions, inCode := false, false
+	var headers []string
+	taskColumn := -1
+	tableReady := false
 	for _, line := range strings.Split(minutes, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
 			inCode = !inCode
+			headers = nil
+			tableReady = false
 			continue
 		}
 		if inCode {
@@ -49,11 +101,61 @@ func proposedRoomActions(minutes string) []RoomAction {
 		if strings.HasPrefix(trimmed, "#") {
 			title := strings.Trim(strings.TrimSpace(strings.TrimLeft(trimmed, "#")), " *：:")
 			inActions = title == "行动项" || title == "行動項" || strings.EqualFold(title, "action items") || strings.EqualFold(title, "actions")
+			headers = nil
+			tableReady = false
 			continue
 		}
 		if !inActions {
 			continue
 		}
+		if cells := roomTableCells(trimmed); cells != nil {
+			switch {
+			case tableReady:
+				if len(cells) != len(headers) {
+					headers = nil
+					tableReady = false
+					continue
+				}
+				task := strings.TrimSpace(cells[taskColumn])
+				if task == "" || task == "-" || task == "—" {
+					continue
+				}
+				parts := []string{task}
+				for i, value := range cells {
+					value = strings.TrimSpace(value)
+					if i == taskColumn || value == "" {
+						continue
+					}
+					label := strings.Trim(strings.TrimSpace(headers[i]), " *_`：:")
+					if label != "" {
+						parts = append(parts, label+"："+value)
+					}
+				}
+				if len(tables) < 30 {
+					tables = append(tables, RoomAction{ID: fmt.Sprintf("action-table-%d", len(tables)+1), Text: truncateRunes(strings.Join(parts, "；"), roomUserMessageRunes), Status: "suggested"})
+				}
+			case headers != nil:
+				valid := len(cells) == len(headers)
+				for _, cell := range cells {
+					if !roomActionTableSeparator.MatchString(strings.TrimSpace(cell)) {
+						valid = false
+						break
+					}
+				}
+				if valid {
+					tableReady = true
+				} else {
+					headers = nil
+				}
+			default:
+				if column := roomActionTableTaskColumn(cells); column >= 0 {
+					headers, taskColumn = cells, column
+				}
+			}
+			continue
+		}
+		headers = nil
+		tableReady = false
 		match := roomActionLine.FindStringSubmatch(line)
 		if len(match) != 2 {
 			continue
@@ -62,12 +164,15 @@ func proposedRoomActions(minutes string) []RoomAction {
 		if text == "" {
 			continue
 		}
-		actions = append(actions, RoomAction{ID: fmt.Sprintf("action-%d", len(actions)+1), Text: truncateRunes(text, roomUserMessageRunes), Status: "suggested"})
-		if len(actions) >= 30 {
+		lists = append(lists, RoomAction{ID: fmt.Sprintf("action-%d", len(lists)+1), Text: truncateRunes(text, roomUserMessageRunes), Status: "suggested"})
+		if len(lists) >= 30 {
 			break
 		}
 	}
-	return actions
+	if remaining := 30 - len(lists); len(tables) > remaining {
+		tables = tables[:remaining]
+	}
+	return append(lists, tables...)
 }
 func roomActionViews(d *api.Deps, room Room) []RoomAction {
 	actions := proposedRoomActions(room.Minutes)
