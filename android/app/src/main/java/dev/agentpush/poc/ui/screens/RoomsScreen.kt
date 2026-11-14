@@ -58,6 +58,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
@@ -71,8 +72,14 @@ import dev.agentpush.poc.AgentBrand
 import dev.agentpush.poc.AgentViewModel
 import dev.agentpush.poc.Room
 import dev.agentpush.poc.R
+import dev.agentpush.poc.RoomAction
 import dev.agentpush.poc.RoomAgentChoice
 import dev.agentpush.poc.RoomApi
+import dev.agentpush.poc.RoomDelivery
+import dev.agentpush.poc.RoomPendingMessage
+import dev.agentpush.poc.roomDeliveryForError
+import dev.agentpush.poc.completeRoomDelivery
+import dev.agentpush.poc.parseRoomMentions
 import dev.agentpush.poc.RoomMessage
 import dev.agentpush.poc.RoomParticipant
 import dev.agentpush.poc.RoomSeat
@@ -506,7 +513,36 @@ fun RoomScreen(
     val scope = rememberCoroutineScope()
     var room by remember(roomId) { mutableStateOf<Room?>(null) }
     var error by remember(roomId) { mutableStateOf<String?>(null) }
-    var draft by remember(roomId) { mutableStateOf("") }
+    val context = LocalContext.current
+    val prefs = remember(context) { context.getSharedPreferences("room_chat_drafts", android.content.Context.MODE_PRIVATE) }
+    val draftKey = remember(roomId, state.settings) {
+        val bytes = java.security.MessageDigest.getInstance("SHA-256").digest((state.settings.baseUrl + "\u0000" + state.settings.token + "\u0000" + roomId).toByteArray())
+        bytes.joinToString("") { "%02x".format(it) }
+    }
+    var draft by remember(draftKey) { mutableStateOf(prefs.getString("draft_" + draftKey, "").orEmpty()) }
+    var pending by remember(draftKey) { mutableStateOf(RoomPendingMessage.fromJson(prefs.getString("pending_" + draftKey, "").orEmpty())) }
+    fun saveDraft(value: String) { draft = value; prefs.edit().putString("draft_" + draftKey, value).apply() }
+    fun savePending(value: RoomPendingMessage?): Boolean {
+        val editor = prefs.edit()
+        if (value == null) editor.remove("pending_" + draftKey) else editor.putString("pending_" + draftKey, value.toJson())
+        if (!editor.commit()) return false
+        pending = value
+        return true
+    }
+    fun finishDelivery(waiting: RoomPendingMessage): Boolean {
+        if (!completeRoomDelivery(prefs, draftKey, draft, waiting.text)) return false
+        pending = null
+        if (draft.trim() == waiting.text) draft = ""
+        return true
+    }
+    fun reconcile(received: Room) {
+        val waiting = pending ?: return
+        if (waiting.isDeliveredBy(received.messages) && !finishDelivery(waiting)) {
+            pending = waiting.copy(delivery = RoomDelivery.Unknown)
+            error = "无法保存发送状态，请查看会议记录"
+        }
+    }
+    var selectedAction by remember(roomId) { mutableStateOf<RoomAction?>(null) }
     var busy by remember(roomId) { mutableStateOf(false) }
     var revision by remember(roomId) { mutableStateOf(0) }
     val listState = rememberLazyListState()
@@ -516,7 +552,7 @@ fun RoomScreen(
             val observed = revision
             runCatching { RoomApi.get(state.settings, roomId) }
                 .onSuccess {
-                    if (observed == revision) { room = it; error = null }
+                    if (observed == revision) { room = it; error = null; reconcile(it) }
                 }
                 .onFailure { if (observed == revision) error = roomErrorText(it) }
             delay(if (room?.ended == true) 15_000 else 2_500)
@@ -612,8 +648,25 @@ fun RoomScreen(
                 items(current.messages, key = { "msg-${it.seq}" }) { message ->
                     RoomMessageView(current, message)
                 }
+                if (current.ended && current.actions.isNotEmpty()) {
+                    item(key = "actions") {
+                        RoomActionList(current.actions, { selectedAction = it }, onOpenSession)
+                    }
+                }
                 current.speakingParticipant?.let { p ->
                     item(key = "speaking") { SpeakingRow(p) }
+                }
+                pending?.let { outgoing ->
+                    item(key = "pending-" + outgoing.clientId) {
+                        Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
+                            Text(outgoing.text, color = HomingPalette.Text, style = MaterialTheme.typography.bodyMedium)
+                            Text(when (outgoing.delivery) {
+                                RoomDelivery.Sending -> "发送中"
+                                RoomDelivery.Unknown -> "发送结果待确认"
+                                RoomDelivery.Rejected -> "发送失败，可重新编辑"
+                            }, color = HomingPalette.Warning, style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
                 }
             }
         }
@@ -623,18 +676,58 @@ fun RoomScreen(
                 room = current,
                 draft = draft,
                 busy = busy,
-                onDraftChange = { draft = it },
+                onDraftChange = ::saveDraft,
+                pending = pending,
+                onDismissPending = { savePending(null) },
+                onMention = { id -> saveDraft("@$id " + draft.replace(Regex("^@[A-Za-z0-9_.-]+\\s*"), "")) },
                 onSend = {
                     val text = draft.trim()
-                    if (text.isNotEmpty()) {
-                        act(afterSuccess = { if (draft.trim() == text) draft = "" }) {
-                            RoomApi.say(state.settings, current.id, text)
+                    val mentions = parseRoomMentions(text)
+                    when {
+                        text.isEmpty() || pending != null || busy -> Unit
+                        mentions.size > 1 -> error = "每条消息只能指定一位参会者"
+                        mentions.any { id -> current.participants.none { it.agent == id } } -> error = "请选择房内的参会者"
+                        else -> {
+                            val outgoing = RoomPendingMessage(java.util.UUID.randomUUID().toString(), text, mentions.firstOrNull().orEmpty(), RoomDelivery.Sending)
+                            if (!savePending(outgoing)) { error = "无法保存消息草稿" }
+                            else {
+                                busy = true; revision++
+                                scope.launch {
+                                    runCatching { RoomApi.say(state.settings, current.id, text, outgoing.clientId, outgoing.mention) }
+                                        .onSuccess { updated ->
+                                            room = updated
+                                            if (outgoing.mention.isNotBlank() && updated.messages.none { it.clientId == outgoing.clientId && it.mention == outgoing.mention }) {
+                                                savePending(outgoing.copy(delivery = RoomDelivery.Unknown))
+                                                error = "电脑端未确认点名，请检查记录并更新电脑端"
+                                            } else {
+                                                if (finishDelivery(outgoing)) {
+                                                    error = null
+                                                } else {
+                                                    pending = outgoing.copy(delivery = RoomDelivery.Unknown)
+                                                    error = "无法保存发送状态，请查看会议记录"
+                                                }
+                                            }
+                                        }.onFailure { failure ->
+                                            savePending(outgoing.copy(delivery = roomDeliveryForError(failure)))
+                                            error = roomErrorText(failure)
+                                        }
+                                    busy = false; revision++
+                                }
+                            }
                         }
                     }
                 },
                 onAction = { action -> act { RoomApi.control(state.settings, current.id, action) } },
                 onCall = { agent -> act { RoomApi.control(state.settings, current.id, "call", agent) } },
             )
+        }
+    }
+    selectedAction?.let { action ->
+        room?.let { current ->
+            RoomActionDialog(action, current.participants, { selectedAction = null }) { agent, text ->
+                selectedAction = null
+                act { RoomApi.dispatchAction(state.settings, current.id, action.id, agent, text, action.baseCommit) }
+            }
         }
     }
 }
@@ -724,12 +817,10 @@ private fun RoomMessageView(room: Room, message: RoomMessage) {
                 shape = RoundedCornerShape(14.dp, 4.dp, 14.dp, 14.dp),
                 modifier = Modifier.widthIn(max = 300.dp),
             ) {
-                Text(
-                    text = message.text,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = HomingPalette.Text,
-                )
+                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                    Text(message.text, style = MaterialTheme.typography.bodyMedium, color = HomingPalette.Text)
+                    Text("已送达", style = MaterialTheme.typography.labelSmall, color = HomingPalette.Muted)
+                }
             }
         }
         "system" -> Text(
@@ -790,6 +881,70 @@ private fun RoomMessageView(room: Room, message: RoomMessage) {
 }
 
 @Composable
+internal fun RoomActionList(actions: List<RoomAction>, onDispatch: (RoomAction) -> Unit, onOpenSession: (String) -> Unit) {
+    HomingCard(borderColor = HomingPalette.Border.copy(alpha = 0.5f)) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("行动项", style = MaterialTheme.typography.titleSmall, color = HomingPalette.Text)
+            actions.forEach { action ->
+                var edited by remember(action.id, action.text) { mutableStateOf(action.text) }
+                Column(modifier = Modifier.fillMaxWidth().testTag("room-action-" + action.id), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (action.status == "suggested" || action.status == "prepare_failed") {
+                        OutlinedTextField(value = edited, onValueChange = { edited = it }, maxLines = 5,
+                            label = { Text("行动项内容") }, modifier = Modifier.fillMaxWidth().testTag("room-action-edit-" + action.id))
+                    } else {
+                        Text(action.text, color = HomingPalette.Text, style = MaterialTheme.typography.bodyMedium)
+                    }
+                    Text(when (action.status) {
+                        "suggested" -> "待确认"
+                        "prepare_failed" -> "工作区准备失败，可重新确认"
+                        "preparing" -> "工作区准备待恢复"
+                        "unknown", "submitting", "launching", "starting" -> "启动状态待确认"
+                        "completed" -> "已完成"
+                        "failed", "cancelled" -> "任务未完成"
+                        "needs_you" -> "等待处理"
+                        else -> "执行中"
+                    }, color = HomingPalette.Muted, style = MaterialTheme.typography.labelSmall)
+                    if (action.error.isNotBlank()) Text(action.error, color = HomingPalette.Error, style = MaterialTheme.typography.labelSmall)
+                    if (action.result.isNotBlank()) Text(action.result, color = HomingPalette.Body, style = MaterialTheme.typography.bodyMedium)
+                    if (action.status == "suggested" || action.status == "prepare_failed" || action.status == "preparing") {
+                        TextButton(onClick = { onDispatch(action.copy(text = edited.trim())) }, enabled = edited.isNotBlank()) { Text(if (action.status == "preparing") "继续准备" else "派发行动项") }
+                    } else if (action.sessionId.isNotBlank()) {
+                        TextButton(onClick = { onOpenSession(action.sessionId) }) { Text("查看任务会话") }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun RoomActionDialog(
+    action: RoomAction,
+    participants: List<RoomParticipant>,
+    onDismiss: () -> Unit,
+    onConfirm: (String, String) -> Unit,
+) {
+    val text = action.text
+    var target by remember(action.id) { mutableStateOf(if (action.status == "preparing") action.agent else "") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("确认派发行动项") },
+        text = { Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("选择执行者并确认任务；将基于提交创建独立工作区。未提交和未跟踪的文件不会带入。", style = MaterialTheme.typography.bodySmall)
+            Text("基准提交：" + action.baseCommit.ifBlank { "无法读取，请检查工作目录" }, style = MaterialTheme.typography.labelSmall)
+            Text("任务内容", style = MaterialTheme.typography.labelSmall)
+            Text(text, style = MaterialTheme.typography.bodyMedium)
+            participants.forEach { participant ->
+                FilterChip(selected = target == participant.agent, onClick = { target = participant.agent },
+                    enabled = action.status != "preparing" || participant.agent == action.agent, label = { Text(participant.name) })
+            }
+        } },
+        confirmButton = { TextButton(onClick = { onConfirm(target, text.trim()) }, enabled = target.isNotBlank() && text.isNotBlank() && action.baseCommit.isNotBlank()) { Text("确认派发") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+@Composable
 private fun SpeakingRow(p: RoomParticipant) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -819,7 +974,12 @@ internal fun RoomControls(
     onSend: () -> Unit,
     onAction: (String) -> Unit,
     onCall: (String) -> Unit = {},
+    onMention: (String) -> Unit = {},
+    pending: RoomPendingMessage? = null,
+    onDismissPending: () -> Unit = {},
 ) {
+    var mentioning by remember(room.id) { mutableStateOf(false) }
+    var confirmingUnknown by remember(room.id) { mutableStateOf(false) }
     var choosing by remember(room.id) { mutableStateOf(false) }
     val canControl = room.status in listOf("running", "paused") && !room.endRequested
     Surface(color = HomingPalette.NavBackground) {
@@ -831,6 +991,25 @@ internal fun RoomControls(
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            pending?.let { outgoing ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(when (outgoing.delivery) {
+                        RoomDelivery.Sending -> "发送中"
+                        RoomDelivery.Unknown -> "发送结果待确认"
+                        RoomDelivery.Rejected -> "发送失败，可重新编辑"
+                    }, modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelSmall, color = HomingPalette.Warning)
+                    if (outgoing.delivery != RoomDelivery.Sending) TextButton(onClick = {
+                        if (outgoing.delivery == RoomDelivery.Unknown) confirmingUnknown = true else onDismissPending()
+                    }) {
+                        Text(if (outgoing.delivery == RoomDelivery.Unknown) "确认后重新编辑" else "重新编辑")
+                    }
+                }
+            }
+            if (!canControl && draft.isNotBlank()) {
+                val clipboard = LocalClipboardManager.current
+                Text(draft, style = MaterialTheme.typography.bodySmall, color = HomingPalette.Muted)
+                TextButton(onClick = { clipboard.setText(AnnotatedString(draft)) }) { Text("复制草稿") }
+            }
             if (!canControl) {
                 if (room.status == "paused" && room.endRequested) {
                     OutlinedButton(onClick = { onAction("resume") }, enabled = !busy) {
@@ -872,6 +1051,7 @@ internal fun RoomControls(
                 }
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { mentioning = true }, enabled = !busy && pending == null && room.callableParticipants.isNotEmpty(), modifier = Modifier.testTag("room-mention")) { Text("@") }
                 OutlinedTextField(
                     value = draft,
                     onValueChange = onDraftChange,
@@ -884,13 +1064,32 @@ internal fun RoomControls(
                 )
                 IconButton(
                     onClick = onSend,
-                    enabled = !busy && draft.isNotBlank(),
+                    enabled = !busy && pending == null && draft.isNotBlank(),
                     modifier = Modifier.testTag("room-send"),
                 ) {
                     Icon(Icons.AutoMirrored.Outlined.Send, contentDescription = "发言")
                 }
             }
         }
+    }
+    if (confirmingUnknown && pending?.delivery == RoomDelivery.Unknown) {
+        AlertDialog(
+            onDismissRequest = { confirmingUnknown = false },
+            title = { Text("发送结果待确认") },
+            text = { Text("可能已经送达，重新发送可能产生重复。请先查看会议记录。") },
+            confirmButton = { TextButton(onClick = { confirmingUnknown = false; onDismissPending() }) { Text("我已检查") } },
+            dismissButton = { TextButton(onClick = { confirmingUnknown = false }) { Text("取消") } },
+        )
+    }
+    if (mentioning && canControl) {
+        AlertDialog(
+            onDismissRequest = { mentioning = false },
+            title = { Text("@参会者") },
+            text = { Column { room.callableParticipants.forEach { participant ->
+                TextButton(onClick = { mentioning = false; onMention(participant.agent) }) { Text(participant.label) }
+            } } },
+            confirmButton = { TextButton(onClick = { mentioning = false }) { Text(stringResource(R.string.close)) } },
+        )
     }
     if (choosing && canControl) {
         AlertDialog(

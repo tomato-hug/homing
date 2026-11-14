@@ -67,6 +67,7 @@ type Room struct {
 	ActiveTurn   *RoomTurnState    `json:"active_turn,omitempty"`
 	Participants []RoomParticipant `json:"participants"`
 	Messages     []RoomMessage     `json:"messages"`
+	Actions      []RoomAction      `json:"actions,omitempty"`
 	Minutes      string            `json:"minutes,omitempty"`
 	Note         string            `json:"note,omitempty"`
 	CreatedAt    string            `json:"created_at"`
@@ -99,13 +100,15 @@ type RoomParticipant struct {
 
 // RoomMessage 是会议记录里的一条。
 type RoomMessage struct {
-	Seq   int    `json:"seq"`
-	From  string `json:"from"` // user | homing | agent id
-	Name  string `json:"name"`
-	Kind  string `json:"kind"` // statement | user | system | minutes
-	Round int    `json:"round"`
-	Text  string `json:"text"`
-	At    string `json:"at"`
+	Seq      int    `json:"seq"`
+	From     string `json:"from"` // user | homing | agent id
+	Name     string `json:"name"`
+	Kind     string `json:"kind"` // statement | user | system | minutes
+	Round    int    `json:"round"`
+	Text     string `json:"text"`
+	At       string `json:"at"`
+	ClientID string `json:"client_id,omitempty"`
+	Mention  string `json:"mention,omitempty"`
 }
 
 // roomTurn 是一次发言的结果。
@@ -136,6 +139,7 @@ func init() {
 		mux.HandleFunc("GET /api/rooms/{id}", guarded(d, getRoom))
 		mux.HandleFunc("POST /api/rooms/{id}/messages", guarded(d, postRoomMessage))
 		mux.HandleFunc("POST /api/rooms/{id}/control", guarded(d, controlRoom))
+		mux.HandleFunc("POST /api/rooms/{id}/actions/{action}/dispatch", guarded(d, dispatchRoomAction))
 	})
 }
 
@@ -221,6 +225,7 @@ func cloneRoom(room *Room) Room {
 	}
 	out.Participants = append([]RoomParticipant(nil), room.Participants...)
 	out.Messages = append([]RoomMessage(nil), room.Messages...)
+	out.Actions = append([]RoomAction(nil), room.Actions...)
 	return out
 }
 
@@ -316,6 +321,7 @@ func getRoom(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 		api.WriteJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": errRoomNotFound.Error()})
 		return
 	}
+	room.Actions = roomActionViews(d, room)
 	api.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "room": room})
 }
 
@@ -514,11 +520,33 @@ func postRoomMessage(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 		api.WriteJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "发言太长"})
 		return
 	}
+	clientID := strings.TrimSpace(stringField(body, "client_id"))
+	mention := strings.ToLower(strings.TrimSpace(stringField(body, "mention")))
+	if len(clientID) > 100 {
+		api.WriteJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "消息标识过长"})
+		return
+	}
 	room, err := mutateRoom(d, strings.TrimSpace(r.PathValue("id")), func(room *Room) error {
+		if clientID != "" {
+			for _, message := range room.Messages {
+				if message.From == "user" && message.ClientID == clientID {
+					if message.Text != text || message.Mention != mention {
+						return errors.New("消息标识已用于其他内容")
+					}
+					return nil
+				}
+			}
+		}
 		if room.Status == roomStatusEnded || room.Status == roomStatusSummarizing || room.EndRequested {
 			return errors.New("会议已经在收尾或已结束，不能再插话")
 		}
-		appendRoomMessage(room, RoomMessage{From: "user", Name: "你", Kind: "user", Round: room.Round, Text: text})
+		if mention != "" {
+			if err := selectRoomNextSpeaker(room, mention); err != nil {
+				return err
+			}
+			room.NextSpeaker = mention
+		}
+		appendRoomMessage(room, RoomMessage{From: "user", Name: "你", Kind: "user", Round: room.Round, Text: text, ClientID: clientID, Mention: mention})
 		return nil
 	})
 	if err != nil {
@@ -527,6 +555,46 @@ func postRoomMessage(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 	}
 	d.Audit(r, "room_say", map[string]any{"room_id": room.ID})
 	api.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "room": room})
+}
+
+// selectRoomNextSpeaker validates a call against the same current slot used by
+// both the call action and an atomic mention message.
+func selectRoomNextSpeaker(room *Room, target string) error {
+	if (room.Status != roomStatusRunning && room.Status != roomStatusPaused) || room.EndRequested {
+		return errors.New("会议已经在收尾或已结束")
+	}
+	if room.NextSpeaker != "" && room.NextSpeaker != target {
+		return errors.New("已有下一位发言者，请先等待其发言")
+	}
+	idx := -1
+	for i, p := range room.Participants {
+		if p.Agent == target {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return fmt.Errorf("%w：请选择房内的参会者", errRoomInvalidParticipant)
+	}
+	if room.Participants[idx].Status == "failed" {
+		return errors.New("这位参会者已失败，请查看发言记录中的原因")
+	}
+	current, currentRound := room.Speaking, room.Round
+	if current == "" && room.ActiveTurn != nil && room.ActiveTurn.Kind == "statement" {
+		current, currentRound = room.ActiveTurn.Agent, room.ActiveTurn.Round
+	}
+	if current == target {
+		return errors.New("这位参会者正在发言，无需再次点名")
+	}
+	afterCurrent := cloneRoom(room)
+	if current != "" {
+		afterCurrent.Messages = append(afterCurrent.Messages, RoomMessage{From: current, Kind: "statement", Round: currentRound})
+	}
+	_, round := nextRoomSpeaker(afterCurrent)
+	if round == 0 || roomHasSpoken(afterCurrent, target, round) {
+		return errors.New("这位参会者在本轮已发言，下一轮再点名")
+	}
+	return nil
 }
 
 func controlRoom(d *api.Deps, w http.ResponseWriter, r *http.Request) {
@@ -544,33 +612,9 @@ func controlRoom(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 	room, err := mutateRoom(d, id, func(room *Room) error {
 		switch action {
 		case "call":
-			if (room.Status != roomStatusRunning && room.Status != roomStatusPaused) || room.EndRequested {
-				return errors.New("会议已经在收尾或已结束")
-			}
 			target := strings.ToLower(strings.TrimSpace(stringField(body, "agent")))
-			idx := -1
-			for i, p := range room.Participants {
-				if p.Agent == target {
-					idx = i
-					break
-				}
-			}
-			if idx < 0 {
-				return fmt.Errorf("%w：请选择房内的参会者", errRoomInvalidParticipant)
-			}
-			if room.Participants[idx].Status == "failed" {
-				return errors.New("这位参会者已失败，请查看发言记录中的原因")
-			}
-			if room.Speaking == target {
-				return errors.New("这位参会者正在发言，无需再次点名")
-			}
-			afterCurrent := cloneRoom(room)
-			if room.Speaking != "" {
-				afterCurrent.Messages = append(afterCurrent.Messages, RoomMessage{From: room.Speaking, Kind: "statement", Round: room.Round})
-			}
-			_, round := nextRoomSpeaker(afterCurrent)
-			if round == 0 || roomHasSpoken(afterCurrent, target, round) {
-				return errors.New("这位参会者在本轮已发言，下一轮再点名")
+			if err := selectRoomNextSpeaker(room, target); err != nil {
+				return err
 			}
 			room.NextSpeaker = target
 		case "pause":

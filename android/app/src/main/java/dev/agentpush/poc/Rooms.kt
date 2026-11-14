@@ -37,6 +37,8 @@ data class RoomMessage(
     val round: Int,
     val text: String,
     val at: String,
+    val clientId: String = "",
+    val mention: String = "",
 ) {
     companion object {
         fun fromJson(json: JSONObject) = RoomMessage(
@@ -47,6 +49,28 @@ data class RoomMessage(
             round = json.optInt("round"),
             text = json.optString("text"),
             at = json.optString("at"),
+            clientId = json.optString("client_id"),
+            mention = json.optString("mention"),
+        )
+    }
+}
+
+data class RoomAction(
+    val id: String,
+    val text: String,
+    val agent: String,
+    val status: String,
+    val dispatchId: String,
+    val sessionId: String,
+    val result: String,
+    val error: String,
+    val baseCommit: String = "",
+) {
+    companion object {
+        fun fromJson(json: JSONObject) = RoomAction(
+            json.optString("id"), json.optString("text"), json.optString("agent"),
+            json.optString("status", "suggested"), json.optString("dispatch_id"),
+            json.optString("session_id"), json.optString("result"), json.optString("error"), json.optString("base_commit"),
         )
     }
 }
@@ -70,6 +94,7 @@ data class Room(
     val updatedAt: String,
     val nextSpeaker: String = "",
     val endRequested: Boolean = false,
+    val actions: List<RoomAction> = emptyList(),
 ) {
     val ended: Boolean get() = status == "ended"
     val speakingParticipant: RoomParticipant?
@@ -116,6 +141,7 @@ data class Room(
                 participants = participants,
                 messages = messages,
                 minutes = json.optString("minutes"),
+                actions = json.optJSONArray("actions").objects().map(RoomAction::fromJson),
                 note = json.optString("note"),
                 messageCount = json.optInt("message_count", messages.size),
                 preview = json.optString("preview"),
@@ -173,8 +199,11 @@ object RoomApi {
         return Room.fromJson(json.optJSONObject("room") ?: JSONObject())
     }
 
-    suspend fun say(settings: AppSettings, id: String, text: String): Room {
-        val body = JSONObject().put("text", text).toString()
+    suspend fun say(settings: AppSettings, id: String, text: String, clientId: String = "", mention: String = ""): Room {
+        val body = JSONObject().put("text", text).apply {
+            if (clientId.isNotBlank()) put("client_id", clientId)
+            if (mention.isNotBlank()) put("mention", mention)
+        }.toString()
         val json = JSONObject(
             AgentApi.roomRequest(settings, "/api/rooms/${encodePath(id)}/messages", "POST", body),
         )
@@ -190,6 +219,14 @@ object RoomApi {
         val json = JSONObject(
             AgentApi.roomRequest(settings, "/api/rooms/${encodePath(id)}/control", "POST", body),
         )
+        return Room.fromJson(json.optJSONObject("room") ?: JSONObject())
+    }
+
+    suspend fun dispatchAction(settings: AppSettings, id: String, actionId: String, agent: String, text: String, baseCommit: String = ""): Room {
+        val body = JSONObject().put("agent", agent).put("text", text).put("confirmed", true).apply {
+            if (baseCommit.isNotBlank()) put("base_commit", baseCommit)
+        }
+        val json = JSONObject(AgentApi.roomRequest(settings, "/api/rooms/${encodePath(id)}/actions/${encodePath(actionId)}/dispatch", "POST", body.toString()))
         return Room.fromJson(json.optJSONObject("room") ?: JSONObject())
     }
 
