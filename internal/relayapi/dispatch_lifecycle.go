@@ -49,7 +49,7 @@ func trackDispatchLifecycle(d *api.Deps, event store.Event) {
 	dispatch := *matched
 	switch {
 	case dispatchDoneKinds[event.Kind]:
-		if dispatch.Result != nil {
+		if dispatch.Result != nil || dispatch.Status == "cancelled" || dispatch.Status == "failed" {
 			return
 		}
 		dispatch.Status = "completed"

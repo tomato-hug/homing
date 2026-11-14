@@ -14,6 +14,7 @@ import (
 
 	"github.com/tomato-hug/homing/internal/api"
 	"github.com/tomato-hug/homing/internal/orchestrator"
+	"github.com/tomato-hug/homing/internal/store"
 )
 
 // RoomAction is a user-approved task derived from a minutes item. Persist the
@@ -113,6 +114,13 @@ func roomActionViews(d *api.Deps, room Room) []RoomAction {
 						break
 					}
 				}
+			}
+		}
+		if dispatch.TargetAgent == "codex" && dispatch.TargetSessionID != "" && dispatch.Result == nil &&
+			(dispatch.Status == "starting" || dispatch.Status == "started" || dispatch.Status == "running" || dispatch.Status == "waiting_session") {
+			if text, complete := roomCodexFinished(roomCodexSessionsDir(), dispatch.TargetSessionID, dispatch.Cwd); complete {
+				trackDispatchLifecycle(d, store.Event{Source: dispatch.TargetAgent, SessionID: dispatch.TargetSessionID, Kind: "done", Text: text})
+				dispatch, _ = findDispatch(s, a.DispatchID)
 			}
 		}
 		a.Status = dispatch.Status
