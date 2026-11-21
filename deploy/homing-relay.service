@@ -1,0 +1,31 @@
+[Unit]
+Description=Homing encrypted cloud relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=homing-relay
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/homing-relay
+EnvironmentFile=-/etc/homing-relay.env
+ExecStart=/opt/homing-relay/current/homing-server --addr 127.0.0.1:18789 --db /var/lib/homing-relay/homing.sqlite
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

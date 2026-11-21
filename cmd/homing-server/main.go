@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -35,10 +36,15 @@ func run(args []string) error {
 	}
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	var trustedProxies []string
+	if raw := strings.TrimSpace(os.Getenv("HOMING_TRUSTED_PROXIES")); raw != "" {
+		trustedProxies = strings.Split(raw, ",")
+	}
 	srv, err := server.New(server.Config{
-		Addr:   *addr,
-		DBPath: *dbPath,
-		Logger: log,
+		Addr:           *addr,
+		DBPath:         *dbPath,
+		Logger:         log,
+		TrustedProxies: trustedProxies,
 	})
 	if err != nil {
 		return err

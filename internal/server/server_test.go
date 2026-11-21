@@ -171,9 +171,14 @@ func newServerFixture(t *testing.T, dbPath string, waker Waker) serverFixture {
 
 func connectPeer(t *testing.T, url string, identity testIdentity) *testPeer {
 	t.Helper()
+	return connectPeerWithOptions(t, url, identity, nil)
+}
+
+func connectPeerWithOptions(t *testing.T, url string, identity testIdentity, options *websocket.DialOptions) *testPeer {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	ws, _, err := websocket.Dial(ctx, url, nil)
+	ws, _, err := websocket.Dial(ctx, url, options)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -608,6 +613,40 @@ func TestPushRegistration(t *testing.T) {
 	}, 2*time.Second)
 	if got := stringField(rejected, "code"); got != "invalid_push" {
 		t.Fatalf("error code = %q, want invalid_push", got)
+	}
+}
+
+func TestClientAddressHonorsLoopbackProxyAndEvictsOldHostInvites(t *testing.T) {
+	fixture := newServerFixture(t, "", nil)
+	req := &http.Request{
+		RemoteAddr: "127.0.0.1:43210",
+		Header:     http.Header{"X-Forwarded-For": []string{"198.51.100.10, 127.0.0.1"}},
+	}
+	if got := fixture.server.clientAddress(req); got != "198.51.100.10" {
+		t.Fatalf("loopback proxy clientAddress = %q, want 198.51.100.10", got)
+	}
+	untrusted := &http.Request{
+		RemoteAddr: "203.0.113.55:43210",
+		Header:     http.Header{"X-Forwarded-For": []string{"198.51.100.10"}},
+	}
+	if got := fixture.server.clientAddress(untrusted); got != "203.0.113.55" {
+		t.Fatalf("untrusted remote clientAddress = %q, want 203.0.113.55", got)
+	}
+
+	host := connectPeer(t, fixture.url, identityFromSeed(t, hostSeed))
+	defer host.close()
+	for i := 0; i < 6; i++ {
+		host.send(t, map[string]any{"t": "pair.start"})
+		reply := host.next(t, func(m map[string]any) bool { return m["t"] == "pair.start.ok" }, 2*time.Second)
+		if stringField(reply, "code6") == "" {
+			t.Fatalf("missing code6 on iteration %d", i)
+		}
+	}
+	fixture.server.mu.Lock()
+	activeCodes := len(fixture.server.codeIndex)
+	fixture.server.mu.Unlock()
+	if activeCodes > maxHostPairInvites {
+		t.Fatalf("activeCodes = %d, want <= %d", activeCodes, maxHostPairInvites)
 	}
 }
 

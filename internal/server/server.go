@@ -18,21 +18,24 @@ import (
 )
 
 const (
-	challengeTTL    = 15 * time.Second
-	pairTTL         = 5 * time.Minute
-	maxCodeAttempts = 5
-	helloClockSkew  = 5 * time.Minute
-	maxMessageSize  = 25 * 1024 * 1024
-	heartbeatEvery  = 25 * time.Second
-	cleanupEvery    = 30 * time.Second
+	challengeTTL       = 15 * time.Second
+	pairTTL            = 5 * time.Minute
+	maxCodeAttempts    = 5
+	maxHostPairInvites = 3
+	maxCodeGenRetries  = 64
+	helloClockSkew     = 5 * time.Minute
+	maxMessageSize     = 25 * 1024 * 1024
+	heartbeatEvery     = 25 * time.Second
+	cleanupEvery       = 30 * time.Second
 )
 
 // Config configures a homing-server instance.
 type Config struct {
-	Addr   string
-	DBPath string
-	Logger *slog.Logger
-	Waker  Waker
+	Addr           string
+	DBPath         string
+	Logger         *slog.Logger
+	Waker          Waker
+	TrustedProxies []string
 	// Now is for tests; nil means time.Now.
 	Now func() time.Time
 }
@@ -255,7 +258,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	conn := &clientConn{
 		ws:    ws,
 		srv:   s,
-		addr:  normalizeAddress(r.RemoteAddr),
+		addr:  s.clientAddress(r),
 		nonce: protocol.ToBase64(rawNonce),
 	}
 	s.wg.Add(1)
@@ -263,6 +266,57 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		defer s.wg.Done()
 		s.readLoop(conn)
 	}()
+}
+
+func (s *Server) clientAddress(r *http.Request) string {
+	remote := normalizeAddress(r.RemoteAddr)
+	if !s.isTrustedProxy(remote) {
+		return remote
+	}
+	if values := r.Header.Values("X-Forwarded-For"); len(values) > 0 {
+		parts := strings.Split(strings.Join(values, ","), ",")
+		// Walk from right to left so a spoofed leftmost header cannot override the
+		// address appended by our trusted reverse proxy (e.g. Caddy on 127.0.0.1).
+		for i := len(parts) - 1; i >= 0; i-- {
+			candidate := normalizeAddress(strings.TrimSpace(parts[i]))
+			if candidate == "" || net.ParseIP(candidate) == nil {
+				// An unparseable hop breaks the chain of trusted proxies. Do not
+				// skip it and accept a value that an earlier client could supply.
+				return remote
+			}
+			if i > 0 && s.isTrustedProxy(candidate) {
+				continue
+			}
+			return candidate
+		}
+	}
+	if realIP := normalizeAddress(strings.TrimSpace(r.Header.Get("X-Real-IP"))); realIP != "" && net.ParseIP(realIP) != nil {
+		return realIP
+	}
+	return remote
+}
+
+func (s *Server) isTrustedProxy(addr string) bool {
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() {
+		return true
+	}
+	for _, entry := range s.cfg.TrustedProxies {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if _, network, err := net.ParseCIDR(entry); err == nil && network.Contains(ip) {
+			return true
+		}
+		if proxyIP := net.ParseIP(entry); proxyIP != nil && proxyIP.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeAddress(address string) string {
@@ -444,20 +498,25 @@ func (s *Server) handlePairStart(conn *clientConn) error {
 		s.mu.Unlock()
 		return err
 	}
-	code6, err := protocol.RandomCode6()
-	if err != nil {
-		s.mu.Unlock()
-		return err
-	}
-	for {
-		if _, exists := s.codeIndex[code6]; !exists {
-			break
-		}
-		if code6, err = protocol.RandomCode6(); err != nil {
+	var code6 string
+	allocated := false
+	for attempt := 0; attempt < maxCodeGenRetries; attempt++ {
+		code6, err = protocol.RandomCode6()
+		if err != nil {
 			s.mu.Unlock()
 			return err
 		}
+		if _, exists := s.codeIndex[code6]; !exists {
+			allocated = true
+			break
+		}
 	}
+	if !allocated {
+		s.mu.Unlock()
+		conn.sendError(s.ctx, "server_busy", "配对码池繁忙，请稍后重试")
+		return nil
+	}
+	s.evictExcessHostInvitesLocked(conn.deviceID, maxHostPairInvites-1)
 	s.pairTokens[token] = &pairToken{
 		hostID:    conn.deviceID,
 		code6:     code6,
@@ -472,6 +531,36 @@ func (s *Server) handlePairStart(conn *clientConn) error {
 		"expires_in": int(pairTTL / time.Second),
 	})
 	return nil
+}
+
+func (s *Server) evictExcessHostInvitesLocked(hostID string, keep int) {
+	if keep < 0 {
+		keep = 0
+	}
+	type candidate struct {
+		token     string
+		expiresAt time.Time
+	}
+	var active []candidate
+	for token, entry := range s.pairTokens {
+		if entry.hostID == hostID && !entry.used {
+			active = append(active, candidate{token: token, expiresAt: entry.expiresAt})
+		}
+	}
+	for len(active) > keep {
+		oldestIdx := 0
+		for i := 1; i < len(active); i++ {
+			if active[i].expiresAt.Before(active[oldestIdx].expiresAt) {
+				oldestIdx = i
+			}
+		}
+		victim := active[oldestIdx].token
+		if entry := s.pairTokens[victim]; entry != nil && s.codeIndex[entry.code6] == victim {
+			delete(s.codeIndex, entry.code6)
+		}
+		delete(s.pairTokens, victim)
+		active = append(active[:oldestIdx], active[oldestIdx+1:]...)
+	}
 }
 
 func (s *Server) handlePairJoin(conn *clientConn, message map[string]any) error {

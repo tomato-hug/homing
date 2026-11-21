@@ -6,7 +6,7 @@ cloud and LAN.
 
 ## Requirements
 
-- Go 1.24 or newer when building from source (the release binary is static and
+- Go 1.26 or newer when building from source (the release binary is static and
   needs no runtime)
 - A persistent directory for SQLite
 - TLS termination in front of the service for `wss://`
@@ -71,6 +71,22 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 | `HOST` | `0.0.0.0` | Listen address |
 | `DB_PATH` | `./data/homing.sqlite` | SQLite file |
 | `HOMING_FCM_CREDENTIALS` | empty | Path to a Firebase service-account JSON file |
+| `HOMING_TRUSTED_PROXIES` | empty | Comma-separated reverse-proxy IPs/CIDRs; loopback is always trusted |
+
+Forwarded client addresses are honored only when the immediate connection is
+from loopback or an explicitly trusted proxy. At a public-facing proxy, replace
+untrusted `X-Forwarded-For` values with the connecting client's address. This
+keeps six-digit pairing-code limits independent for different phones.
+
+With Docker bridge networking, a host-side proxy may arrive at the container
+from the bridge gateway rather than loopback. Confirm that source address in
+your deployment and pass only that proxy IP with
+`-e HOMING_TRUSTED_PROXIES=ACTUAL_PROXY_IP` to `docker run`. Do not trust an
+entire public network to make forwarding work.
+
+Each host can keep up to three unused pairing invitations. Creating another
+replaces its oldest unused invitation; generate a fresh QR if an older one no
+longer works.
 
 The relay uses the FCM HTTP v1 API. `HOMING_FCM_CREDENTIALS` points at the
 service-account JSON downloaded from the Firebase console; the relay reads
@@ -162,3 +178,54 @@ limited to five attempts per source IP.
 - Use `docker logs homing-server` or the process stdout for health and
   connection logs. Never enable request-body logging in the reverse proxy:
   bodies contain encrypted envelopes, but logging them is unnecessary.
+
+## Dedicated Linux systemd service
+
+For a host already serving other applications, `deploy/homing-relay.service`
+runs an independent, restricted service on **127.0.0.1:18789**. The database is
+kept in the systemd-managed `/var/lib/homing-relay` directory. Do not expose
+18789 in the cloud firewall; the HTTPS proxy on TCP 443 forwards `/v1/ws`.
+
+Build and transfer a Linux binary together with `scripts/install-relay.sh` and
+`deploy/homing-relay.service`, preserving those two directories. On the server:
+
+```sh
+sudo bash scripts/install-relay.sh ./homing-server EXPECTED_SHA256 GIT_REVISION
+systemctl status homing-relay --no-pager
+curl --noproxy '*' http://127.0.0.1:18789/health
+```
+
+The installer serializes installs, verifies a staged copy against the supplied
+checksum and publishes each binary atomically. It checks service health and
+restores the previous link, unit and activation state if installation fails.
+It refuses foreign units, aliases, masks, drop-ins or differing service files. It
+does not alter the web proxy, firewall, other applications or existing data.
+Inspect those separately before deployment. The installer requires Bash,
+systemd, Python 3, curl, `flock` (util-linux) and standard GNU core utilities.
+
+Use `deploy/nginx-relay-location.conf` inside a dedicated, certificate-equipped
+Nginx HTTPS server block. For Caddy, point `reverse_proxy` at 127.0.0.1:18789.
+Check the proxy configuration before reloading it. Optional push configuration
+can be set in `/etc/homing-relay.env`; keep credentials out of source control
+and grant the relay service access only to the required credential file.
+
+## Public deployment smoke check
+
+Run the opt-in check from a trusted development machine with normal TLS
+certificate validation:
+
+```sh
+HOMING_TEST_RELAY_URL=wss://homing.example.com/v1/ws \
+  go test -tags headless ./internal/server -run '^TestPublicRelaySmoke$' \
+  -count=1 -timeout=120s -v
+```
+
+It generates two new random identities and uses synthetic messages to verify
+authenticated connections, rejection before pairing, token/code pairing,
+encrypted delivery, offline replay/acknowledgement, reconnect and revocation.
+The test rejects handshake redirects and checks both sender rejection and
+recipient non-delivery. It attempts to revoke its pairing even after a failure;
+two device public-key records remain
+in the relay database. It does not access a user's device keys or conversations.
+The public test is skipped unless its environment variable is explicitly set.
+An Android physical-device/mobile-network check is still required separately.

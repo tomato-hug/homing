@@ -1,6 +1,6 @@
 # Go implementation (internal/server). Build from the repository root:
 #   docker build -f server/Dockerfile -t homing-server .
-FROM golang:1.24 AS build
+FROM golang:1.26-bookworm AS build
 
 WORKDIR /src
 COPY go.mod go.sum ./
