@@ -360,7 +360,7 @@ data class SessionItemsState(
     companion object {
         fun fromTurns(turns: List<SessionTurn>): SessionItemsState {
             val last = turns.lastOrNull()
-            val running = last?.state == "started"
+            val running = last?.state in setOf("started", "running")
             return SessionItemsState(
                 turns = turns,
                 running = running,
@@ -489,7 +489,7 @@ fun applyTurnToItems(
         .sortedWith(compareBy<SessionTurn> { it.seq }.thenBy { it.ts })
     val running = when (turn.state) {
         "started", "running" -> true
-        "finished", "failed", "complete", "completed" -> false
+        "idle", "finished", "failed", "complete", "completed" -> false
         else -> state.running
     }
     return state.copy(

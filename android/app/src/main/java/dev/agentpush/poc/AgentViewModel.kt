@@ -129,6 +129,7 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
                             store.applyTurn(json)
                             if (
                                 json.optString("state") in setOf(
+                                    "idle",
                                     "finished",
                                     "failed",
                                     "complete",

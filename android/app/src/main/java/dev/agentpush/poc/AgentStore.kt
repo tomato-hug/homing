@@ -260,6 +260,16 @@ class AgentStore private constructor(context: Context) {
             } else {
                 null
             }
+            // ACP adapters can finish without exposing turn history. A fresh
+            // session response must then supersede the cached live-item flag.
+            val running = turnState?.running ?: detail?.running ?: previous?.running ?: false
+            val runningSince = if (running) {
+                turnState?.runningSince?.takeIf { it.isNotBlank() }
+                    ?: detail?.runningSince?.takeIf { it.isNotBlank() }
+                    ?: previous?.runningSince.orEmpty()
+            } else {
+                ""
+            }
             val next = if (result.available) {
                 SessionItemsState(
                     items = normalizeSessionItems(result.items).filterNot {
@@ -269,10 +279,8 @@ class AgentStore private constructor(context: Context) {
                     reason = result.reason,
                     available = true,
                     loadedAt = System.currentTimeMillis(),
-                    running = turnState?.running ?: previous?.running ?: false,
-                    runningSince = turnState?.runningSince
-                        ?.takeIf { it.isNotBlank() }
-                        ?: previous?.runningSince.orEmpty(),
+                    running = running,
+                    runningSince = runningSince,
                     includeReasoning = showReasoning,
                 )
             } else {
@@ -280,6 +288,8 @@ class AgentStore private constructor(context: Context) {
                     available = false,
                     reason = result.reason ?: previous?.reason,
                     loadedAt = System.currentTimeMillis(),
+                    running = running,
+                    runningSince = runningSince,
                     includeReasoning = showReasoning,
                 )
             }
@@ -376,6 +386,15 @@ class AgentStore private constructor(context: Context) {
                             )
                             "finished", "complete", "completed" -> meta.copy(
                                 status = "done",
+                                running = false,
+                                runningSince = "",
+                            )
+                            "idle" -> meta.copy(
+                                status = if (SessionStatus.fromWire(meta.status) == SessionStatus.RUNNING) {
+                                    "idle"
+                                } else {
+                                    meta.status
+                                },
                                 running = false,
                                 runningSince = "",
                             )
@@ -2035,7 +2054,7 @@ private fun mergeMeta(existing: SessionMeta?, incoming: SessionMeta): SessionMet
         permissionMode = incoming.permissionMode.ifBlank { existing.permissionMode },
         contextUsage = incoming.contextUsage ?: existing.contextUsage,
         running = incoming.running ?: existing.running,
-        runningSince = incoming.runningSince.ifBlank { existing.runningSince },
+        runningSince = if (incoming.running == false) "" else incoming.runningSince.ifBlank { existing.runningSince },
         read = incoming.read ?: existing.read,
         pinned = incoming.pinned ?: existing.pinned,
         muted = incoming.muted ?: existing.muted,

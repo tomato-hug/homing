@@ -1,5 +1,7 @@
 # Cloud tunnel and Android acceptance — 2026-11-21
 
+Update after the relay deployment: see [post-update physical acceptance](cloud-post-update-acceptance-2026-11-21.md) for fresh public smoke, cellular pairing, task return, and the Android session-state correction. Background immediate delivery remains a separate open item.
+
 ## Public endpoint
 
 The user configured Cloudflare Tunnel at `wss://homing.douqu.online/v1/ws`,
