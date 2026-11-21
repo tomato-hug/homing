@@ -17,6 +17,8 @@ import dev.agentpush.poc.protocol.PairedComputerStore
 import dev.agentpush.poc.ui.AgentApp
 import dev.agentpush.poc.ui.theme.AgentInboxTheme
 
+private const val STATE_PENDING_PAIR_LINK = "pendingPairLink"
+
 class MainActivity : ComponentActivity() {
     private val viewModel: AgentViewModel by viewModels()
     private var pendingSessionId by mutableStateOf<String?>(null)
@@ -32,7 +34,13 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         NotificationHelper.createChannels(this)
         pendingSessionId = intent.getStringExtra(NotificationHelper.EXTRA_SESSION_ID)
-        pendingPairLink = pairLinkOf(intent)
+        pendingPairLink = if (savedInstanceState == null) {
+            pairLinkOf(intent)
+        } else {
+            // A consumed launch link must not navigate back to pairing when
+            // Android recreates this Activity for rotation or split screen.
+            savedInstanceState.getString(STATE_PENDING_PAIR_LINK)
+        }
 
         setContent {
             AgentInboxTheme {
@@ -47,6 +55,11 @@ class MainActivity : ComponentActivity() {
         }
 
         requestNotificationsAndStart()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString(STATE_PENDING_PAIR_LINK, pendingPairLink)
+        super.onSaveInstanceState(outState)
     }
 
     override fun onNewIntent(intent: Intent) {

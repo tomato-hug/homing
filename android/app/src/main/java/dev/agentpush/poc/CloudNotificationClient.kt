@@ -572,7 +572,11 @@ class CloudNotificationClient(
                     val detail = message.optString("message").ifBlank {
                         message.optString("code")
                     }
-                    listener.onStateChanged(serverUrl, State.RECONNECTING, detail)
+                    // An error frame does not close the socket. Start an actual
+                    // reconnect and fail uncertain requests instead of leaving
+                    // the UI disconnected while this session stays open.
+                    connectionLost(currentGeneration, detail)
+                    webSocket.cancel()
                 }
             }
         }

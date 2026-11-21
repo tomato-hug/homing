@@ -503,9 +503,10 @@ func (c *Connector) heartbeat(ctx context.Context, ws *websocket.Conn) {
 			return
 		case <-ticker.C:
 			pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			c.writeMu.Lock()
+			// Ping waits for readLoop to consume its pong. Holding writeMu here
+			// can block that reader when it replies to an earlier message.
+			// websocket.Conn serializes control frames with application writes.
 			err := ws.Ping(pingCtx)
-			c.writeMu.Unlock()
 			cancel()
 			if err != nil {
 				_ = ws.Close(websocket.StatusPolicyViolation, "heartbeat timeout")

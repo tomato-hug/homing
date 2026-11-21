@@ -49,9 +49,11 @@ func OpenDB(path string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("server: open database: %w", err)
 	}
-	if inMemory {
-		sqlDB.SetMaxOpenConns(1)
-	}
+	// Queue pruning/insertion and acknowledgements all write to SQLite. Keep
+	// them on one connection so concurrent devices cannot race a deferred
+	// transaction into SQLITE_BUSY, and connection-local PRAGMAs apply to every
+	// operation (not just the first connection created by database/sql).
+	sqlDB.SetMaxOpenConns(1)
 	for _, pragma := range []string{
 		"PRAGMA journal_mode = DELETE",
 		"PRAGMA foreign_keys = ON",

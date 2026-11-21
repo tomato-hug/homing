@@ -36,6 +36,74 @@ class CloudNotificationClientTest {
         fingerprint = crypto.fingerprint(clientKeys.publicKey),
     )
 
+    @Test fun relayErrorAfterHelloActuallyReconnects() = verifyRelayErrorRecovery(true)
+
+    @Test fun relayErrorDuringHelloActuallyReconnects() = verifyRelayErrorRecovery(false)
+
+    private fun verifyRelayErrorRecovery(authenticatedFirst: Boolean) {
+        val server = MockWebServer()
+        val recovered = CountDownLatch(1)
+        val sawError = CountDownLatch(1)
+        val sockets = java.util.concurrent.ConcurrentLinkedQueue<WebSocket>()
+        val handshakes = java.util.concurrent.atomic.AtomicInteger()
+        repeat(2) { attempt ->
+            server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    sockets.add(webSocket)
+                    webSocket.send(JSONObject().put("t", "challenge")
+                        .put("nonce", crypto.toBase64(ByteArray(32) { 7 })).toString())
+                }
+
+                override fun onMessage(webSocket: WebSocket, text: String) {
+                    if (JSONObject(text).optString("t") != "hello") return
+                    handshakes.incrementAndGet()
+                    if (attempt == 1 || authenticatedFirst) {
+                        webSocket.send("""{"t":"hello.ok"}""")
+                    }
+                    if (attempt == 0) {
+                        // Keep the peer socket open: an error frame alone used to
+                        // leave the UI reconnecting forever without another dial.
+                        webSocket.send("""{"t":"error","code":"internal_error","message":"demo relay failure"}""")
+                    }
+                }
+
+                override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                    webSocket.close(code, reason)
+                }
+            }))
+        }
+        server.start()
+        val computer = PairedComputer(
+            deviceId = hostId, name = "Demo Mac", server = server.url("/v1/ws").toString(),
+            publicKeyBase64 = crypto.toBase64(hostKeys.publicKey),
+            fingerprint = crypto.fingerprint(hostKeys.publicKey), pairedAt = 1L, lastSeen = 1L,
+        )
+        val client = CloudNotificationClient(
+            identity = clientIdentity, computersProvider = { listOf(computer) }, crypto = crypto,
+            listener = object : CloudNotificationClient.Listener {
+                override fun onNotification(computer: PairedComputer, payload: NotifyPayload) = true
+                override fun onStateChanged(server: String, state: CloudNotificationClient.State, detail: String?) {
+                    if (state == CloudNotificationClient.State.RECONNECTING && detail == "demo relay failure") {
+                        sawError.countDown()
+                    }
+                    if (state == CloudNotificationClient.State.CONNECTED && handshakes.get() == 2) {
+                        recovered.countDown()
+                    }
+                }
+            },
+        )
+        try {
+            client.start()
+            assertTrue("relay error must be observed", sawError.await(5, TimeUnit.SECONDS))
+            assertTrue("relay error must start a fresh handshake", recovered.await(5, TimeUnit.SECONDS))
+            assertEquals(2, handshakes.get())
+        } finally {
+            client.stop()
+            sockets.forEach { it.close(1000, "demo complete") }
+            server.shutdown()
+        }
+    }
+
     @Test
     fun decryptsNotifyAndAcknowledgesEnvelope() {
         val server = MockWebServer()

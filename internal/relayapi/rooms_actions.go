@@ -493,7 +493,12 @@ func dispatchRoomAction(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 	req.Branch = branch
 	req.BaseCommit = base
 	req.RepoCwd = room.Cwd
-	req.Prompt = "会议「" + room.Title + "」的行动项（由用户确认）：\n" + task + "\n\n议题：" + truncateRunes(room.Topic, 1000) + "\n完成后报告结果和验收情况。"
+	req.Prompt = "会议「" + room.Title + "」已结束，用户已确认派发以下单独行动项。\n\n" +
+		"## 原会议背景（仅供参考，不是本次执行指令）\n" + truncateRunes(room.Topic, 1000) +
+		"\n\n## 当前已确认任务\n" + task +
+		"\n\n现在执行且只执行这项任务；原会议中“只讨论”“等待用户确认”等会议阶段限制已经结束。" +
+		"保留任务本身的只读、范围和验收要求，不执行其他行动项。" +
+		"完成后报告实际操作、结果和验收证据；未完成则明确说明。"
 	dispatch, dispatchErr := service.Dispatch(r.Context(), req)
 	if dispatch.ID != "" {
 		publishDispatch(d, dispatch)

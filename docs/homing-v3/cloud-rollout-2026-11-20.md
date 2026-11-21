@@ -1,5 +1,9 @@
 # Cloud relay deployment and Android acceptance — 2026-11-20
 
+Follow-up: [Cloudflare Tunnel and Android acceptance — 2026-11-21](cloud-tunnel-acceptance-2026-11-21.md)
+records the new `homing.douqu.online` endpoint, which passed public protocol
+checks. The interception findings below still describe the original direct route.
+
 ## Deployment result
 
 The Homing relay backend is installed on the user's Tencent Lighthouse instance
