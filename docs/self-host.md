@@ -122,6 +122,24 @@ The reverse proxy must forward WebSocket upgrades. Caddy does this by
 default. If you use nginx, set `proxy_http_version 1.1` and forward the
 `Upgrade` and `Connection` headers.
 
+### When TLS sometimes works but public connections fail
+
+Check the endpoint from an external network as well as from the server.
+A successful server-local health check or one WebSocket `101` response does
+not establish reliable public reconnect behavior. Run the opt-in public
+relay smoke test described below before marking that transport accepted.
+
+If external TLS connections reset or return EOF, inspect the plain HTTP
+response without following redirects. Compare it with the redirect configured
+in your proxy. For Tencent-hosted deployments, a redirect to
+`dnspod.qcloud.com/static/webblock.html` is an access-block signal. Check the
+domain's filing/access-registration status with Tencent; see its
+[filing guidance](https://cloud.tencent.com/document/product/243/19631).
+Obtaining a DNS-01 certificate does not clear a separate provider access block.
+
+Keep certificate validation enabled. Also verify the renewal method: a manually
+completed DNS challenge alone does not establish unattended certificate renewal.
+
 ## Pairing
 
 Start the local service first, listening on an address the phone can reach:

@@ -3,9 +3,11 @@
 ## Deployment result
 
 The Homing relay backend is installed on the user's Tencent Lighthouse instance
-`lhins-od17m1rd` (Ubuntu 22.04, Linux amd64). Public HTTPS/WSS acceptance is still
-pending the dedicated domain certificate. Do not treat backend deployment as
-completed mobile-data acceptance.
+`lhins-od17m1rd` (Ubuntu 22.04, Linux amd64). The dedicated domain certificate
+and Nginx proxy are now verified. Public HTTPS/WSS acceptance remains blocked
+by a Tencent domain-access interception response; the user confirmed that
+filing/access registration is not yet complete. Do not treat backend deployment
+or an occasional successful TLS connection as completed mobile-data acceptance.
 
 - Source revision: `3fa2c97e3f71aef16b1d8bf484e2ff37a74c28d6` on `homing-v3`.
 - Service: `homing-relay.service`, active and enabled.
@@ -90,7 +92,7 @@ to the production release. All native test sessions were newly created for the
 synthetic `/tmp` workspace; no messages were sent into existing conversations.
 Local services on 8787 and 18787 remained running.
 
-## Public-network status
+## Public-network status — initial USB acceptance
 
 Before testing, the phone's default network was validated cellular with Wi-Fi
 off. The actual app checks above used the USB tunnel, so cellular transport is
@@ -100,10 +102,76 @@ was also reproduced on the server using loopback plus the Homing SNI. Later
 public probes still did not pass normal TLS validation. No certificate checks
 were bypassed.
 
+## Follow-up after the domain certificate was installed
+
+The user handed over the completed DNS-01 certificate and proxy configuration.
+Fresh checks verified a trusted certificate for `homing.littlelove.fun`, with
+expiry `2027-02-19 02:42:41 UTC` (`2027-02-18 20:42:41 America/Chicago`).
+The original certificate-name mismatch is resolved.
+
+Read-only Tencent console checks found one Homing Nginx site, the required
+WebSocket headers, forwarding to `127.0.0.1:18789`, and active Nginx/relay
+services. Eight consecutive loopback HTTPS health requests and eight requests
+from the server to the public domain all passed normal certificate validation.
+No server, Nginx or firewall configuration was changed in this follow-up.
+
+External access was not stable. The complete public smoke was attempted over
+the Mac's normal route, explicit local proxy, a temporary phone-cellular
+transport, and a separate existing proxy outbound. Some attempts authenticated,
+paired and delivered an encrypted message, but failed during reconnect with
+TLS/HTTP handshake EOF; none completed the full workflow. These failures remain
+recorded rather than being retried until a pass or weakening TLS validation.
+
+Android was connected and its default network was validated cellular, with
+Wi-Fi disabled and no ADB reverse mapping during the public attempt. The phone
+received the public pairing verification words, but host confirmation did not
+complete reliably. Public phone pairing, meeting flows and action dispatch are
+therefore **not passed**. The Mac's Wi-Fi gateway was the same phone, so the
+initial Mac and phone routes were not independent network providers.
+
+The decisive external probe pinned the known server IP while retaining the
+Homing Host header:
+
+```sh
+curl --noproxy '*' \
+  --resolve homing.littlelove.fun:80:159.75.228.160 \
+  -sS -i --max-time 8 http://homing.littlelove.fun/health
+```
+
+It returned this response instead of the configured HTTPS redirect:
+
+```http
+HTTP/1.1 302 OK
+Connection: Keep-Alive
+Location: https://dnspod.qcloud.com/static/webblock.html?d=homing.littlelove.fun
+```
+
+The alternate proxy route returned the same interception location. This is
+direct evidence of a provider access block, not just the earlier hypothesis
+of a Mac proxy problem. The user subsequently confirmed that Tencent filing/
+access registration is incomplete or in progress. Tencent's
+[filing guidance](https://cloud.tencent.com/document/product/243/19631)
+explains that registration follows the hosting provider. A DNS-01 certificate
+does not resolve that separate provider-access prerequisite.
+
+The certificate renewal file currently uses `authenticator = manual` and has
+no `manual_auth_hook` or `deploy_hook` entry. Unattended renewal is not verified;
+the domain owner must arrange a supported renewal workflow. The leftover TXT
+challenge record was not changed, and no DNS credentials were requested or
+stored by this acceptance work.
+
+Temporary network diagnostic processes, phone executable/forwarding, and the
+temporary copy of proxy credentials were removed. The isolated host was
+returned to its USB test configuration. System proxy settings and services
+on 8787/18787 were preserved. No product source fix was justified by this
+network evidence.
+
 ## Remaining acceptance
 
-1. Finish the dedicated domain certificate and TLS proxy, then confirm normal
-   certificate validation succeeds for `homing.littlelove.fun`.
+1. Complete Tencent filing/access registration for this deployment and confirm
+   the external interception has cleared. If registration is already approved
+   but the block persists, use the captured response when contacting Tencent
+   support. Any alternative hosting deployment needs its own target and scope.
 2. Run `HOMING_TEST_RELAY_URL=wss://homing.littlelove.fun/v1/ws go test -tags headless ./internal/server -run '^TestPublicRelaySmoke$' -count=1 -timeout=120s -v`.
 3. With the Android phone connected and unlocked, pair it with the isolated host
    through the public relay and repeat the accepted phone flows over that
@@ -111,6 +179,7 @@ were bypassed.
 4. Verify actual cellular operation, reconnect and foreground/background
    behavior. Push wake-up requires separate provider credentials; queue replay
    after reconnect and OS wake delivery are distinct checks.
+5. Configure and verify certificate renewal before unattended operation.
 
 Local evidence is in `output/homing-cloud-rollout-20261120/`. Its `private/`
 subdirectory contains device backup and UI/log material and is excluded from
