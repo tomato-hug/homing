@@ -92,10 +92,21 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun activeComputerId(): String = store.activeComputerId()
+    fun activatePhoneSession(meta: SessionMeta) = store.activatePhoneSession(meta)
+
+    fun clearPhoneInbox() = store.clearPhoneInbox()
+    fun hideSessionOnPhone(session: SessionSummary) = store.hideSessionOnPhone(session)
+    fun hideSessionsOnPhone(sessions: List<SessionSummary>) = store.hideSessionsOnPhone(sessions)
+    fun undoPhoneCleanup() = store.undoPhoneCleanup()
+    fun restorePhoneSessions() = store.restorePhoneSessions()
+    fun loadEarlierContext(sessionId: String) {
+        safeScope.launch { store.loadEarlierContext(sessionId) }
+    }
 
     fun openSession(sessionId: String) {
         CrashReporter.setLastSession(sessionId)
         NotificationHelper.cancelSession(getApplication(), sessionId)
+        store.preparePhoneContext(sessionId)
         startSessionStream(sessionId)
         safeScope.launch {
             store.markSessionRead(sessionId)
@@ -116,12 +127,13 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
         if (liveSessionId == sessionId && sessionLive != null) return
         closeSessionStream()
         liveSessionId = sessionId
+        val computerScope = store.state.value.activeComputerKey
         sessionLive = SessionLiveStream(
             sessionId = sessionId,
             events = store.sessionEvents(sessionId),
             onFrame = { eventName, data ->
                 val json = runCatching { JSONObject(data) }.getOrNull()
-                if (json != null) {
+                if (json != null && store.state.value.activeComputerKey == computerScope && liveSessionId == sessionId) {
                     when (eventName) {
                         "session" -> store.applySessionUpdate(json)
                         "item" -> store.applyItem(json)

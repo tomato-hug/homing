@@ -111,7 +111,7 @@ class SessionRefreshStateTest {
                         """{"session_id":"demo-refresh-session","source":"hermes",$metadata}"""
                     "/api/sessions/demo-refresh-session/items" -> {
                         if (!itemsAvailable) return MockResponse().setResponseCode(503)
-                        """{"items":[{"id":"demo-final","type":"message","role":"assistant","text":"demo completed"}],"turns":$turns}"""
+                        """{"history_version":1,"anchor_event_id":99,"source":"hermes","session_id":"demo-refresh-session","items":[{"id":"demo-final","item_key":"demo-final-key","type":"message","role":"assistant","text":"demo completed"}],"turns":$turns}"""
                     }
                     else -> "{}"
                 }
@@ -126,6 +126,10 @@ class SessionRefreshStateTest {
             store.replaceStateForTest(
                 AgentUiState(
                     settings = AppSettings(server.url("/").toString().trimEnd('/'), "demo-token"),
+                    phoneConversations = PhoneConversationState(receipts = mapOf(
+                        phoneConversationKey("", "hermes", "demo-refresh-session") to
+                            PhoneReceipt(99, "2026-11-21T09:00:00Z", 1L),
+                    )),
                     sessionMeta = mapOf(
                         "demo-refresh-session" to SessionMeta(
                             sessionId = "demo-refresh-session",

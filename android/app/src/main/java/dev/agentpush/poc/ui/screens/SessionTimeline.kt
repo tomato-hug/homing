@@ -56,6 +56,7 @@ import dev.agentpush.poc.Attachment
 import dev.agentpush.poc.ReplyStatus
 import dev.agentpush.poc.SessionItem
 import dev.agentpush.poc.SessionItemType
+import dev.agentpush.poc.SessionHistoryState
 import dev.agentpush.poc.SessionSummary
 import dev.agentpush.poc.TranscriptMessage
 import dev.agentpush.poc.formatClock
@@ -78,6 +79,8 @@ import dev.agentpush.poc.ui.UserItemBubble
 import dev.agentpush.poc.ui.accentColor
 import dev.agentpush.poc.ui.rewriteMarkdownImageUrls
 import dev.agentpush.poc.AgentApi
+import java.security.MessageDigest
+import java.time.Instant
 
 internal sealed interface TimelineItem {
     val key: String
@@ -96,7 +99,7 @@ internal sealed interface TimelineItem {
         val value: AgentEvent,
         override val order: Int,
     ) : TimelineItem {
-        override val key: String = "event-$order-${value.id}"
+        override val key: String = "event-${value.id}"
         override val timestamp: String = value.ts
     }
 
@@ -104,25 +107,213 @@ internal sealed interface TimelineItem {
         val value: AgentReply,
         override val order: Int,
     ) : TimelineItem {
-        override val key: String = "reply-$order-${value.id}"
+        override val key: String = "reply-${value.id}"
         override val timestamp: String = value.ts
     }
 
     data class Item(
         val value: SessionItem,
         override val order: Int,
+        val identitySuffix: String = "",
     ) : TimelineItem {
-        override val key: String = "item-$order-${value.id}"
+        override val key: String = "item-${value.itemKey.ifBlank { value.id }}$identitySuffix"
         override val timestamp: String = value.ts
     }
 
     data class ProcessGroup(
         val values: List<SessionItem>,
         override val order: Int,
+        val identitySuffix: String = "",
     ) : TimelineItem {
         override val key: String =
-            "process-${values.firstOrNull()?.id.orEmpty()}-${values.lastOrNull()?.id.orEmpty()}"
+            "process-${values.firstOrNull()?.let { it.itemKey.ifBlank { it.id } }.orEmpty()}$identitySuffix"
         override val timestamp: String = values.firstOrNull()?.ts.orEmpty()
+    }
+}
+
+/** Keep native ordering, inserting phone notifications/replies where their timestamps place them. */
+internal fun buildSessionTimeline(
+    session: SessionSummary?,
+    structuredItems: List<SessionItem>,
+    onlyAgent: Boolean = false,
+): List<TimelineItem> {
+    val rows = mutableListOf<TimelineItem>()
+    val extras = mutableListOf<TimelineItem>()
+    val replies = session?.replies.orEmpty()
+    val matchedReplies = mutableSetOf<Long>()
+    var order = 0
+    if (structuredItems.isNotEmpty()) {
+        structuredItems.forEach { item ->
+            val itemTime = timelineMillis(item.ts)
+            val duplicate = if (item.type == SessionItemType.USER) replies.filter { reply ->
+                val replyTime = timelineMillis(reply.ts)
+                reply.id !in matchedReplies && itemTime != null && replyTime != null && itemTime - replyTime in 0..10_000 &&
+                    normalizeComparableText(reply.text) == normalizeComparableText(item.text)
+            }.maxByOrNull { timelineMillis(it.ts) ?: Long.MIN_VALUE } else null
+            if (duplicate != null) {
+                matchedReplies += duplicate.id
+                rows += TimelineItem.Reply(duplicate, order++)
+            } else {
+                rows += TimelineItem.Item(item, order++)
+            }
+        }
+        session?.events.orEmpty().filterNot { representedByNativeItem(it, structuredItems) }
+            .forEach { extras += TimelineItem.Event(it, order++) }
+    } else {
+        val messages = session?.transcript?.messages.orEmpty()
+        messages.forEach { rows += TimelineItem.Message(it, order++) }
+        session?.events.orEmpty().filter { messages.isEmpty() || it.isPending }
+            .forEach { extras += TimelineItem.Event(it, order++) }
+    }
+    replies.filterNot { it.id in matchedReplies }.forEach { extras += TimelineItem.Reply(it, order++) }
+    extras.sortedWith(compareBy<TimelineItem> { timelineMillis(it.timestamp) ?: Long.MAX_VALUE }.thenBy { it.order })
+        .forEach { extra ->
+            val time = timelineMillis(extra.timestamp)
+            val insertAt = if (time == null) -1 else rows.indexOfFirst {
+                timelineMillis(it.timestamp)?.let { candidate -> candidate > time } == true
+            }
+            if (insertAt < 0) rows += extra else rows.add(insertAt, extra)
+        }
+    // Fold before filtering user rows so an agent-only view still respects round boundaries.
+    return rows.foldDuplicateNotifications().foldAssistantFragments().foldToolProcesses()
+        .filter { row -> !onlyAgent || when (row) {
+            is TimelineItem.Item -> row.value.type != SessionItemType.USER
+            is TimelineItem.Reply -> false
+            is TimelineItem.Message -> row.value.isAssistant
+            is TimelineItem.Event -> row.value.kind != "needs_input"
+            is TimelineItem.ProcessGroup -> true
+        } }.disambiguateLegacyKeys()
+}
+
+private fun timelineMillis(value: String): Long? = runCatching { Instant.parse(value).toEpochMilli() }.getOrNull()
+
+private fun representedByNativeItem(event: AgentEvent, items: List<SessionItem>): Boolean {
+    if (items.any { it.eventId == event.id }) return true
+    if (event.isPending || event.text.isBlank()) return false
+    val eventTime = timelineMillis(event.ts) ?: return false
+    val lastUser = items.indexOfLast { it.type == SessionItemType.USER &&
+        timelineMillis(it.ts)?.let { time -> time <= eventTime } == true }
+    val text = normalizeComparableText(event.text)
+    return items.drop(lastUser + 1).any { item ->
+        item.type == SessionItemType.ASSISTANT && normalizeComparableText(item.text) == text &&
+            timelineMillis(item.ts)?.let { time -> time <= eventTime } == true
+    }
+}
+
+private fun List<TimelineItem>.foldDuplicateNotifications(): List<TimelineItem> {
+    val output = mutableListOf<TimelineItem>()
+    forEach { next ->
+        val previous = output.lastOrNull() as? TimelineItem.Event
+        val event = next as? TimelineItem.Event
+        if (previous != null && event != null &&
+            previous.value.kind in setOf("message", "done") && event.value.kind in setOf("message", "done") &&
+            previous.value.source == event.value.source && previous.value.sessionId == event.value.sessionId &&
+            previous.value.text.isNotBlank() &&
+            normalizeComparableText(previous.value.text) == normalizeComparableText(event.value.text) &&
+            previous.value.attachments == event.value.attachments
+        ) {
+            if (event.value.kind == "done") output[output.lastIndex] = event.copy(order = previous.order)
+        } else output += next
+    }
+    return output
+}
+
+/** Only ambiguous legacy IDs need content suffixes; authoritative item_key stays unchanged. */
+private fun List<TimelineItem>.disambiguateLegacyKeys(): List<TimelineItem> {
+    val counts = groupingBy { it.key }.eachCount()
+    val occurrences = mutableMapOf<String, Int>()
+    return map { row ->
+        val values = when (row) {
+            is TimelineItem.Item -> listOf(row.value).takeIf { row.value.itemKey.isBlank() }
+            is TimelineItem.ProcessGroup -> row.values.takeIf { it.firstOrNull()?.itemKey.isNullOrBlank() }
+            else -> null
+        }
+        if (counts[row.key] == 1 || values == null) return@map row
+        val content = values.joinToString("\u0000") { item ->
+            listOf(item.type.name, item.ts, item.text, item.tool.toString(), item.files.toString(), item.plan.toString())
+                .joinToString("") { "${it.length}:$it" }
+        }
+        val digest = MessageDigest.getInstance("SHA-256").digest(content.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        val identity = "${row.key}-$digest"
+        val occurrence = occurrences.getOrDefault(identity, 0) + 1
+        occurrences[identity] = occurrence
+        when (row) {
+            is TimelineItem.Item -> row.copy(identitySuffix = "-$digest-$occurrence")
+            is TimelineItem.ProcessGroup -> row.copy(identitySuffix = "-$digest-$occurrence")
+            else -> row
+        }
+    }
+}
+
+/** A notification can arrive in adjacent fragments; never merge across user/tool/round boundaries. */
+internal fun List<TimelineItem>.foldAssistantFragments(): List<TimelineItem> {
+    val result = mutableListOf<TimelineItem>()
+    forEach { next ->
+        val previous = result.lastOrNull() as? TimelineItem.Item
+        val nextItem = next as? TimelineItem.Item
+        if (previous?.value?.type == SessionItemType.ASSISTANT &&
+            nextItem?.value?.type == SessionItemType.ASSISTANT &&
+            previous.value.eventId != null && previous.value.eventId == nextItem.value.eventId
+        ) {
+            val before = previous.value.text
+            val after = nextItem.value.text
+            val text = when {
+                before == after || after.isBlank() -> before
+                before.isBlank() -> after
+                previous.value.partial && after.startsWith(before) -> after
+                else -> "$before\n\n$after"
+            }
+            result[result.lastIndex] = previous.copy(value = previous.value.copy(
+                text = text,
+                partial = nextItem.value.partial,
+                truncated = previous.value.truncated || nextItem.value.truncated,
+                files = (previous.value.files + nextItem.value.files).distinct(),
+            ))
+        } else {
+            result += next
+        }
+    }
+    return result
+}
+
+@Composable
+internal fun SessionHistoryBoundary(history: SessionHistoryState, onLoadEarlier: () -> Unit) {
+    val reason = when (history.reason) {
+        "reader_window_boundary" -> "已到当前可读取历史的边界，暂时无法确认更早的内容。"
+        "anchor_unresolved" -> "暂时无法定位手机收到的消息，已保留当前内容。"
+        else -> history.reason
+    }
+    val explanation = when {
+        history.anchorEventId <= 0 -> "收到新消息后可载入更早上下文"
+        history.loading -> "正在载入更早的对话…"
+        !history.error.isNullOrBlank() -> history.error
+        !reason.isNullOrBlank() -> reason
+        !history.beforeCursor.isNullOrBlank() -> "更早的上下文按需载入，当前内容会保留。"
+        else -> "暂时无法确认更早的对话，已保留当前内容。"
+    }
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp).testTag("session-history-boundary"),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            text = if (history.loadedRounds > 0) "已载入 ${history.loadedRounds} 轮更早对话" else "从手机收到的消息开始",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            text = explanation.orEmpty(),
+            style = MaterialTheme.typography.bodySmall,
+            color = if (history.error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        OutlinedButton(
+            onClick = onLoadEarlier,
+            enabled = !history.beforeCursor.isNullOrBlank() && !history.loading,
+            modifier = Modifier.testTag("load-earlier-context"),
+        ) {
+            Text(if (history.loading) "正在载入…" else "载入前 10 轮对话")
+        }
     }
 }
 

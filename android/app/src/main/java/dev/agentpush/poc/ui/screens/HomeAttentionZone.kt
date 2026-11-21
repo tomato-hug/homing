@@ -61,14 +61,15 @@ internal fun HomeRunningStrip(
     now: Long,
     showComputer: Boolean,
     onOpenSession: (String, String) -> Unit,
+    onSelectSession: (dev.agentpush.poc.SessionMeta) -> Unit = {},
 ) {
     LazyRow(
         contentPadding = PaddingValues(horizontal = 1.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        items(sessions, key = { "running-${it.sessionId}" }) { session ->
+        items(sessions, key = { dev.agentpush.poc.phoneConversationKey(it.computerId, it.source, it.sessionId) }) { session ->
             Surface(
-                onClick = { onOpenSession(session.sessionId, session.computerId) },
+                onClick = { onSelectSession(session); onOpenSession(session.sessionId, session.computerId) },
                 shape = RoundedCornerShape(50),
                 color = HomingPalette.Brand.copy(alpha = 0.09f),
                 border = BorderStroke(1.dp, HomingPalette.Brand.copy(alpha = 0.24f)),

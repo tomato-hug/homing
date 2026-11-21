@@ -657,6 +657,10 @@ func (d *Deps) handleSessionItems(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if q := r.URL.Query(); q.Has("anchor_event_id") || q.Has("before") || q.Has("turns") {
+		d.handleSessionHistory(w, r, sessionID)
+		return
+	}
 	limit := clampInt(r.URL.Query().Get("limit"), 200, 1, 2000)
 	includeReasoning := queryBool(r, "include_reasoning")
 	source := d.sourceFor(ctxOf(r), sessionID)

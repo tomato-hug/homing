@@ -48,6 +48,8 @@ data class SessionItemsResult(
     val turns: List<SessionTurn> = emptyList(),
     val reason: String? = null,
     val available: Boolean = true,
+    val history: SessionHistoryState? = null,
+    val roundsReturned: Int = 0,
 )
 
 data class CommandResult(
@@ -346,10 +348,18 @@ object AgentApi {
         limit: Int = 300,
         before: String? = null,
         includeReasoning: Boolean = false,
+        source: String = "",
+        anchorEventId: Long? = null,
     ): SessionItemsResult = withContext(Dispatchers.IO) {
         val encodedSession = URLEncoder.encode(sessionId, Charsets.UTF_8.name())
         val query = buildList {
-            add("limit=${limit.coerceIn(1, 2000)}")
+            if (anchorEventId != null) {
+                add("source=${URLEncoder.encode(source, Charsets.UTF_8.name())}")
+                add("anchor_event_id=$anchorEventId")
+                if (!before.isNullOrBlank()) add("turns=10")
+            } else {
+                add("limit=${limit.coerceIn(1, 2000)}")
+            }
             before?.takeIf { it.isNotBlank() }?.let {
                 add("before=${URLEncoder.encode(it, Charsets.UTF_8.name())}")
             }
@@ -362,16 +372,31 @@ object AgentApi {
                 "GET",
             )
         } catch (error: AgentApiException) {
-            if (error.statusCode == 404 || error.statusCode == 501) {
+            if (anchorEventId == null && (error.statusCode == 404 || error.statusCode == 501)) {
                 return@withContext SessionItemsResult(available = false)
             }
             throw error
         }
         val root = JSONTokener(body).nextValue()
+        if (anchorEventId != null && ((root as? JSONObject)?.optInt("history_version") != 1 ||
+                root.optLong("anchor_event_id") != anchorEventId)) {
+            return@withContext SessionItemsResult(
+                available = false,
+                reason = "电脑端尚未支持按收到消息载入上下文，请更新电脑端。",
+                history = SessionHistoryState(managed = true, anchorEventId = anchorEventId,
+                    status = "unsupported", reason = "server_upgrade_required"),
+            )
+        }
         val array = when (root) {
             is JSONArray -> root
             is JSONObject -> root.optJSONArray("items") ?: JSONArray()
             else -> JSONArray()
+        }
+        if (anchorEventId != null && root is JSONObject) {
+            if (root.stringOrBlank("source") != source || root.stringOrBlank("session_id") != sessionId ||
+                (0 until array.length()).any { array.optJSONObject(it)?.stringOrBlank("item_key").isNullOrBlank() }) {
+                throw AgentApiException(502, "会话上下文响应身份不一致，已保留当前内容。")
+            }
         }
         val turnsArray = (root as? JSONObject)?.optJSONArray("turns")
         val items = buildList {
@@ -396,6 +421,13 @@ object AgentApi {
             reason = (root as? JSONObject)?.optString("reason")
                 ?.takeIf { it.isNotBlank() },
             available = true,
+            history = if (anchorEventId != null && root is JSONObject) SessionHistoryState(
+                managed = true, anchorEventId = anchorEventId,
+                beforeCursor = root.stringOrBlank("before_cursor").takeIf { it.isNotBlank() },
+                status = root.stringOrBlank("history_status").ifBlank { "unknown" },
+                reason = root.stringOrBlank("history_reason").takeIf { it.isNotBlank() },
+            ) else null,
+            roundsReturned = (root as? JSONObject)?.optInt("rounds_returned", 0) ?: 0,
         )
     }
 

@@ -39,6 +39,7 @@ internal fun ResumeZone(
     now: Long,
     showComputer: Boolean,
     onOpenSession: (String, String) -> Unit,
+    onSelectSession: (dev.agentpush.poc.SessionMeta) -> Unit = {},
     onNewSession: () -> Unit,
     onOpenAll: () -> Unit,
 ) {
@@ -75,7 +76,7 @@ internal fun ResumeZone(
             }
             sessions.forEach { session ->
                 Surface(
-                    onClick = { onOpenSession(session.sessionId, session.computerId) },
+                    onClick = { onSelectSession(session); onOpenSession(session.sessionId, session.computerId) },
                     color = Color.Transparent,
                 ) {
                     Row(

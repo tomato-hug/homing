@@ -130,8 +130,8 @@ fun AgentApp(
         currentRoute == ROUTE_PROJECTS ||
         currentRoute == ROUTE_ROOMS ||
         currentRoute == ROUTE_ME
-    val visibleHome = remember(appState.home, appState.mobileInbox) {
-        appState.home?.let(appState.mobileInbox::visibleHome)
+    val visibleHome = remember(appState.home, appState.mobileInbox, appState.phoneConversations, appState.activeComputerKey) {
+        appState.home?.let(appState.mobileInbox::visibleHome)?.let { appState.phoneConversations.visibleHome(it, appState.activeComputerKey) }
     }
     val attentionCount = remember(appState, visibleHome) {
         val home = visibleHome
@@ -142,6 +142,7 @@ fun AgentApp(
         } else {
             appState.sessions().count { session ->
                 appState.mobileInbox.hasNewActivity(session) &&
+                    appState.phoneConversations.isInboxVisible(session, appState.activeComputerKey) &&
                     !session.archived && !session.isEmpty && (
                     session.status == SessionStatus.NEEDS_PERMISSION ||
                         session.status == SessionStatus.WAITING_INPUT ||

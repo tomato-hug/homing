@@ -126,6 +126,7 @@ import dev.agentpush.poc.DispatchStatus
 import dev.agentpush.poc.ReplyStatus
 import dev.agentpush.poc.SessionItem
 import dev.agentpush.poc.SessionItemType
+import dev.agentpush.poc.SessionHistoryState
 import dev.agentpush.poc.SessionCommand
 import dev.agentpush.poc.SessionStatus
 import dev.agentpush.poc.SessionSummary
@@ -137,6 +138,7 @@ import dev.agentpush.poc.capabilityTokenIn
 import dev.agentpush.poc.changeAgentMentionPreset
 import dev.agentpush.poc.buildSessionMarkdown
 import dev.agentpush.poc.parseAgentMentions
+import dev.agentpush.poc.phoneConversationKey
 import dev.agentpush.poc.relativeTime
 import dev.agentpush.poc.sessionMarkdownFileName
 import dev.agentpush.poc.titleSourceLabel
@@ -170,7 +172,6 @@ import dev.agentpush.poc.ui.theme.HomingMono
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
-import java.net.URI
 import java.time.Instant
 
 internal data class SessionDetailActions(
@@ -224,6 +225,7 @@ internal data class SessionDetailActions(
         optionId: String?,
     ) -> Unit = { _, _, _, _ -> },
     val refreshTranscript: (String) -> Unit = {},
+    val loadEarlierContext: (String) -> Unit = {},
     val setReasoningVisible: (String, Boolean) -> Unit = { _, _ -> },
     val setPinned: (String, Boolean) -> Unit = { _, _ -> },
     val setMuted: (String, Boolean) -> Unit = { _, _ -> },
@@ -316,6 +318,7 @@ fun SessionScreen(
                 viewModel.decideApproval(eventId, decision, fallback, optionId)
             },
             refreshTranscript = { viewModel.refreshTranscript(sessionId) },
+            loadEarlierContext = viewModel::loadEarlierContext,
             setReasoningVisible = viewModel::setReasoningVisible,
             setPinned = viewModel::setPinned,
             setMuted = viewModel::setMuted,
@@ -358,11 +361,19 @@ internal fun SessionDetailContent(
         state.transcriptCache,
         state.sessionItems,
         state.agentDirectory,
+        state.phoneConversations,
+        state.activeComputerKey,
         sessionId,
     ) {
-        state.session(sessionId)
+        state.phoneSession(sessionId)
     }
-    val itemsState = state.sessionItems[sessionId]
+    val contextKey = session?.let {
+        phoneConversationKey(it.computerId.ifBlank { state.activeComputerKey }, it.source, sessionId)
+    }
+    val itemsState = state.sessionItems[sessionId]?.takeIf {
+        it.contextKey.isBlank() || it.contextKey == contextKey
+    }
+    val history = itemsState?.history ?: SessionHistoryState(managed = true)
     val hasStructuredItems = itemsState?.available == true &&
         itemsState.items.isNotEmpty()
     val agentProfile = remember(state.agentDirectory, session?.brand?.wire) {
@@ -495,9 +506,8 @@ internal fun SessionDetailContent(
     }
 
     fun openUrl(url: String) {
-        val uri = runCatching { URI(url) }.getOrNull()
-        val host = uri?.host?.lowercase().orEmpty()
-        if (host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]") {
+        val target = browserHttpUrl(url)
+        if (target != null && isBrowserLocalUrl(target)) {
             localhostPrompt = url
         } else {
             onOpenBrowser(url, "网页")
@@ -659,74 +669,11 @@ internal fun SessionDetailContent(
         hasStructuredItems,
         transcriptOnlyAgent,
     ) {
-        buildList<TimelineItem> {
-            if (hasStructuredItems) {
-                val replies = session?.replies.orEmpty()
-                val matchedReplies = mutableSetOf<Long>()
-                var order = 0
-                itemsState?.items.orEmpty().forEach { item ->
-                    when (item.type) {
-                        SessionItemType.USER -> {
-                            if (!transcriptOnlyAgent) {
-                                val duplicate = replies.lastOrNull { reply ->
-                                    reply.id !in matchedReplies &&
-                                        normalizeComparableText(reply.text) ==
-                                        normalizeComparableText(item.text)
-                                }
-                                if (duplicate != null) {
-                                    matchedReplies += duplicate.id
-                                    add(TimelineItem.Reply(duplicate, order++))
-                                } else {
-                                    add(TimelineItem.Item(item, order++))
-                                }
-                            }
-                        }
-                        else -> add(TimelineItem.Item(item, order++))
-                    }
-                }
-                session?.pendingEvent?.let { pending ->
-                    val alreadyVisible = itemsState?.items.orEmpty().any { it.eventId == pending.id }
-                    if (!alreadyVisible) {
-                        add(TimelineItem.Event(pending, order++))
-                    }
-                }
-                if (!transcriptOnlyAgent) {
-                    replies.filter { it.id !in matchedReplies }.forEach { reply ->
-                        add(TimelineItem.Reply(reply, order++))
-                    }
-                }
-            } else {
-                val transcript = session?.transcript?.messages.orEmpty()
-                if (transcript.isNotEmpty()) {
-                    var order = 0
-                    transcript.forEach { message ->
-                        if (!transcriptOnlyAgent || message.isAssistant) {
-                            add(TimelineItem.Message(message, order++))
-                        }
-                    }
-                    session?.pendingEvent?.let { pending ->
-                        add(TimelineItem.Event(pending, order++))
-                    }
-                    if (!transcriptOnlyAgent) {
-                        session?.replies?.forEach { reply ->
-                            add(TimelineItem.Reply(reply, order++))
-                        }
-                    }
-                } else {
-                    var order = 0
-                    session?.events?.forEach { event ->
-                        if (!transcriptOnlyAgent || event.kind != "needs_input") {
-                            add(TimelineItem.Event(event, order++))
-                        }
-                    }
-                    if (!transcriptOnlyAgent) {
-                        session?.replies?.forEach { reply ->
-                            add(TimelineItem.Reply(reply, order++))
-                        }
-                    }
-                }
-            }
-        }.foldToolProcesses()
+        buildSessionTimeline(
+            session = session,
+            structuredItems = if (hasStructuredItems) itemsState?.items.orEmpty() else emptyList(),
+            onlyAgent = transcriptOnlyAgent,
+        )
     }
 
     val nearBottom by remember {
@@ -752,34 +699,46 @@ internal fun SessionDetailContent(
     }
     val timelineHeaderCount =
         (if (inboundDispatches.isNotEmpty()) 1 else 0) +
-            (if (relatedDispatches.isNotEmpty()) 1 else 0)
+            (if (relatedDispatches.isNotEmpty()) 1 else 0) +
+            (if (history.managed) 1 else 0)
     val lastTimelineListIndex = timelineHeaderCount + timeline.lastIndex
-    var previousTimelineSize by remember(sessionId) { mutableStateOf(0) }
-    var positionedFirstUnseen by remember(sessionId) { mutableStateOf(false) }
-    LaunchedEffect(sessionId, timeline.size, firstUnseenIndex, timelineHeaderCount) {
-        if (!positionedFirstUnseen && firstUnseenIndex != null && timeline.isNotEmpty()) {
-            delay(120)
-            listState.scrollToItem(timelineHeaderCount + firstUnseenIndex)
-            positionedFirstUnseen = true
-        }
+    var previousTimelineSize by rememberSaveable(sessionId, state.activeComputerKey) { mutableStateOf(0) }
+    var previousLastKey by rememberSaveable(sessionId, state.activeComputerKey) { mutableStateOf<String?>(null) }
+    var positionedTimeline by rememberSaveable(sessionId, state.activeComputerKey) { mutableStateOf(false) }
+    var previousHistoryRevision by rememberSaveable(sessionId, state.activeComputerKey) {
+        mutableStateOf(history.revision)
     }
-    LaunchedEffect(timeline.size, timeline.lastOrNull()?.key, firstUnseenIndex, timelineHeaderCount) {
+    LaunchedEffect(sessionId, timeline.size, timeline.lastOrNull()?.key, firstUnseenIndex, timelineHeaderCount, history.revision) {
         if (timeline.isEmpty()) {
             previousTimelineSize = 0
+            previousLastKey = null
             return@LaunchedEffect
         }
-        delay(80)
-        if (previousTimelineSize == 0 && firstUnseenIndex != null) {
+        val loadedEarlier = positionedTimeline && previousHistoryRevision != history.revision
+        previousHistoryRevision = history.revision
+        if (loadedEarlier) {
+            // LazyColumn retains the visible stable key while older rows are prepended.
+            // Earlier context is not new activity and must not trigger a jump to the bottom.
             previousTimelineSize = timeline.size
+            previousLastKey = timeline.lastOrNull()?.key
             return@LaunchedEffect
         }
-        if (previousTimelineSize == 0 || nearBottom) {
-            listState.animateScrollToItem(lastTimelineListIndex)
+        if (!positionedTimeline) {
+            delay(80)
+            listState.scrollToItem(firstUnseenIndex?.let { timelineHeaderCount + it } ?: lastTimelineListIndex)
+            positionedTimeline = true
             showNewContent = false
-        } else if (timeline.size > previousTimelineSize) {
-            showNewContent = true
+        } else if (timeline.size != previousTimelineSize || timeline.lastOrNull()?.key != previousLastKey) {
+            delay(80)
+            if (nearBottom) {
+                listState.animateScrollToItem(lastTimelineListIndex)
+                showNewContent = false
+            } else if (timeline.size > previousTimelineSize) {
+                showNewContent = true
+            }
         }
         previousTimelineSize = timeline.size
+        previousLastKey = timeline.lastOrNull()?.key
     }
 
     val eventForReply = session?.replyEventId
@@ -1137,6 +1096,14 @@ internal fun SessionDetailContent(
                     ),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
+                    if (history.managed) {
+                        item(key = "phone-context-boundary") {
+                            SessionHistoryBoundary(
+                                history = history,
+                                onLoadEarlier = { actions.loadEarlierContext(sessionId) },
+                            )
+                        }
+                    }
                     if (inboundDispatches.isNotEmpty()) {
                         item(key = "inbound-dispatches") {
                             InboundDispatchPanel(

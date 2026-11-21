@@ -4,14 +4,12 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import dev.agentpush.poc.AgentApi
 import dev.agentpush.poc.AgentProfile
 import dev.agentpush.poc.AppSettings
 import dev.agentpush.poc.Attachment
 import dev.agentpush.poc.SessionSummary
 import dev.agentpush.poc.ui.FullScreenImageViewer
 import dev.agentpush.poc.ui.ModelPickerSheet
-import java.net.URI
 
 internal data class ImageViewerState(
     val attachments: List<Attachment>,
@@ -58,40 +56,33 @@ internal fun SessionSheets(
     }
 
     localhostPrompt?.let { url ->
-        val port = runCatching { URI(url).port }.getOrDefault(-1)
+        val port = browserHttpUrl(url)?.port ?: -1
+        val proxy = browserProxyUrl(url, settings.baseUrl, proxyCapability)
         AlertDialog(
             onDismissRequest = onDismissLocalhostPrompt,
             title = { Text("这是 Mac 本机地址") },
             text = {
                 Text(
                     "localhost / 127.0.0.1 在手机上指向手机自己，无法直接访问。" +
-                        if (port > 0) {
-                            "\n\n若中继已开启端口代理，可通过中继访问 $port 端口；未开启时会显示错误。"
+                        if (proxy != null) {
+                            "\n\n仅当手机能直连这台电脑，且已开启 :$port 端口代理时可尝试访问。云端中转不转发电脑网页；部分网页跳转或表单暂不支持。"
                         } else {
-                            ""
+                            "\n\n此地址暂不支持端口代理，请在电脑上打开。"
                         },
                 )
             },
             confirmButton = {
-                if (port > 0) {
+                if (proxy != null) {
                     TextButton(
                         onClick = {
                             onDismissLocalhostPrompt()
-                            val uri = runCatching { URI(url) }.getOrNull()
-                            val path = uri?.rawPath?.takeIf { it.isNotBlank() } ?: "/"
-                            val query = uri?.rawQuery?.let { "?$it" }.orEmpty()
                             onOpenBrowser(
-                                AgentApi.proxyUrl(
-                                    settings,
-                                    port,
-                                    path.trimStart('/') + query,
-                                    proxyCapability,
-                                ),
-                                "通过中继 · :$port",
+                                proxy,
+                                "电脑网页 · :$port",
                             )
                         },
                     ) {
-                        Text("通过中继打开")
+                        Text("尝试直连代理")
                     }
                 }
             },

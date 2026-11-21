@@ -1618,6 +1618,8 @@ data class AgentUiState(
     val lastUpdatedAt: Long? = null,
     val localSessionFlags: Map<String, LocalSessionFlags> = emptyMap(),
     val mobileInbox: MobileInboxMode = MobileInboxMode(),
+    val phoneConversations: PhoneConversationState = PhoneConversationState(),
+    val activeComputerKey: String = "",
     val inbox: InboxFeed? = null,
     val home: HomeFeed? = null,
     val sessionDrafts: Map<String, String> = emptyMap(),
@@ -1633,8 +1635,10 @@ data class AgentUiState(
             (grouped.keys + sessionMeta.keys).distinct()
         }
         return keys.distinct().mapNotNull { key ->
-            val sessionEvents = grouped[key].orEmpty().sortedBy { it.id }
             val meta = sessionMeta[key]
+            val sessionEvents = grouped[key].orEmpty().filter {
+                meta == null || it.source == meta.source
+            }.sortedBy { it.id }
             val latest = sessionEvents.lastOrNull()
             if (latest == null && meta == null) return@mapNotNull null
 
@@ -1745,6 +1749,21 @@ data class AgentUiState(
             compareByDescending<SessionSummary> { it.pinned }
                 .thenByDescending { it.lastTs.ifBlank { Instant.EPOCH.toString() } },
         )
+    }
+
+    fun phoneSession(sessionId: String): SessionSummary? {
+        val session = session(sessionId) ?: return null
+        val key = phoneConversationKey(session.computerId.ifBlank { activeComputerKey }, session.source, sessionId)
+        val receipt = phoneConversations.receipts[key]
+        val events = session.events.filter { event ->
+            event.source == session.source && receipt != null && event.id >= receipt.eventId
+        }
+        val replies = session.replies.filter { reply ->
+            reply.isLocal || (receipt != null && epochMillis(reply.ts) >= epochMillis(receipt.timestamp))
+        }
+        // Full legacy transcript caches predate phone receipt boundaries. They must never
+        // bypass the user's explicit request to load previous context.
+        return session.copy(events = events, latestEvent = events.lastOrNull(), replies = replies, transcript = null)
     }
 
     fun session(sessionId: String): SessionSummary? {

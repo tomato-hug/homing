@@ -210,7 +210,12 @@ class SessionDetailRenderTest {
             base = base,
             items = listOf(approvalItem),
             contextUsage = ContextUsage(used = 100L, limit = 0L),
-        ).copy(events = mapOf(permission.id to permission))
+        ).copy(
+            events = mapOf(permission.id to permission),
+            phoneConversations = PhoneConversationState(receipts = mapOf(
+                phoneConversationKey("", base.brand.wire, base.sessionId) to PhoneReceipt(permission.id, permission.ts, 1L),
+            )),
+        )
 
         renderSingle(state, base.sessionId)
         compose.onNodeWithText("仅此次").assertExists()

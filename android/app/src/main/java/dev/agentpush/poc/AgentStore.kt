@@ -30,19 +30,28 @@ class AgentStore private constructor(context: Context) {
     )
     private val sessionFlagsStore = SessionFlagsStore(applicationContext)
     private val mobileInboxPreferences = MobileInboxPreferences(applicationContext)
+    private val phonePreferences = PhoneConversationPreferences(applicationContext)
     private val _state = MutableStateFlow(
         AgentUiState(
             settings = AppSettings.load(applicationContext),
             connectionDiagnostics = loadDiagnostics(),
             localSessionFlags = sessionFlagsStore.load(),
             mobileInbox = mobileInboxPreferences.load(),
+            phoneConversations = phonePreferences.load(),
+            activeComputerKey = PairedComputerStore(applicationContext).active()?.deviceId
+                ?: AppSettings.load(applicationContext).baseUrl,
         ),
     )
     private val nextLocalReplyId = AtomicLong(0L)
+    private val computerGeneration = AtomicLong(0L)
+    private val detailRequests = java.util.concurrent.ConcurrentHashMap<String, AtomicLong>()
     private var inboxRefreshJob: Job? = null
     private val draftSaveJobs = mutableMapOf<String, Job>()
     private val itemSaveJobs = mutableMapOf<String, Job>()
     private val outboxMutex = Mutex()
+    private val itemPersistenceMutex = Mutex()
+    private val phoneItemCache = java.util.concurrent.ConcurrentHashMap<String, SessionItemsState>()
+    private val phoneDraftCache = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val backgroundScope = CoroutineScope(
         SupervisorJob() + Dispatchers.IO + CrashReporter.coroutineExceptionHandler,
     )
@@ -67,7 +76,11 @@ class AgentStore private constructor(context: Context) {
 
     init {
         AgentApi.bindTransport(transportRouter) { _state.value.settings }
-        cloudLink.setNotificationHandler { _, payload ->
+        cloudLink.setNotificationHandler { computerId, payload ->
+            if (payload.eventId > 0 && payload.sessionId.isNotBlank()) {
+                updatePhone { it.receive(phoneConversationKey(computerId.deviceId.ifBlank { _state.value.activeComputerKey },
+                    payload.source, payload.sessionId), payload.eventId, payload.at) }
+            }
             val session = session(payload.sessionId)
             if (session?.muted == true || session?.archived == true) {
                 true
@@ -121,6 +134,8 @@ class AgentStore private constructor(context: Context) {
         localCacheReady.await()
         _state.update { it.copy(isRefreshing = true, error = null) }
         val settings = _state.value.settings
+        val scope = _state.value.activeComputerKey
+        val generation = computerGeneration.get()
         try {
             val bundle = coroutineScope {
                 val events = async { AgentApi.fetchEvents(settings) }
@@ -167,32 +182,36 @@ class AgentStore private constructor(context: Context) {
                     dispatches = dispatches.await(),
                 )
             }
-            mergeEvents(bundle.events)
-            mergeSessionMeta(
-                sessions = (bundle.sessions.items + bundle.inbox.sessions)
-                    .distinctBy { it.sessionId },
-                apiAvailable = bundle.sessions.apiAvailable || bundle.inbox.available,
-                error = bundle.sessions.error,
-            )
-            mergeDispatches(bundle.dispatches)
-            _state.update {
-                it.copy(
-                    projects = bundle.projects,
-                    away = bundle.away,
-                    agentDirectory = bundle.agentDirectory,
-                    agentCatalog = bundle.agentCatalog,
-                    isRefreshing = false,
-                    error = null,
-                    lastUpdatedAt = System.currentTimeMillis(),
-                    inbox = bundle.inbox.takeIf { inbox -> inbox.available },
-                    home = bundle.home,
+            synchronized(this) {
+                if (_state.value.activeComputerKey != scope || computerGeneration.get() != generation) return
+                mergeEvents(bundle.events)
+                mergeSessionMeta(
+                    sessions = (bundle.sessions.items + bundle.inbox.sessions)
+                        .distinctBy { it.sessionId },
+                    apiAvailable = bundle.sessions.apiAvailable || bundle.inbox.available,
+                    error = bundle.sessions.error,
                 )
+                mergeDispatches(bundle.dispatches)
+                _state.update {
+                    it.copy(
+                        projects = bundle.projects,
+                        away = bundle.away,
+                        agentDirectory = bundle.agentDirectory,
+                        agentCatalog = bundle.agentCatalog,
+                        isRefreshing = false,
+                        error = null,
+                        lastUpdatedAt = System.currentTimeMillis(),
+                        inbox = bundle.inbox.takeIf { inbox -> inbox.available },
+                        home = bundle.home,
+                    )
+                }
+                receiveVisibleHome(bundle.home)
             }
             persistLocalSnapshot()
             scheduleAggregatedHomeRefresh()
-            backgroundScope.launch { hydrateMissingTranscripts() }
             backgroundScope.launch { flushOutbox() }
         } catch (error: Exception) {
+            if (_state.value.activeComputerKey != scope || computerGeneration.get() != generation) return
             _state.update {
                 it.copy(
                     isRefreshing = false,
@@ -209,13 +228,7 @@ class AgentStore private constructor(context: Context) {
     }
 
     suspend fun refreshTranscript(sessionId: String, force: Boolean = false) {
-        if (!force && _state.value.transcriptCache.containsKey(sessionId)) {
-            return
-        }
-        val transcript = AgentApi.fetchTranscript(_state.value.settings, sessionId)
-        _state.update {
-            it.copy(transcriptCache = it.transcriptCache + (sessionId to transcript))
-        }
+        refreshSessionDetails(sessionId, force)
     }
 
     suspend fun refreshSessionDetails(
@@ -224,82 +237,129 @@ class AgentStore private constructor(context: Context) {
         includeReasoning: Boolean? = null,
     ) {
         if (sessionId.isBlank()) return
-        val existing = _state.value.sessionItems[sessionId]
-        if (!force && existing != null && System.currentTimeMillis() - existing.loadedAt < 1_500L) {
-            return
-        }
-        val showReasoning = includeReasoning ?: existing?.includeReasoning ?: false
+        val scope = _state.value.activeComputerKey
+        val generation = computerGeneration.get()
+        val requestCounter = detailRequests.getOrPut("$scope:$sessionId") { AtomicLong(0L) }
+        val requestId = requestCounter.incrementAndGet()
+        fun currentRequest(): Boolean = _state.value.activeComputerKey == scope &&
+            computerGeneration.get() == generation && requestCounter.get() == requestId
         val settings = _state.value.settings
+        val previousSource = _state.value.sessionMeta[sessionId]?.source.orEmpty()
         val detail = runCatching { AgentApi.fetchSession(settings, sessionId) }.getOrNull()
+            ?.takeIf { previousSource.isBlank() || it.source == previousSource }
+        if (!currentRequest()) return
         if (detail != null) {
-            _state.update { current ->
-                current.copy(
-                    sessionMeta = current.sessionMeta + (
-                        sessionId to mergeMeta(current.sessionMeta[sessionId], detail)
-                        ),
-                )
-            }
+            _state.update { current -> if (!currentRequest()) current else current.copy(sessionMeta = current.sessionMeta +
+                (sessionId to mergeMeta(current.sessionMeta[sessionId], detail))) }
         }
-        val result = runCatching {
-            AgentApi.fetchSessionItems(
-                settings = settings,
-                sessionId = sessionId,
-                includeReasoning = showReasoning,
-            )
+        preparePhoneContext(sessionId)
+        val existing = _state.value.sessionItems[sessionId] ?: return
+        if (!force && System.currentTimeMillis() - existing.loadedAt < 1_500L) return
+        val source = _state.value.sessionMeta[sessionId]?.source.orEmpty()
+        val showReasoning = includeReasoning ?: existing.includeReasoning
+        // A notification for another paired computer may arrive before its event body.
+        // Fetch only from the known receipt boundary, never the earlier transcript.
+        val anchor = existing.history.anchorEventId
+        if (anchor > 0L && _state.value.events[anchor]?.source != source) {
+            val received = runCatching { AgentApi.fetchEvents(settings, since = anchor - 1L) }.getOrDefault(emptyList())
+                .filter { it.sessionId == sessionId && it.source == source && it.id >= anchor }
+            _state.update { current -> if (!currentRequest()) current else current.copy(
+                events = current.events + received.associateBy { it.id },
+            ) }
+            if (!currentRequest()) return
         }
-            .getOrElse { error ->
-                SessionItemsResult(
-                    available = false,
-                    reason = friendlyError(error),
-                )
-            }
+        val result = if (existing.history.anchorEventId > 0L && source.isNotBlank()) {
+            runCatching {
+                AgentApi.fetchSessionItems(settings, sessionId, includeReasoning = showReasoning,
+                    source = source, anchorEventId = existing.history.anchorEventId)
+            }.getOrElse { SessionItemsResult(available = false, reason = friendlyError(it)) }
+        } else {
+            SessionItemsResult(available = false, reason = "收到新消息后可载入更早上下文。")
+        }
+        if (!currentRequest()) return
         _state.update { current ->
-            val previous = current.sessionItems[sessionId]
-            val turnState = if (result.turns.isNotEmpty()) {
-                SessionItemsState.fromTurns(result.turns)
-            } else {
-                null
-            }
-            // ACP adapters can finish without exposing turn history. A fresh
-            // session response must then supersede the cached live-item flag.
-            val running = turnState?.running ?: detail?.running ?: previous?.running ?: false
-            val runningSince = if (running) {
-                turnState?.runningSince?.takeIf { it.isNotBlank() }
-                    ?: detail?.runningSince?.takeIf { it.isNotBlank() }
-                    ?: previous?.runningSince.orEmpty()
-            } else {
-                ""
-            }
-            val next = if (result.available) {
-                SessionItemsState(
-                    items = normalizeSessionItems(result.items).filterNot {
-                        !showReasoning && it.type == SessionItemType.REASONING
-                    },
-                    turns = result.turns,
-                    reason = result.reason,
-                    available = true,
-                    loadedAt = System.currentTimeMillis(),
-                    running = running,
-                    runningSince = runningSince,
-                    includeReasoning = showReasoning,
+            if (!currentRequest()) return@update current
+            val previous = current.sessionItems[sessionId] ?: existing
+            if (previous.contextKey != existing.contextKey || previous.history.anchorEventId != existing.history.anchorEventId) return@update current
+            val turnState = result.turns.takeIf { it.isNotEmpty() }?.let(SessionItemsState::fromTurns)
+            val running = turnState?.running ?: detail?.running ?: previous.running
+            val history = if (result.history != null) {
+                result.history.copy(
+                    beforeCursor = if (previous.history.loadedRounds > 0) previous.history.beforeCursor else result.history.beforeCursor,
+                    status = if (previous.history.loadedRounds > 0) previous.history.status else result.history.status,
+                    loadedRounds = previous.history.loadedRounds, revision = previous.history.revision,
+                    loading = previous.history.loading, error = result.reason,
                 )
-            } else {
-                (previous ?: SessionItemsState()).copy(
-                    available = false,
-                    reason = result.reason ?: previous?.reason,
-                    loadedAt = System.currentTimeMillis(),
-                    running = running,
-                    runningSince = runningSince,
-                    includeReasoning = showReasoning,
-                )
-            }
+            } else previous.history.copy(error = result.reason)
+            val next = previous.copy(
+                items = if (result.available) mergePhoneItems(previous.items, result.items, prepend = false)
+                    .filterNot { !showReasoning && it.type == SessionItemType.REASONING } else previous.items,
+                turns = result.turns.ifEmpty { previous.turns }, reason = result.reason,
+                available = result.available || previous.items.isNotEmpty(),
+                loadedAt = System.currentTimeMillis(), running = running,
+                runningSince = if (running) turnState?.runningSince?.ifBlank { null }
+                    ?: detail?.runningSince?.ifBlank { null } ?: previous.runningSince else "",
+                includeReasoning = showReasoning, history = history,
+            )
             current.copy(sessionItems = current.sessionItems + (sessionId to next))
         }
-        if (!result.available || result.items.isEmpty()) {
-            runCatching { refreshTranscript(sessionId, force = force) }
+        savePhoneItems(sessionId)
+    }
+
+    suspend fun loadEarlierContext(sessionId: String) {
+        val scope = _state.value.activeComputerKey
+        val generation = computerGeneration.get()
+        val before = _state.value.sessionItems[sessionId] ?: return
+        val cursor = before.history.beforeCursor ?: return
+        if (before.history.loading || before.history.anchorEventId <= 0L) return
+        val source = _state.value.sessionMeta[sessionId]?.source.orEmpty()
+        var claimed = false
+        _state.update { current ->
+            val latest = current.sessionItems[sessionId] ?: return@update current
+            if (latest.history.loading || latest.history.beforeCursor != cursor || latest.history.revision != before.history.revision) {
+                claimed = false
+                return@update current
+            }
+            claimed = true
+            current.copy(sessionItems = current.sessionItems + (sessionId to latest.copy(history = latest.history.copy(loading = true, error = null))))
         }
-        _state.value.sessionItems[sessionId]?.items?.let { items ->
-            runCatching { localCache.saveItems(sessionId, items) }
+        if (!claimed) return
+        val response = runCatching {
+            AgentApi.fetchSessionItems(_state.value.settings, sessionId, before = cursor,
+                includeReasoning = before.includeReasoning, source = source, anchorEventId = before.history.anchorEventId)
+        }
+        if (_state.value.activeComputerKey != scope || computerGeneration.get() != generation) return
+        _state.update { current ->
+            if (current.activeComputerKey != scope || computerGeneration.get() != generation) return@update current
+            val previous = current.sessionItems[sessionId] ?: return@update current
+            if (previous.contextKey != before.contextKey || previous.history.anchorEventId != before.history.anchorEventId ||
+                previous.history.beforeCursor != cursor || previous.history.revision != before.history.revision) return@update current
+            val result = response.getOrNull()
+            val success = result?.available == true && result.history != null && result.roundsReturned in 1..10
+            val next = if (success) previous.copy(
+                items = mergePhoneItems(previous.items, result!!.items, prepend = true),
+                available = true, history = result.history!!.copy(
+                    loadedRounds = previous.history.loadedRounds + result.roundsReturned,
+                    revision = previous.history.revision + 1,
+                ),
+            ) else previous.copy(history = previous.history.copy(loading = false,
+                error = response.exceptionOrNull()?.let(::friendlyError) ?: result?.reason ?: "暂时无法取得更早的完整对话，请稍后重试。"))
+            current.copy(sessionItems = current.sessionItems + (sessionId to next))
+        }
+        savePhoneItems(sessionId)
+    }
+
+    private suspend fun savePhoneItems(sessionId: String) {
+        val items = _state.value.sessionItems[sessionId] ?: return
+        persistPhoneItems(items)
+    }
+
+    private suspend fun persistPhoneItems(items: SessionItemsState) = itemPersistenceMutex.withLock {
+        if (items.contextKey.isBlank()) return@withLock
+        phoneItemCache[items.contextKey] = items
+        // Persist rows first. A failed disk write must never advance the saved cursor.
+        if (runCatching { localCache.saveItems(items.contextKey, items.items) }.isSuccess) {
+            updatePhone { it.copy(histories = it.histories + (items.contextKey to items.history.copy(loading = false))) }
         }
     }
 
@@ -329,6 +389,14 @@ class AgentStore private constructor(context: Context) {
         val sessionId = json.stringOrBlank("session_id")
         if (sessionId.isBlank()) return
         val itemJson = json.optJSONObject("item")
+        val rawItem = itemJson ?: json
+        val managed = _state.value.sessionItems[sessionId]?.history?.managed == true
+        if (managed) {
+            val timestamp = rawItem.stringOrBlank("ts").ifBlank { rawItem.stringOrBlank("timestamp") }
+            if (epochMillis(timestamp) <= 0L) return
+            val source = json.stringOrBlank("source").ifBlank { rawItem.stringOrBlank("source") }
+            if (source.isNotBlank() && source != _state.value.sessionMeta[sessionId]?.source) return
+        }
         val item = if (itemJson != null) {
             SessionItem.fromJson(itemJson, fallbackId = "item-${System.nanoTime()}")
         } else {
@@ -343,6 +411,11 @@ class AgentStore private constructor(context: Context) {
         _state.update { current ->
             val previous = current.sessionItems[sessionId]
                 ?: SessionItemsState(running = true)
+            if (previous.history.managed) {
+                val receipt = current.phoneConversations.receipts[previous.contextKey]
+                val boundary = receipt?.timestamp?.let(::epochMillis) ?: previous.loadedAt
+                if (epochMillis(item.ts) <= boundary) return@update current
+            }
             current.copy(
                 sessionItems = current.sessionItems + (
                     sessionId to appendSessionItem(previous, item)
@@ -484,6 +557,9 @@ class AgentStore private constructor(context: Context) {
     }
 
     fun ingestEvent(event: AgentEvent): Boolean {
+        if (event.sessionId.isNotBlank()) {
+            updatePhone { it.receive(phoneConversationKey(_state.value.activeComputerKey, event.source, event.sessionId), event.id, event.ts) }
+        }
         var isNew = false
         _state.update { current ->
             val existing = current.events[event.id]
@@ -547,6 +623,7 @@ class AgentStore private constructor(context: Context) {
             scheduleInboxRefresh()
             backgroundScope.launch {
                 runCatching { refreshTranscript(event.sessionId) }
+                persistLocalSnapshot()
             }
         }
         return isNew
@@ -682,6 +759,12 @@ class AgentStore private constructor(context: Context) {
     }
 
     fun updateDraft(sessionId: String, text: String) {
+        val before = _state.value
+        val meta = before.sessionMeta[sessionId]
+        val key = phoneConversationKey(meta?.computerId?.ifBlank { before.activeComputerKey } ?: before.activeComputerKey,
+            meta?.source.orEmpty(), sessionId)
+        if (text.isBlank()) phoneDraftCache.remove(key) else phoneDraftCache[key] = text
+
         if (sessionId.isBlank()) return
         _state.update { current ->
             current.copy(
@@ -693,23 +776,27 @@ class AgentStore private constructor(context: Context) {
             )
         }
         synchronized(draftSaveJobs) {
-            draftSaveJobs.remove(sessionId)?.cancel()
-            draftSaveJobs[sessionId] = backgroundScope.launch {
+            draftSaveJobs.remove(key)?.cancel()
+            draftSaveJobs[key] = backgroundScope.launch {
                 delay(350)
-                runCatching { localCache.saveDraft(sessionId, text.trimEnd()) }
-                synchronized(draftSaveJobs) { draftSaveJobs.remove(sessionId) }
+                runCatching { localCache.saveDraft(key, text.trimEnd()) }
+                synchronized(draftSaveJobs) { draftSaveJobs.remove(key) }
             }
         }
     }
 
     private fun scheduleItemCache(sessionId: String) {
+        val snapshot = _state.value.sessionItems[sessionId] ?: return
+        val key = snapshot.contextKey
+        if (key.isBlank()) return
         synchronized(itemSaveJobs) {
-            itemSaveJobs.remove(sessionId)?.cancel()
-            itemSaveJobs[sessionId] = backgroundScope.launch {
+            itemSaveJobs.remove(key)?.cancel()
+            itemSaveJobs[key] = backgroundScope.launch {
                 delay(500)
-                val items = _state.value.sessionItems[sessionId]?.items.orEmpty()
-                runCatching { localCache.saveItems(sessionId, items) }
-                synchronized(itemSaveJobs) { itemSaveJobs.remove(sessionId) }
+                val latest = _state.value.sessionItems[sessionId]?.takeIf { it.contextKey == key }
+                    ?: phoneItemCache[key] ?: snapshot
+                persistPhoneItems(latest)
+                synchronized(itemSaveJobs) { itemSaveJobs.remove(key) }
             }
         }
     }
@@ -728,6 +815,9 @@ class AgentStore private constructor(context: Context) {
             itemSaveJobs.clear()
         }
         localCache.clear()
+        phoneItemCache.clear()
+        phoneDraftCache.clear()
+        updatePhone { it.copy(histories = emptyMap()) }
         _state.update {
             it.copy(
                 sessionDrafts = emptyMap(),
@@ -741,14 +831,21 @@ class AgentStore private constructor(context: Context) {
         }
     }
 
-    fun saveSettings(baseUrl: String, token: String): AppSettings {
+    @Synchronized fun saveSettings(baseUrl: String, token: String): AppSettings {
         val saved = AppSettings.save(
             applicationContext,
             baseUrl,
             token,
             _state.value.settings.previewMentions,
         )
-        _state.update { it.copy(settings = saved) }
+        val previous = _state.value
+        if (saved.baseUrl != previous.settings.baseUrl && computerStore.active() == null) {
+            rememberPhoneState(previous)
+            computerGeneration.incrementAndGet()
+            _state.update { it.copy(settings = saved, activeComputerKey = saved.baseUrl,
+                sessionMeta = emptyMap(), events = emptyMap(), replies = emptyMap(), sessionItems = emptyMap(),
+                transcriptCache = emptyMap(), sessionDrafts = emptyMap(), home = null, inbox = null, isRefreshing = false) }
+        } else _state.update { it.copy(settings = saved) }
         invalidateTransportRoute()
         return saved
     }
@@ -777,14 +874,116 @@ class AgentStore private constructor(context: Context) {
         invalidateTransportRoute()
     }
 
-    fun activateComputer(deviceId: String) {
+    @Synchronized fun activateComputer(deviceId: String) {
         if (deviceId.isBlank()) return
         val activeId = computerStore.active()?.deviceId.orEmpty()
         if (deviceId == activeId) return
         if (computerStore.load().none { it.deviceId == deviceId }) return
+        rememberPhoneState(_state.value)
+        computerGeneration.incrementAndGet()
         computerStore.select(deviceId)
         cloudLink.selectComputer(deviceId)
+        _state.update { it.copy(activeComputerKey = deviceId, sessionMeta = emptyMap(), events = emptyMap(),
+            replies = emptyMap(), sessionItems = emptyMap(), transcriptCache = emptyMap(),
+            sessionDrafts = emptyMap(), dispatches = emptyMap(), inbox = null, isRefreshing = false) }
         transportRouter.invalidate()
+    }
+
+    private fun rememberPhoneState(state: AgentUiState) {
+        state.sessionItems.values.filter { it.contextKey.isNotBlank() }.forEach { items ->
+            phoneItemCache[items.contextKey] = items
+            backgroundScope.launch { persistPhoneItems(items) }
+        }
+    }
+
+    fun activatePhoneSession(meta: SessionMeta) {
+        activateComputer(meta.computerId)
+        _state.update { current ->
+            val changedSource = current.sessionMeta[meta.sessionId]?.source?.let { it != meta.source } == true
+            if (changedSource) current.sessionItems[meta.sessionId]?.takeIf { it.contextKey.isNotBlank() }
+                ?.let { phoneItemCache[it.contextKey] = it }
+            current.copy(sessionMeta = current.sessionMeta + (meta.sessionId to meta),
+                sessionItems = if (changedSource) current.sessionItems - meta.sessionId else current.sessionItems,
+                sessionDrafts = if (changedSource) current.sessionDrafts - meta.sessionId else current.sessionDrafts)
+        }
+        preparePhoneContext(meta.sessionId)
+    }
+
+    @Synchronized private fun updatePhone(transform: (PhoneConversationState) -> PhoneConversationState) {
+        _state.update { it.copy(phoneConversations = transform(it.phoneConversations)) }
+        phonePreferences.save(_state.value.phoneConversations)
+    }
+
+    private fun receiveVisibleHome(home: HomeFeed?) {
+        if (home == null) return
+        val current = _state.value
+        val visible = current.mobileInbox.visibleHome(home)
+        updatePhone { previous ->
+            visible.attention.sortedBy { epochMillis(it.at) }.fold(previous) { next, item ->
+                next.receive(item.session.phoneKey(current.activeComputerKey), item.eventId,
+                    item.at.ifBlank { item.session.lastTs })
+            }
+        }
+    }
+
+    fun clearPhoneInbox() {
+        val current = _state.value
+        val activity = current.mobileInbox.visibleSessions(current.sessions())
+            .associate { session -> phoneConversationKey(session.computerId.ifBlank { current.activeComputerKey },
+                session.source, session.sessionId) to session.phoneActivity() }.toMutableMap()
+        current.home?.let(current.mobileInbox::visibleHome)?.let { home ->
+            home.attention.forEach { item ->
+                val key = item.session.phoneKey(current.activeComputerKey)
+                val next = PhoneActivity(item.eventId, item.at.ifBlank { item.session.lastTs })
+                val old = activity[key] ?: PhoneActivity()
+                activity[key] = PhoneActivity(maxOf(old.eventId, next.eventId),
+                    listOf(old.timestamp, next.timestamp).maxByOrNull(::epochMillis).orEmpty())
+            }
+            (home.running + home.resume).forEach { meta ->
+                val key = meta.phoneKey(current.activeComputerKey)
+                val old = activity[key] ?: PhoneActivity()
+                activity[key] = old.copy(timestamp = listOf(old.timestamp, meta.lastTs).maxByOrNull(::epochMillis).orEmpty())
+            }
+        }
+        updatePhone { it.clearInbox(activity) }
+    }
+
+    fun hideSessionOnPhone(session: SessionSummary) = hideSessionsOnPhone(listOf(session))
+
+    fun hideSessionsOnPhone(sessions: List<SessionSummary>) {
+        val computer = _state.value.activeComputerKey
+        updatePhone { it.hide(sessions.associate { session ->
+            phoneConversationKey(session.computerId.ifBlank { computer }, session.source, session.sessionId) to session.phoneActivity()
+        }) }
+    }
+
+    fun undoPhoneCleanup() = updatePhone { it.undoCleanup() }
+    fun restorePhoneSessions() = updatePhone { it.restoreSessions() }
+
+    /** Opening an existing row establishes an anchor at the received row, never at the
+     * oldest event from a server backlog. Live notifications establish it sooner. */
+    fun preparePhoneContext(sessionId: String) {
+        val current = _state.value
+        val session = current.session(sessionId) ?: return
+        val key = phoneConversationKey(session.computerId.ifBlank { current.activeComputerKey }, session.source, sessionId)
+        if (current.phoneConversations.receipts[key] == null) {
+            session.events.lastOrNull { it.source == session.source }?.let { event ->
+                updatePhone { it.receive(key, event.id, event.ts) }
+            }
+        }
+        _state.update { state ->
+            val receipt = state.phoneConversations.receipts[key]
+            val old = state.sessionItems[sessionId]?.takeIf { it.contextKey == key } ?: phoneItemCache[key]
+            val compatible = old?.contextKey == key && old.history.managed &&
+                (old.history.anchorEventId == receipt?.eventId || (receipt == null && old.history.anchorEventId == 0L))
+            val next = if (compatible) old!! else SessionItemsState(
+                contextKey = key, history = SessionHistoryState(managed = true, anchorEventId = receipt?.eventId ?: 0L),
+                running = old?.running ?: session.running, runningSince = old?.runningSince ?: session.runningSince,
+                loadedAt = System.currentTimeMillis(), available = false,
+            )
+            state.copy(sessionItems = state.sessionItems + (sessionId to next), transcriptCache = state.transcriptCache - sessionId,
+                sessionDrafts = phoneDraftCache[key]?.let { state.sessionDrafts + (sessionId to it) } ?: state.sessionDrafts)
+        }
     }
 
     fun activeComputerId(): String = computerStore.active()?.deviceId.orEmpty()
@@ -1676,6 +1875,10 @@ class AgentStore private constructor(context: Context) {
     fun sessionEvents(sessionId: String) = transportRouter.events(sessionId)
 
     internal fun replaceStateForTest(state: AgentUiState) {
+        computerGeneration.incrementAndGet()
+        phoneItemCache.clear()
+        phoneDraftCache.clear()
+        detailRequests.clear()
         _state.value = state
     }
 
@@ -1831,6 +2034,7 @@ class AgentStore private constructor(context: Context) {
                 away = merged.away.enabled,
             )
         }
+        receiveVisibleHome(merged)
         persistLocalSnapshot()
     }
 
@@ -1871,44 +2075,36 @@ class AgentStore private constructor(context: Context) {
         inboxRefreshJob = backgroundScope.launch {
             delay(delayMillis)
             val settings = _state.value.settings
+            val scope = _state.value.activeComputerKey
+            val generation = computerGeneration.get()
             val home = runCatching { AgentApi.fetchHome(settings) }.getOrNull()
             val inbox = runCatching { AgentApi.fetchInbox(settings) }.getOrNull()
                 ?.takeIf { it.available }
-            if (home == null && inbox == null) return@launch
-            val sessions = buildList {
-                if (inbox != null) addAll(inbox.sessions)
-                if (home != null) {
-                    addAll(home.attentionSessions)
-                    addAll(home.running)
-                    addAll(home.resume)
-                }
-            }.distinctBy { it.sessionId }
-            mergeSessionMeta(
-                sessions = sessions,
-                apiAvailable = true,
-                error = null,
-            )
-            _state.update {
-                it.copy(
-                    inbox = inbox ?: it.inbox,
-                    home = home ?: it.home,
-                    away = home?.away?.enabled ?: it.away,
+            synchronized(this@AgentStore) {
+                if (_state.value.activeComputerKey != scope || computerGeneration.get() != generation || (home == null && inbox == null)) return@launch
+                val sessions = buildList {
+                    if (inbox != null) addAll(inbox.sessions)
+                    if (home != null) {
+                        addAll(home.attentionSessions)
+                        addAll(home.running)
+                        addAll(home.resume)
+                    }
+                }.distinctBy { it.sessionId }
+                mergeSessionMeta(
+                    sessions = sessions,
+                    apiAvailable = true,
+                    error = null,
                 )
+                _state.update {
+                    it.copy(
+                        inbox = inbox ?: it.inbox,
+                        home = home ?: it.home,
+                        away = home?.away?.enabled ?: it.away,
+                    )
+                }
+                receiveVisibleHome(home)
             }
             scheduleAggregatedHomeRefresh()
-        }
-    }
-
-    private suspend fun hydrateMissingTranscripts() {
-        val state = _state.value
-        val candidates = state.sessions()
-            .filter {
-                !state.transcriptCache.containsKey(it.sessionId) &&
-                    (it.hasRealEvent || it.titleSource !in setOf("custom", "agent"))
-            }
-            .take(12)
-        for (session in candidates) {
-            runCatching { refreshTranscript(session.sessionId) }
         }
     }
 
@@ -1941,43 +2137,31 @@ class AgentStore private constructor(context: Context) {
     private suspend fun restoreLocalCache() {
         runCatching {
             val cached = localCache.load()
+            phoneDraftCache.putAll(cached.drafts.filterKeys { it.startsWith("[") })
+            cached.items.forEach { (key, rows) ->
+                val history = _state.value.phoneConversations.histories[key]
+                if (history != null) phoneItemCache[key] = SessionItemsState(
+                    items = rows.filterNot { it.type == SessionItemType.REASONING },
+                    history = history, contextKey = key, loadedAt = 0L)
+            }
             _state.update { current ->
-                if (current.lastUpdatedAt == null && current.sessionMeta.isEmpty()) {
-                    current.copy(
-                        sessionMeta = cached.sessions.associateBy { it.sessionId },
-                        inbox = cached.inbox,
-                        home = cached.home,
-                        projects = cached.projects,
-                        away = cached.away,
-                        lastUpdatedAt = cached.savedAt,
-                        sessionDrafts = cached.drafts,
-                        sessionItems = cached.items.mapValues { (_, items) ->
-                            SessionItemsState(
-                                items = items.filterNot {
-                                    it.type == SessionItemType.REASONING
-                                },
-                                available = true,
-                                loadedAt = cached.savedAt ?: System.currentTimeMillis(),
-                                includeReasoning = false,
-                            )
-                        } + current.sessionItems,
-                        sessionApiAvailable = cached.sessions.isNotEmpty(),
-                    )
-                } else {
-                    current.copy(
-                        sessionDrafts = cached.drafts + current.sessionDrafts,
-                        sessionItems = cached.items.mapValues { (_, items) ->
-                            SessionItemsState(
-                                items = items.filterNot {
-                                    it.type == SessionItemType.REASONING
-                                },
-                                available = true,
-                                loadedAt = cached.savedAt ?: System.currentTimeMillis(),
-                                includeReasoning = false,
-                            )
-                        } + current.sessionItems,
-                    )
-                }
+                // A snapshot must belong to the selected computer before metadata can restore.
+                val sessions = cached.sessions.filter { it.computerId == current.activeComputerKey }
+                val items = sessions.mapNotNull { meta ->
+                    val key = meta.phoneKey(current.activeComputerKey)
+                    val history = current.phoneConversations.histories[key] ?: return@mapNotNull null
+                    val rows = cached.items[key] ?: return@mapNotNull null
+                    meta.sessionId to SessionItemsState(items = rows.filterNot { it.type == SessionItemType.REASONING },
+                        history = history, contextKey = key, loadedAt = 0L)
+                }.toMap()
+                if (current.lastUpdatedAt == null && current.sessionMeta.isEmpty()) current.copy(
+                    sessionMeta = sessions.associateBy { it.sessionId },
+                    sessionItems = items + current.sessionItems,
+                    sessionDrafts = sessions.mapNotNull { meta -> phoneDraftCache[meta.phoneKey(current.activeComputerKey)]
+                        ?.let { meta.sessionId to it } }.toMap() + current.sessionDrafts,
+                    events = (if (cached.phoneComputerKey == current.activeComputerKey) cached.phoneEvents.associateBy { it.id } else emptyMap()) + current.events,
+                    sessionApiAvailable = sessions.isNotEmpty(),
+                ) else current
             }
         }
     }
@@ -1986,12 +2170,17 @@ class AgentStore private constructor(context: Context) {
         val current = _state.value
         runCatching {
             localCache.saveSnapshot(
-                sessions = current.sessionMeta.values,
+                sessions = current.sessionMeta.values.map { it.copy(computerId = it.computerId.ifBlank { current.activeComputerKey }) },
                 inbox = current.inbox,
                 home = current.home,
                 projects = current.projects,
                 away = current.away,
-                drafts = current.sessionDrafts,
+                drafts = phoneDraftCache.toMap(),
+                phoneComputerKey = current.activeComputerKey,
+                phoneEvents = current.events.values.filter { event ->
+                    val key = phoneConversationKey(current.activeComputerKey, event.source, event.sessionId)
+                    current.phoneConversations.receipts[key]?.let { event.id >= it.eventId } == true
+                },
             )
         }
     }

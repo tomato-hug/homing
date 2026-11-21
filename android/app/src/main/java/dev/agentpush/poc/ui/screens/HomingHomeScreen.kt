@@ -151,6 +151,15 @@ fun HomingHomeScreen(
             if (searchOpen) {
                 InboxSearchField(value = search, onValueChange = { search = it })
             }
+            PhoneCleanupControls(
+                inboxHasContent = attention.isNotEmpty() || resume.isNotEmpty() ||
+                    (state.mobileInbox.enabled && home.running.isNotEmpty()),
+                canUndo = state.phoneConversations.canUndo,
+                hasHiddenSessions = state.phoneConversations.hasHiddenSessions,
+                onClearInbox = viewModel::clearPhoneInbox,
+                onUndo = viewModel::undoPhoneCleanup,
+                onRestore = viewModel::restorePhoneSessions,
+            )
             PullToRefreshBox(
                 isRefreshing = state.isRefreshing,
                 onRefresh = viewModel::refresh,
@@ -226,6 +235,7 @@ fun HomingHomeScreen(
                                 now = now,
                                 showComputer = showComputer,
                                 onOpenSession = onOpenSession,
+                                onSelectSession = viewModel::activatePhoneSession,
                             )
                         }
                     }
@@ -270,21 +280,24 @@ fun HomingHomeScreen(
                             items(
                             visibleAttention,
                             key = {
-                                "${it.session.computerId}-${it.sessionId}-${it.reason}-${it.eventId}"
+                                dev.agentpush.poc.phoneConversationKey(it.session.computerId, it.session.source, it.sessionId)
                             },
                         ) { item ->
+                            val draftKey = dev.agentpush.poc.phoneConversationKey(
+                                item.session.computerId.ifBlank { state.activeComputerKey }, item.session.source, item.sessionId)
                             HomeAttentionCard(
                                 item = item,
-                                draft = attentionDrafts[item.sessionId].orEmpty(),
+                                draft = attentionDrafts[draftKey].orEmpty(),
                                 showComputer = showComputer,
                                 onDraftChange = { value ->
-                                    attentionDrafts = attentionDrafts + (item.sessionId to value)
+                                    attentionDrafts = attentionDrafts + (draftKey to value)
                                 },
                                 onOpen = {
+                                    viewModel.activatePhoneSession(item.session)
                                     onOpenSession(item.sessionId, item.session.computerId)
                                 },
                                 onApprovalOption = { eventId, decision, optionId ->
-                                    viewModel.activateComputer(item.session.computerId)
+                                    viewModel.activatePhoneSession(item.session)
                                     viewModel.decideApproval(
                                         eventId = eventId,
                                         decision = decision,
@@ -293,20 +306,20 @@ fun HomingHomeScreen(
                                     viewModel.markSessionRead(item.sessionId)
                                 },
                                 onSend = {
-                                    val text = attentionDrafts[item.sessionId].orEmpty().trim()
+                                    val text = attentionDrafts[draftKey].orEmpty().trim()
                                     if (text.isNotBlank()) {
-                                        viewModel.activateComputer(item.session.computerId)
+                                        viewModel.activatePhoneSession(item.session)
                                         viewModel.sendReplyTo(
                                             sessionId = item.sessionId,
                                             source = item.session.source,
                                             eventId = item.eventId,
                                             text = text,
                                         )
-                                        attentionDrafts = attentionDrafts - item.sessionId
+                                        attentionDrafts = attentionDrafts - draftKey
                                     }
                                 },
                                 onMarkSeen = {
-                                    viewModel.activateComputer(item.session.computerId)
+                                    viewModel.activatePhoneSession(item.session)
                                     viewModel.markSessionRead(item.sessionId)
                                 },
                             )
@@ -359,6 +372,7 @@ fun HomingHomeScreen(
                                 now = now,
                                 showComputer = showComputer,
                                 onOpenSession = onOpenSession,
+                                onSelectSession = viewModel::activatePhoneSession,
                                 onNewSession = onNewSession,
                                 onOpenAll = onOpenAllSessions,
                             )

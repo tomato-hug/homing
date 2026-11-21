@@ -52,6 +52,7 @@ data class SessionItem(
     val eventId: Long? = null,
     val rawType: String = "",
     val isToolResult: Boolean = false,
+    val itemKey: String = "",
 ) {
     val isFailed: Boolean
         get() = type == SessionItemType.ERROR ||
@@ -114,8 +115,9 @@ data class SessionItem(
             val id = json.stringOrBlank("id")
                 .ifBlank { fallbackId }
                 .ifBlank { "${json.stringOrBlank("ts")}-$rawType-${text.take(24)}" }
+            // Reader row numbers are not notification IDs. Only an explicit linkage
+            // can claim a received message or permission event.
             val eventId = readNullableLong(json, "event_id")
-                ?: id.toLongOrNull()
 
             if (
                 type == SessionItemType.OTHER &&
@@ -127,6 +129,7 @@ data class SessionItem(
             }
             return SessionItem(
                 id = id,
+                itemKey = json.stringOrBlank("item_key"),
                 ts = json.stringOrBlank("ts")
                     .ifBlank { json.stringOrBlank("timestamp") }
                     .ifBlank { Instant.now().toString() },
@@ -285,6 +288,7 @@ internal fun SessionItem.toJson(): JSONObject {
     }
     return JSONObject()
         .put("id", id)
+        .put("item_key", itemKey)
         .put("ts", ts)
         .put("type", typeName)
         .put("role", role)
@@ -353,6 +357,8 @@ data class SessionItemsState(
     val running: Boolean = false,
     val runningSince: String = "",
     val includeReasoning: Boolean = false,
+    val contextKey: String = "",
+    val history: SessionHistoryState = SessionHistoryState(),
 ) {
     val lastItem: SessionItem?
         get() = items.lastOrNull()
@@ -409,7 +415,7 @@ fun normalizeSessionItems(items: List<SessionItem>): List<SessionItem> {
     }
     val unique = LinkedHashMap<String, SessionItem>(output.size)
     for (item in output) {
-        unique[item.id] = item
+        unique[item.itemKey.ifBlank { item.id }] = item
     }
     return unique.values.toList()
 }
@@ -428,14 +434,17 @@ fun appendSessionItem(
     item: SessionItem,
 ): SessionItemsState {
     if (item.isNoise()) return state
-    val index = state.items.indexOfFirst { it.id == item.id }
+    fun sameIdentity(existing: SessionItem): Boolean = if (item.itemKey.isNotBlank()) {
+        existing.itemKey == item.itemKey
+    } else existing.itemKey.isBlank() && existing.id == item.id
+    val index = state.items.indexOfFirst(::sameIdentity)
     val nextItem = if (index >= 0) {
         mergeSessionItem(state.items[index], item)
     } else {
         item
     }
     val merged = if (index >= 0) {
-        state.items.filterNot { it.id == item.id }.toMutableList().also {
+        state.items.filterNot(::sameIdentity).toMutableList().also {
             it.add(index.coerceAtMost(it.size), nextItem)
         }
     } else {

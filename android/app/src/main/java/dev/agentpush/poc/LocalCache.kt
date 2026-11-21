@@ -225,6 +225,8 @@ internal data class CachedSnapshot(
     val drafts: Map<String, String>,
     val items: Map<String, List<SessionItem>>,
     val savedAt: Long?,
+    val phoneComputerKey: String = "",
+    val phoneEvents: List<AgentEvent> = emptyList(),
 )
 
 internal class LocalCache(context: Context) {
@@ -255,6 +257,8 @@ internal class LocalCache(context: Context) {
             drafts = dao.drafts().associate { it.sessionId to it.text },
             items = items,
             savedAt = home?.savedAt,
+            phoneComputerKey = home?.phoneComputerKey.orEmpty(),
+            phoneEvents = home?.phoneEvents.orEmpty(),
         )
     }
 
@@ -266,6 +270,8 @@ internal class LocalCache(context: Context) {
         away: Boolean,
         drafts: Map<String, String>,
         savedAt: Long = System.currentTimeMillis(),
+        phoneComputerKey: String = "",
+        phoneEvents: Collection<AgentEvent> = emptyList(),
     ) {
         val sessionRows = sessions
             .filter { it.sessionId.isNotBlank() }
@@ -280,7 +286,7 @@ internal class LocalCache(context: Context) {
         dao.replaceSessions(sessionRows)
         dao.putHomeSnapshot(
             HomeSnapshotEntity(
-                payload = encodeHome(inbox, home, projects, away, savedAt).toString(),
+                payload = encodeHome(inbox, home, projects, away, savedAt, phoneComputerKey, phoneEvents).toString(),
                 updatedAt = savedAt,
             ),
         )
@@ -303,13 +309,14 @@ internal class LocalCache(context: Context) {
     suspend fun saveItems(sessionId: String, items: List<SessionItem>) {
         if (sessionId.isBlank()) return
         val now = System.currentTimeMillis()
-        val recent = items.takeLast(MAX_ITEMS_PER_SESSION)
+        // Explicitly requested pages are never silently trimmed while their cursor advances.
+        val recent = if (sessionId.startsWith("[")) items else items.takeLast(MAX_ITEMS_PER_SESSION)
         dao.replaceItems(
             sessionId,
             recent.mapIndexed { index, item ->
                 ItemSnapshotEntity(
                     sessionId = sessionId,
-                    itemId = item.id,
+                    itemId = item.itemKey.ifBlank { item.id },
                     position = index,
                     payload = item.toJson().toString(),
                     updatedAt = now,
@@ -407,6 +414,8 @@ private data class CachedHome(
     val projects: List<ProjectInfo>,
     val away: Boolean,
     val savedAt: Long,
+    val phoneComputerKey: String,
+    val phoneEvents: List<AgentEvent>,
 )
 
 private fun encodeHome(
@@ -415,9 +424,13 @@ private fun encodeHome(
     projects: List<ProjectInfo>,
     away: Boolean,
     savedAt: Long,
+    phoneComputerKey: String,
+    phoneEvents: Collection<AgentEvent>,
 ): JSONObject {
     return JSONObject()
         .put("version", 1)
+        .put("phone_computer", phoneComputerKey)
+        .put("phone_events", JSONArray().apply { phoneEvents.forEach { put(it.toJson()) } })
         .put("saved_at", savedAt)
         .put("away", away)
         .put("projects", JSONArray().apply {
@@ -443,6 +456,10 @@ private fun decodeHome(json: JSONObject): CachedHome {
         }.map(ProjectInfo::fromJson),
         away = json.optBoolean("away", false),
         savedAt = json.optLong("saved_at", 0L),
+        phoneComputerKey = json.optString("phone_computer"),
+        phoneEvents = json.optJSONArray("phone_events")?.let { array ->
+            (0 until array.length()).mapNotNull { index -> array.optJSONObject(index)?.let(AgentEvent::fromJson) }
+        }.orEmpty(),
     )
 }
 

@@ -129,6 +129,7 @@ private enum class SessionRowAction {
     MUTE,
     UNMUTE,
     ARCHIVE,
+    HIDE_ON_PHONE,
     MARK_READ,
 }
 
@@ -166,6 +167,7 @@ fun ProjectsScreen(
     }
     val sessions = remember(state) {
         mobileInbox.visibleSessions(allSavedSessions)
+            .filterNot { state.phoneConversations.isSessionHidden(it, state.activeComputerKey) }
     }
     val visibleSessionIds = remember(sessions) { sessions.map { it.sessionId }.toSet() }
     val visibleSearchHits = remember(searchHits, visibleSessionIds) {
@@ -307,6 +309,9 @@ fun ProjectsScreen(
             SessionRowAction.ARCHIVE -> {
                 viewModel.setArchived(id, true)
                 offerUndo("已归档") { viewModel.setArchived(id, false) }
+            }
+            SessionRowAction.HIDE_ON_PHONE -> {
+                viewModel.hideSessionOnPhone(session)
             }
             SessionRowAction.MARK_READ -> {
                 viewModel.markSessionRead(id)
@@ -598,6 +603,12 @@ fun ProjectsScreen(
             }
         }
 
+        PhoneCleanupControls(
+            canUndo = state.phoneConversations.canUndo,
+            hasHiddenSessions = state.phoneConversations.hasHiddenSessions,
+            onUndo = viewModel::undoPhoneCleanup,
+            onRestore = viewModel::restorePhoneSessions,
+        )
         LazyColumn(
             modifier = Modifier
                 .weight(1f)
@@ -740,8 +751,8 @@ fun ProjectsScreen(
                     selectedSessionIds.forEach(viewModel::markSessionRead)
                     selectionMode = false
                 },
-                onArchive = {
-                    selectedSessionIds.forEach { viewModel.setArchived(it, true) }
+                onHideOnPhone = {
+                    viewModel.hideSessionsOnPhone(sessions.filter { it.sessionId in selectedSessionIds })
                     selectionMode = false
                 },
                 onMute = {
@@ -1317,6 +1328,7 @@ private fun ProjectSessionRow(
             isResident = isResident,
             onClick = { if (selectionMode) onSelect() else onClick() },
             onLongClick = if (selectionMode) null else ({ menuExpanded = true }),
+            onHidePhone = { onAction(session, SessionRowAction.HIDE_ON_PHONE) },
         )
     }
 
@@ -1347,7 +1359,7 @@ private fun ProjectSessionRow(
                             if (session.pinned) SessionRowAction.UNPIN else SessionRowAction.PIN,
                         )
                     SwipeToDismissBoxValue.EndToStart ->
-                        onAction(session, SessionRowAction.ARCHIVE)
+                        onAction(session, SessionRowAction.HIDE_ON_PHONE)
                     SwipeToDismissBoxValue.Settled -> Unit
                 }
                 scope.launch { dismissState.reset() }
@@ -1359,6 +1371,14 @@ private fun ProjectSessionRow(
             expanded = menuExpanded,
             onDismissRequest = { menuExpanded = false },
         ) {
+            DropdownMenuItem(
+                text = { Text("仅从手机移除") },
+                leadingIcon = { Icon(Icons.Outlined.Close, contentDescription = null) },
+                onClick = {
+                    menuExpanded = false
+                    onAction(session, SessionRowAction.HIDE_ON_PHONE)
+                },
+            )
             DropdownMenuItem(
                 text = { Text(if (session.pinned) "取消置顶" else "置顶会话") },
                 leadingIcon = { Icon(Icons.Outlined.PushPin, contentDescription = null) },
@@ -1440,6 +1460,7 @@ private fun ProjectSessionRowContent(
     isResident: Boolean,
     onClick: () -> Unit,
     onLongClick: (() -> Unit)?,
+    onHidePhone: () -> Unit,
 ) {
     Surface(
         color = if (selected) {
@@ -1574,6 +1595,19 @@ private fun ProjectSessionRowContent(
                     )
                 }
             }
+            if (!selectionMode) {
+                IconButton(
+                    onClick = onHidePhone,
+                    modifier = Modifier.testTag("phone-hide-session-${session.sessionId}"),
+                ) {
+                    Icon(
+                        Icons.Outlined.Close,
+                        contentDescription = "仅从手机移除：${session.title}",
+                        tint = HomingPalette.Muted,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            }
         }
     }
 }
@@ -1594,8 +1628,8 @@ private fun SwipeSessionRowBackground(session: SessionSummary) {
             color = HomingPalette.Brand,
         )
         SwipeActionHint(
-            label = "归档",
-            icon = Icons.Outlined.Archive,
+            label = "仅从手机移除",
+            icon = Icons.Outlined.Close,
             color = HomingPalette.Error,
         )
     }
@@ -1929,7 +1963,7 @@ private fun SelectionActionBar(
     allSelected: Boolean,
     onSelectAll: () -> Unit,
     onMarkRead: () -> Unit,
-    onArchive: () -> Unit,
+    onHideOnPhone: () -> Unit,
     onMute: () -> Unit,
 ) {
     Surface(
@@ -1964,10 +1998,10 @@ private fun SelectionActionBar(
                 modifier = Modifier.weight(1f),
             )
             SelectionAction(
-                label = "归档",
-                icon = Icons.Outlined.Archive,
+                label = "仅从手机移除",
+                icon = Icons.Outlined.Close,
                 enabled = selectedCount > 0,
-                onClick = onArchive,
+                onClick = onHideOnPhone,
                 modifier = Modifier.weight(1f),
             )
             SelectionAction(

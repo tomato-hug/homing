@@ -196,6 +196,7 @@ fun HomingInboxScreen(
     val allSessions = remember(state) {
         mobileInbox.visibleSessions(state.sessions())
             .filterNot { it.archived || it.isEmpty }
+            .filter { state.phoneConversations.isInboxVisible(it, state.activeComputerKey) }
     }
     val query = search.trim()
     val sessions = remember(allSessions, query) {
@@ -334,6 +335,14 @@ fun HomingInboxScreen(
                     onValueChange = { search = it },
                 )
             }
+            PhoneCleanupControls(
+                inboxHasContent = attentionCount > 0 || running.isNotEmpty() || completed.isNotEmpty(),
+                canUndo = state.phoneConversations.canUndo,
+                hasHiddenSessions = state.phoneConversations.hasHiddenSessions,
+                onClearInbox = viewModel::clearPhoneInbox,
+                onUndo = viewModel::undoPhoneCleanup,
+                onRestore = viewModel::restorePhoneSessions,
+            )
             PullToRefreshBox(
                 isRefreshing = state.isRefreshing,
                 onRefresh = viewModel::refresh,
