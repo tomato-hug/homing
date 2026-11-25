@@ -5,16 +5,20 @@ package gui
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"embed"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tomato-hug/homing/internal/platform"
@@ -56,6 +60,21 @@ func run(ctx context.Context, options Options) error {
 		return fmt.Errorf("desktop shell needs the local service URL")
 	}
 
+	// Scope the native instance to its service/profile, so an isolated preview
+	// can coexist with the installed app without stealing its window.
+	profile, _ := filepath.Abs(options.DataDir)
+	if resolved, err := filepath.EvalSymlinks(profile); err == nil {
+		profile = resolved
+	}
+	instanceHash := sha256.Sum256([]byte(profile + "|" + baseURL))
+	type shellWindows struct{ main, panel *application.WebviewWindow }
+	var windows atomic.Pointer[shellWindows]
+	showMain := func() {
+		if w := windows.Load(); w != nil {
+			w.panel.Hide()
+			w.main.Show().Focus()
+		}
+	}
 	app := application.New(application.Options{
 		Name:        "Homing",
 		Description: "跨 Agent 会话管理",
@@ -63,18 +82,23 @@ func run(ctx context.Context, options Options) error {
 			ActivationPolicy: application.ActivationPolicyAccessory,
 		},
 		Logger: options.Log,
+		SingleInstance: &application.SingleInstanceOptions{
+			UniqueID:               fmt.Sprintf("dev.homing.desktop.%x", instanceHash[:12]),
+			OnSecondInstanceLaunch: func(application.SecondInstanceData) { showMain() },
+		},
 	})
 
+	devTools := options.Version == "" || options.Version == "dev" || os.Getenv("HOMING_DEVTOOLS") == "1"
 	mainWindow := app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:             "main",
 		Title:            "Homing",
 		URL:              baseURL + "/console/",
 		Width:            1320,
 		Height:           860,
-		MinWidth:         760,
+		MinWidth:         820,
 		MinHeight:        560,
 		BackgroundColour: application.NewRGB(15, 23, 42),
-		DevToolsEnabled:  true,
+		DevToolsEnabled:  devTools,
 	})
 	mainWindow.RegisterHook(events.Common.WindowClosing, func(event *application.WindowEvent) {
 		mainWindow.Hide()
@@ -107,6 +131,16 @@ func run(ctx context.Context, options Options) error {
 		event.Cancel()
 	})
 
+	windows.Store(&shellWindows{main: mainWindow, panel: panel})
+	if runtime.GOOS == "darwin" {
+		// Wails' default reopen listener shows every hidden window, including
+		// our tray panel. Finder launches should bring back only the main window.
+		app.Event.RegisterApplicationEventHook(events.Mac.ApplicationShouldHandleReopen, func(event *application.ApplicationEvent) {
+			showMain()
+			event.Cancel()
+		})
+	}
+
 	tray := app.SystemTray.New()
 	tray.AttachWindow(panel).WindowOffset(4)
 	if runtime.GOOS == "darwin" {
@@ -116,6 +150,8 @@ func run(ctx context.Context, options Options) error {
 	}
 
 	menu := app.NewMenu()
+	menu.Add("Homing " + options.Version).SetEnabled(false)
+	menu.AddSeparator()
 	openMain := menu.Add("打开 Homing")
 	openMain.OnClick(func(*application.Context) {
 		mainWindow.Show().Focus()
@@ -334,12 +370,24 @@ func setAway(baseURL, token string, enabled bool) error {
 }
 
 func setPause(baseURL, token string, paused bool) error {
-	body, _ := json.Marshal(map[string]any{"paused": paused})
-	request, err := http.NewRequest(http.MethodPost, baseURL+"/api/push/pause", bytes.NewReader(body))
+	var (
+		method string
+		body   io.Reader
+	)
+	if paused {
+		method = http.MethodPost
+		raw, _ := json.Marshal(map[string]any{"minutes": 60, "reason": "托盘暂停"})
+		body = bytes.NewReader(raw)
+	} else {
+		method = http.MethodDelete
+	}
+	request, err := http.NewRequest(method, baseURL+"/api/push/pause", body)
 	if err != nil {
 		return err
 	}
-	request.Header.Set("Content-Type", "application/json")
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
 	if token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)
 	}

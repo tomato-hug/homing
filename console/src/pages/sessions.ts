@@ -20,6 +20,7 @@ import { agentLogo } from "../lib/agent-icons";
 import { icons } from "../lib/icons";
 import { approvalButtons } from "../lib/approval";
 import { parseMentions } from "../lib/mentions";
+import { startedSessionSummary } from "../lib/session-start";
 import {
   button,
   emptyState,
@@ -951,7 +952,7 @@ export function renderSessions(_ctx: PageContext): PageResult {
       agents = agentPayload.agents;
       const requested = selected?.session_id || currentFromURL();
       const next =
-        sessions.find((session) => session.session_id === requested) ||
+        sessions.find((session) => session.session_id === requested && (!selected || session.source === selected.source)) ||
         selected ||
         sessions.find((session) => !session.is_empty) ||
         sessions[0] ||
@@ -1240,7 +1241,7 @@ export function renderSessions(_ctx: PageContext): PageResult {
     newSessionError = "";
     paintNewSession();
     try {
-      const result = await endpoints.startSession({
+      const request = {
         source: profile.source,
         cwd: newSessionCwd.trim(),
         text: newSessionText.trim(),
@@ -1248,7 +1249,9 @@ export function renderSessions(_ctx: PageContext): PageResult {
         model: newSessionModel || null,
         effort: newSessionEffort || null,
         permission_mode: newSessionPermission || null,
-      });
+      };
+      const result = await endpoints.startSession(request);
+      if (disposed) return;
       if (!result.ok) {
         throw new Error(result.message || result.error || "Agent 没有启动会话");
       }
@@ -1263,12 +1266,17 @@ export function renderSessions(_ctx: PageContext): PageResult {
         "ok",
       );
       if (result.warning) toast(result.warning, "plain", 6000);
-      await loadSessions(false);
       if (sessionID) {
-        const created = sessions.find((session) => session.session_id === sessionID);
-        if (created) selectSession(created);
-      } else if (requestID) {
-        window.setTimeout(() => void loadSessions(false), 1800);
+        const created = startedSessionSummary(sessions, {
+          sessionID, source: request.source, cwd: request.cwd, text: request.text,
+          model: request.model, effort: request.effort, permissionMode: request.permission_mode,
+        });
+        if (!sessions.includes(created)) sessions = [created, ...sessions];
+        selectSession(created);
+      }
+      await loadSessions(false);
+      if (!disposed && !sessionID && requestID) {
+        window.setTimeout(() => { if (!disposed) void loadSessions(false); }, 1800);
       }
     } catch (err) {
       newSessionBusy = false;
@@ -1312,7 +1320,7 @@ export function renderSessions(_ctx: PageContext): PageResult {
         h("div", { class: "eyebrow", text: "NEW SESSION" }),
         h("h2", { text: "让一个 Agent 开始工作" }),
         h("p", {
-          text: "选择 Agent、项目目录和权限模式。手机与电脑使用同一套 /api/sessions/new 能力。",
+          text: "选择 Agent、项目目录和权限模式，手机与电脑共用同一套会话。",
         }),
       ),
       h("span", { class: "spacer", style: "flex:1" }),
@@ -1555,14 +1563,15 @@ export function renderSessions(_ctx: PageContext): PageResult {
     const submit = button(newSessionBusy ? "正在启动…" : "开始会话", {
       variant: "primary",
       iconSvg: icons.arrowRight,
-      disabled:
-        newSessionBusy ||
-        newSessionUploading ||
-        !profile ||
-        !newSessionCwd.trim() ||
-        !newSessionText.trim(),
       onClick: () => void submitNewSession(),
     });
+    const refreshSubmit = () => {
+      submit.disabled = newSessionBusy || newSessionUploading || !profile ||
+        !newSessionCwd.trim() || !newSessionText.trim();
+    };
+    cwdInput.addEventListener("input", refreshSubmit);
+    textarea.addEventListener("input", refreshSubmit);
+    refreshSubmit();
     newSessionModal.append(
       head,
       form,

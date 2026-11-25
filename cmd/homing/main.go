@@ -47,6 +47,7 @@ const usage = `homing — every coding agent, one pocket inbox
 `
 
 func main() {
+	platform.PrepareRuntimeEnvironment()
 	updater.SetVersion(version)
 	args := os.Args[1:]
 	cmd := ""
@@ -188,7 +189,8 @@ func serve(args []string) error {
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(listener) }()
-	log.Info("homing serve", "addr", listener.Addr().String(), "data", *dataDir, "version", version)
+	consoleURL := "http://" + browserAddress(listener.Addr().String()) + "/console/"
+	log.Info("homing serve", "addr", listener.Addr().String(), "console", consoleURL, "data", *dataDir, "version", version)
 
 	select {
 	case err := <-errc:

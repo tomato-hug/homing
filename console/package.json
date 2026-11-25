@@ -7,8 +7,9 @@
   "scripts": {
     "dev": "vite",
     "test:mentions": "node scripts/check-mentions.mjs",
-    "build": "tsc --noEmit && node scripts/check-mentions.mjs && vite build",
-    "preview": "vite preview"
+    "build": "tsc --noEmit && node scripts/check-mentions.mjs && node scripts/check-session-start.mjs && vite build",
+    "preview": "vite preview",
+    "test:session-start": "node scripts/check-session-start.mjs"
   },
   "devDependencies": {
     "@lobehub/icons-static-svg": "^1.102.0",

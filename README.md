@@ -45,6 +45,12 @@ CGO_ENABLED=0 go build -tags headless -o homing ./cmd/homing
 
 `homing`（无子命令）在受支持的桌面构建中打开窗口与托盘；`homing serve` 提供同一套服务和网页控制台。不要让两个实例同时占用同一端口或写入同一个数据目录。
 
+### Mac 原生应用
+
+Mac 构建使用 Go / Wails。安装 `Homing.app` 后可直接从 Finder 打开；已有同一资料目录的常驻服务时，窗口会验证身份后连接该服务。关闭窗口会收起到菜单栏；退出附着于常驻服务的窗口不会停止手机连接。没有常驻服务时，应用自行启动并管理服务。
+
+构建、升级、签名状态和 Agent 环境说明见 [Mac 原生应用指南](docs/macos-native.md)。安装包与常驻服务需分别核对版本；界面左上角显示实际连接的服务版本。
+
 ### Android APK
 
 准备 JDK 17、Android SDK 35 与 Build Tools 35.0.0，设置 `ANDROID_HOME` 或在 `android/local.properties` 指定 SDK 路径：

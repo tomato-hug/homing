@@ -179,7 +179,7 @@ let navBadge: HTMLElement | null = null;
 let currentDispose: (() => void) | null = null;
 let shellPoll: (() => void) | null = null;
 let currentPath = "/console/";
-const consoleVersion = "v0.9.0";
+let versionBadge: HTMLElement | null = null;
 
 function normalizePath(path: string): string {
   const url = new URL(path, location.origin);
@@ -289,6 +289,7 @@ function buildSidebar(): HTMLElement {
   settingsEl.dataset.nav = "settings";
 
   const foot = h("div", { class: "sidebar-foot" }, settingsEl, sidebarStatus);
+  versionBadge = h("span", { class: "brand-ver", text: shellState.connection?.version || "", title: "本机服务版本" });
 
   return h(
     "aside",
@@ -298,7 +299,7 @@ function buildSidebar(): HTMLElement {
       { class: "brand" },
       brandPigeonEl(),
       h("span", { class: "brand-name", text: "Homing" }),
-      h("span", { class: "brand-ver", text: consoleVersion }),
+      versionBadge,
     ),
     sidebarNav,
     foot,
@@ -364,6 +365,7 @@ async function refreshShell() {
   try {
     connection = await endpoints.connection();
     shellState.connection = connection;
+    if (versionBadge) versionBadge.textContent = connection.version;
     shellState.online = true;
   } catch {
     shellState.online = false;

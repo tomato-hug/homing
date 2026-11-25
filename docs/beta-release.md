@@ -1,11 +1,12 @@
 # Homing Beta installation and release notes
 
-This Beta is for early adopters who can run a computer service and install an Android APK. It is not yet a signed and notarized Mac application distribution. Check the release's actual asset list and verification record; source-tree files alone do not mean a public release exists.
+This Beta is for early adopters who can run a computer service and install an Android APK. The native Mac package has a separate signing/notarization status; inspect its build manifest. Check the release's actual asset list and verification record; source-tree files alone do not mean a public release exists.
 
 ## Package types
 
 | Package | Purpose |
 | --- | --- |
+| `Homing-*-macos-*.app.zip` | Native Mac app; see the [Mac guide](macos-native.md) and verify its actual signing / notarization status |
 | `homing-*-darwin-arm64.tar.gz` | Apple Silicon computer binary, license and instructions; run `homing serve` for the service and web console |
 | `homing-server-*-linux-*.tar.gz` | Self-hosted relay binary; requires persistent storage and HTTPS/WSS termination |
 | `Homing-*-release.apk` | APK signed with the maintained release key, intended for new Beta installations or upgrades from the same key |
@@ -60,5 +61,5 @@ Record the exact commit, APK signing channel, server version, device / OS, netwo
 
 - Background instant delivery is not guaranteed on every Android vendor. FCM requires deployment configuration; other vendor push adapters remain placeholders. Reconnection catch-up and background wake-up are separate acceptance items.
 - Agent availability depends on local runtime versions, authentication, model availability and permissions. A successful ACP handshake alone does not prove a useful model reply or tool execution.
-- Some long-running tool states still need broader physical-device testing. Broader Android versions, Windows desktop packaging and Mac signing / notarization are outside this Beta's verified surface.
+- Some long-running tool states still need broader physical-device testing. Broader Android versions, Windows desktop packaging and Apple notarization remain outside this Beta's verified surface; native Mac checks are documented separately.
 - Public opening of a repository requires review of its entire history, issue attachments, generated artifacts and maintainer settings. A scan of only the current diff is insufficient. Enable private vulnerability reporting before inviting public security reports.

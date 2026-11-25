@@ -82,6 +82,10 @@ func (Agent) ApprovalHook() (string, string) {
 // CLI announces its thread id. The process stays attached to the returned id so
 // /api/sessions/{id}/stop and dispatch cancellation can stop this turn.
 func (Agent) StartSession(ctx context.Context, req agent.StartRequest) (agent.StartResult, error) {
+	return startSession(ctx, req, time.Minute)
+}
+
+func startSession(ctx context.Context, req agent.StartRequest, startupTimeout time.Duration) (agent.StartResult, error) {
 	binary := codexBinary()
 	if binary == "" {
 		return agent.StartResult{}, errors.New("本机没有 codex 命令")
@@ -136,18 +140,20 @@ func (Agent) StartSession(ctx context.Context, req agent.StartRequest) (agent.St
 				stringValue(payload["thread_id"]),
 				stringValue(payload["thread-id"]),
 			); id != "" {
+				sessionProcs.Lock()
+				sessionProcs.byID[id] = cmd
+				sessionProcs.Unlock()
 				select {
 				case idCh <- id:
 				default:
 				}
-				sessionProcs.Lock()
-				sessionProcs.byID[id] = cmd
-				sessionProcs.Unlock()
 			}
 		}
-	}()
-	go func() {
-		done <- cmd.Wait()
+		// Drain stdout before Wait closes the pipe, including short-lived turns.
+		if scanner.Err() != nil {
+			_ = cmd.Process.Kill()
+		}
+		err := cmd.Wait()
 		sessionProcs.Lock()
 		for id, candidate := range sessionProcs.byID {
 			if candidate == cmd {
@@ -155,12 +161,20 @@ func (Agent) StartSession(ctx context.Context, req agent.StartRequest) (agent.St
 			}
 		}
 		sessionProcs.Unlock()
+		done <- err
 	}()
 
+	timer := time.NewTimer(startupTimeout)
+	defer timer.Stop()
 	select {
 	case id := <-idCh:
 		return agent.StartResult{SessionID: id, Status: "started"}, nil
 	case err := <-done:
+		select {
+		case id := <-idCh:
+			return agent.StartResult{SessionID: id, Status: "started"}, nil
+		default:
+		}
 		message := strings.TrimSpace(stderr.String())
 		if message == "" && err != nil {
 			message = err.Error()
@@ -169,6 +183,9 @@ func (Agent) StartSession(ctx context.Context, req agent.StartRequest) (agent.St
 			message = "codex 未返回 thread id"
 		}
 		return agent.StartResult{}, errors.New(truncateOneLine(message, 300))
+	case <-timer.C:
+		_ = cmd.Process.Kill()
+		return agent.StartResult{}, fmt.Errorf("Codex 启动超时，请检查 CLI 登录及本机环境后重试：%w", context.DeadlineExceeded)
 	case <-ctx.Done():
 		_ = cmd.Process.Kill()
 		return agent.StartResult{}, ctx.Err()

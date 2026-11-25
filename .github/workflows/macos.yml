@@ -1,0 +1,52 @@
+name: Mac native
+
+on:
+  push:
+    branches: [main, homing-v3]
+    paths:
+      - 'cmd/homing/**'
+      - 'internal/**'
+      - 'console/**'
+      - 'web/console/**'
+      - 'go.*'
+      - 'scripts/package-macos.py'
+      - 'scripts/build-console.sh'
+      - '.github/workflows/macos.yml'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    runs-on: macos-latest
+    env:
+      CGO_CFLAGS: -mmacosx-version-min=13.0
+      CGO_LDFLAGS: -mmacosx-version-min=13.0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+      - run: npm ci --prefix console
+      - name: Native tests and build
+        run: |
+          go test ./cmd/homing ./internal/gui ./internal/platform ./internal/agent/codex
+          go build ./...
+      - name: Package native app (ad hoc, not notarized)
+        run: python3 scripts/package-macos.py --version 0.0.0-ci --commit "$GITHUB_SHA" --output "$RUNNER_TEMP/homing-macos"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: homing-macos-native-ci
+          path: |
+            ${{ runner.temp }}/homing-macos/*.zip
+            ${{ runner.temp }}/homing-macos/BUILD-INFO.json
+            ${{ runner.temp }}/homing-macos/SHA256SUMS
+          if-no-files-found: error
