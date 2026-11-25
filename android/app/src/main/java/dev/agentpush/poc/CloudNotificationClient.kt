@@ -174,6 +174,7 @@ class CloudNotificationClient(
             .put("rid", requestId)
             .put("method", normalizedMethod)
             .put("path", path)
+            .put("accept_encoding", "gzip")
         if (body != null) payload.put("body", body)
 
         val startedAt = System.currentTimeMillis()
@@ -734,7 +735,12 @@ class CloudNotificationClient(
                     ?.takeIf { it.serverUrl == serverUrl }
                     ?.let { pendingRpc.remove(requestId) }
             } ?: return
-            val body = payload.opt("body")?.takeUnless { it == JSONObject.NULL }
+            val body = try {
+                RpcBodyCodec.decode(payload)
+            } catch (error: Exception) {
+                pending.continuation.resumeWithException(CloudRpcException("雲端回應解碼失敗"))
+                return
+            }
             pending.continuation.resume(
                 CloudRpcResult(
                     requestId = requestId,

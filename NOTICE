@@ -1,0 +1,10 @@
+Homing
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+The Android client bundles JetBrains Mono fonts under the SIL Open Font
+License 1.1. The original notice is preserved at:
+android/app/src/main/assets/licenses/JetBrainsMono-OFL.txt
+
+Third-party software remains subject to its own license. Dependency versions
+are recorded in go.mod/go.sum, npm lockfiles, and Android Gradle files.
+This notice does not relicense third-party code or assets.

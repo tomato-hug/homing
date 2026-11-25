@@ -222,6 +222,27 @@ func (c *Connector) runSession(parent context.Context) (bool, error) {
 }
 
 func (c *Connector) readLoop(ctx context.Context, ws *websocket.Conn) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	// Keep reading control frames while an RPC handler or response is slow.
+	// A single worker preserves mutation ordering; its queue is session-scoped
+	// and bounded so reconnects cannot replay an unbounded backlog of work.
+	messages := make(chan map[string]any, 32)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case message := <-messages:
+				if ctx.Err() != nil {
+					return
+				}
+				if err := c.handleMessage(ctx, ws, message); err != nil && ctx.Err() == nil {
+					c.log.Warn("cloud message failed", "err", err)
+				}
+			}
+		}
+	}()
 	for {
 		_, raw, err := ws.Read(ctx)
 		if err != nil {
@@ -230,6 +251,14 @@ func (c *Connector) readLoop(ctx context.Context, ws *websocket.Conn) error {
 		var message map[string]any
 		if err := json.Unmarshal(raw, &message); err != nil {
 			c.log.Warn("relay sent invalid json", "err", err)
+			continue
+		}
+		if stringField(message, "t") == "msg" {
+			select {
+			case messages <- message:
+			default:
+				return errors.New("cloud: incoming RPC queue is full")
+			}
 			continue
 		}
 		if err := c.handleMessage(ctx, ws, message); err != nil {

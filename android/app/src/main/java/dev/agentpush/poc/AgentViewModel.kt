@@ -12,6 +12,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.plus
@@ -67,6 +70,25 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
                 _pendingNavigationSession.value = matched.sessionId
                 showMessage("${matched.brand.displayName} 会话已就绪")
             }
+        }
+        safeScope.launch {
+            // The event bridge is live-only. Catch up after a connection returns,
+            // including native transcript items for the conversation left open.
+            // Keep the last outage in the key: StateFlow can conflate a fast
+            // disconnect/reconnect before the main thread observes either.
+            store.state.map { Triple(it.activeComputerKey, it.connection,
+                it.connectionDiagnostics.lastDisconnectedAt) }
+                .distinctUntilChanged()
+                .drop(1) // The initial refresh above already covers the first state.
+                .collect { (computer, connection, _) ->
+                    if (connection != ConnectionState.CONNECTED) return@collect
+                    val sessionId = liveSessionId
+                    runCatching { store.refreshAll() }
+                    if (sessionId != null && liveSessionId == sessionId &&
+                        store.state.value.activeComputerKey == computer) {
+                        runCatching { store.refreshSessionDetails(sessionId, force = true) }
+                    }
+                }
         }
         safeScope.launch {
             withContext(Dispatchers.IO) {
@@ -698,10 +720,19 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
                 optionId = optionId,
             )
             if (!result.ok) {
-                if (onFallbackText != null) {
+                // A selected ACP option is an exact permission decision. A
+                // stale request or transport failure must not become a new
+                // ordinary message (or silently lose the option's scope).
+                if (onFallbackText != null && optionId.isNullOrBlank()) {
                     onFallbackText()
                 } else {
                     showMessage("授权操作失败：${result.message ?: "请稍后重试"}")
+                    val sessionId = store.state.value.events[eventId]?.sessionId
+                    runCatching { store.refreshAll() }
+                    if (!sessionId.isNullOrBlank()) {
+                        runCatching { store.refreshSessionDetails(sessionId, force = true) }
+                        runCatching { store.refreshReplies(sessionId) }
+                    }
                 }
             } else {
                 showMessage(if (decision == "allow") "已允许" else "已拒绝")

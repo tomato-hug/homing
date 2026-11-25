@@ -49,6 +49,10 @@ class AgentStore private constructor(context: Context) {
     private val draftSaveJobs = mutableMapOf<String, Job>()
     private val itemSaveJobs = mutableMapOf<String, Job>()
     private val outboxMutex = Mutex()
+    private val refreshMutex = Mutex()
+    // A delivered SSE event may be newer than an unfinished page: never use
+    // the visible event map's maximum ID as the bulk synchronization cursor.
+    private val eventSyncCursors = mutableMapOf<String, Long>()
     private val itemPersistenceMutex = Mutex()
     private val phoneItemCache = java.util.concurrent.ConcurrentHashMap<String, SessionItemsState>()
     private val phoneDraftCache = java.util.concurrent.ConcurrentHashMap<String, String>()
@@ -130,15 +134,18 @@ class AgentStore private constructor(context: Context) {
         }
     }
 
-    suspend fun refreshAll() {
+    suspend fun refreshAll() = refreshMutex.withLock { refreshAllLocked() }
+
+    private suspend fun refreshAllLocked() {
         localCacheReady.await()
         _state.update { it.copy(isRefreshing = true, error = null) }
         val settings = _state.value.settings
         val scope = _state.value.activeComputerKey
         val generation = computerGeneration.get()
+        val since = synchronized(this) { eventSyncCursors[scope] ?: 0L }
         try {
             val bundle = coroutineScope {
-                val events = async { AgentApi.fetchEvents(settings) }
+                val events = async { AgentApi.fetchEventPage(settings, since) }
                 val sessions = async {
                     runCatching { AgentApi.fetchSessions(settings) }.fold(
                         onSuccess = { SessionFetch(it, true, null) },
@@ -184,7 +191,8 @@ class AgentStore private constructor(context: Context) {
             }
             synchronized(this) {
                 if (_state.value.activeComputerKey != scope || computerGeneration.get() != generation) return
-                mergeEvents(bundle.events)
+                mergeEvents(bundle.events.events)
+                eventSyncCursors[scope] = bundle.events.nextSince
                 mergeSessionMeta(
                     sessions = (bundle.sessions.items + bundle.inbox.sessions)
                         .distinctBy { it.sessionId },
@@ -210,6 +218,19 @@ class AgentStore private constructor(context: Context) {
             persistLocalSnapshot()
             scheduleAggregatedHomeRefresh()
             backgroundScope.launch { flushOutbox() }
+            // Display the first bundle immediately, then catch up in bounded
+            // requests. Each successfully merged page can be retried safely.
+            var page = bundle.events
+            while (page.hasMore) {
+                if (_state.value.activeComputerKey != scope || computerGeneration.get() != generation) return
+                page = AgentApi.fetchEventPage(settings, page.nextSince)
+                synchronized(this) {
+                    if (_state.value.activeComputerKey != scope || computerGeneration.get() != generation) return
+                    mergeEvents(page.events)
+                    eventSyncCursors[scope] = page.nextSince
+                }
+                persistLocalSnapshot()
+            }
         } catch (error: Exception) {
             if (_state.value.activeComputerKey != scope || computerGeneration.get() != generation) return
             _state.update {
@@ -871,21 +892,23 @@ class AgentStore private constructor(context: Context) {
 
     fun refreshCloudComputers() {
         cloudLink.refreshComputers()
+        computerStore.active()?.deviceId?.let(::activateComputer)
         invalidateTransportRoute()
     }
 
     @Synchronized fun activateComputer(deviceId: String) {
         if (deviceId.isBlank()) return
-        val activeId = computerStore.active()?.deviceId.orEmpty()
-        if (deviceId == activeId) return
+        if (deviceId == _state.value.activeComputerKey) return
         if (computerStore.load().none { it.deviceId == deviceId }) return
         rememberPhoneState(_state.value)
         computerGeneration.incrementAndGet()
+        eventSyncCursors.remove(deviceId)
         computerStore.select(deviceId)
         cloudLink.selectComputer(deviceId)
         _state.update { it.copy(activeComputerKey = deviceId, sessionMeta = emptyMap(), events = emptyMap(),
             replies = emptyMap(), sessionItems = emptyMap(), transcriptCache = emptyMap(),
-            sessionDrafts = emptyMap(), dispatches = emptyMap(), inbox = null, isRefreshing = false) }
+            sessionDrafts = emptyMap(), dispatches = emptyMap(), inbox = null, home = null,
+            projects = emptyList(), isRefreshing = false) }
         transportRouter.invalidate()
     }
 
@@ -2203,7 +2226,7 @@ class AgentStore private constructor(context: Context) {
 }
 
 private data class RefreshBundle(
-    val events: List<AgentEvent>,
+    val events: EventPage,
     val sessions: SessionFetch,
     val projects: List<ProjectInfo>,
     val away: Boolean,

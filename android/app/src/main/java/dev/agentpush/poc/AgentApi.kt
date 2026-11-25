@@ -57,6 +57,8 @@ data class CommandResult(
     val message: String? = null,
 )
 
+data class EventPage(val events: List<AgentEvent>, val nextSince: Long, val hasMore: Boolean)
+
 object AgentApi {
     @Volatile
     private var transportRouter: TransportRouter? = null
@@ -83,6 +85,28 @@ object AgentApi {
     suspend fun fetchEvents(settings: AppSettings, since: Long = 0L): List<AgentEvent> =
         withContext(Dispatchers.IO) {
             fetchEventsBlocking(settings, since)
+        }
+
+    suspend fun fetchEventPage(settings: AppSettings, since: Long = 0L): EventPage =
+        withContext(Dispatchers.IO) {
+            val root = JSONTokener(requestText(settings, "/api/events?since=$since&limit=32", "GET")).nextValue()
+            val array = when (root) {
+                is JSONArray -> root // Older hosts keep their original array contract.
+                is JSONObject -> root.getJSONArray("events")
+                else -> error("事件同步回應格式錯誤")
+            }
+            val events = buildList {
+                for (index in 0 until array.length()) {
+                    val event = AgentEvent.fromJson(array.getJSONObject(index))
+                    require(event.id > since) { "事件同步游標未前進" }
+                    add(event)
+                }
+            }
+            val tail = events.maxOfOrNull { it.id } ?: since
+            val next = (root as? JSONObject)?.getLong("next_since") ?: tail
+            val more = (root as? JSONObject)?.getBoolean("has_more") ?: false
+            require(next == tail && (!more || next > since)) { "事件同步游標不一致" }
+            EventPage(events, next, more)
         }
 
     suspend fun fetchSessions(
@@ -418,7 +442,7 @@ object AgentApi {
         SessionItemsResult(
             items = normalizeSessionItems(items),
             turns = turns,
-            reason = (root as? JSONObject)?.optString("reason")
+            reason = (root as? JSONObject)?.stringOrBlank("reason")
                 ?.takeIf { it.isNotBlank() },
             available = true,
             history = if (anchorEventId != null && root is JSONObject) SessionHistoryState(
@@ -510,7 +534,7 @@ object AgentApi {
                 ?: JSONArray()
             else -> JSONArray()
         }
-        val reason = (root as? JSONObject)?.optString("reason")
+        val reason = (root as? JSONObject)?.stringOrBlank("reason")
             ?.takeIf { it.isNotBlank() }
         TranscriptPage(
             messages = buildList {

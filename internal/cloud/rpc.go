@@ -2,6 +2,7 @@ package cloud
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
@@ -17,18 +18,21 @@ import (
 
 // rpcRequest is the decrypted payload a client sends to run a local /api call.
 type rpcRequest struct {
-	Type   string          `json:"type"`
-	RID    string          `json:"rid"`
-	Method string          `json:"method"`
-	Path   string          `json:"path"`
-	Body   json.RawMessage `json:"body"`
+	Type           string          `json:"type"`
+	RID            string          `json:"rid"`
+	Method         string          `json:"method"`
+	Path           string          `json:"path"`
+	Body           json.RawMessage `json:"body"`
+	AcceptEncoding string          `json:"accept_encoding,omitempty"`
 }
 
 type rpcResult struct {
-	Type   string `json:"type"`
-	RID    string `json:"rid"`
-	Status int    `json:"status"`
-	Body   any    `json:"body"`
+	Type         string `json:"type"`
+	RID          string `json:"rid"`
+	Status       int    `json:"status"`
+	Body         any    `json:"body"`
+	BodyEncoding string `json:"body_encoding,omitempty"`
+	BodyBase64   string `json:"body_base64,omitempty"`
 }
 
 type eventPayload struct {
@@ -118,12 +122,29 @@ func dispatchRPC(ctx context.Context, handler http.Handler, payload []byte) []by
 	if err := json.Unmarshal(recorder.Body.Bytes(), &decoded); err != nil {
 		decoded = recorder.Body.String()
 	}
-	return mustJSON(rpcResult{
+	result := rpcResult{
 		Type:   "rpc_result",
 		RID:    request.RID,
 		Status: recorder.Code,
 		Body:   decoded,
-	})
+	}
+	// Compress only when the client explicitly opts in. Encryption still wraps
+	// the entire result; the relay never sees API paths or response contents.
+	if request.AcceptEncoding == "gzip" {
+		body := mustJSON(decoded)
+		if len(body) >= 4096 && len(body) <= 8*1024*1024 {
+			var compressed bytes.Buffer
+			writer := gzip.NewWriter(&compressed)
+			_, writeErr := writer.Write(body)
+			closeErr := writer.Close()
+			if writeErr == nil && closeErr == nil && base64.StdEncoding.EncodedLen(compressed.Len())+128 < len(body) {
+				result.Body = nil
+				result.BodyEncoding = "gzip+base64"
+				result.BodyBase64 = base64.StdEncoding.EncodeToString(compressed.Bytes())
+			}
+		}
+	}
+	return mustJSON(result)
 }
 
 func rpcRequestBody(

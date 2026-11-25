@@ -81,6 +81,39 @@ func (d *Deps) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, decorateEvent(event))
 	}
+	// Existing desktop clients keep the array response. Phones opt into bounded
+	// pages so a large notification log cannot monopolize an encrypted RPC.
+	if rawLimit := r.URL.Query().Get("limit"); rawLimit != "" {
+		limit, err := strconv.Atoi(rawLimit)
+		if err != nil || limit < 1 || limit > 100 {
+			WriteJSON(w, http.StatusBadRequest, map[string]any{"error": "limit must be between 1 and 100"})
+			return
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+		count, size := 0, 0
+		for _, event := range out {
+			encoded, err := json.Marshal(event)
+			if err != nil {
+				WriteJSON(w, http.StatusInternalServerError, map[string]any{"error": "cannot encode event"})
+				return
+			}
+			// A single unusually large event remains intact and advances the
+			// cursor; never silently discard or truncate message content.
+			if count >= limit || (count > 0 && size+len(encoded)+1 > 64*1024) {
+				break
+			}
+			count++
+			size += len(encoded) + 1
+		}
+		next := since
+		if count > 0 {
+			next = out[count-1].ID
+		}
+		WriteJSON(w, http.StatusOK, map[string]any{
+			"events": out[:count], "next_since": next, "has_more": count < len(out),
+		})
+		return
+	}
 	WriteJSON(w, http.StatusOK, out)
 }
 

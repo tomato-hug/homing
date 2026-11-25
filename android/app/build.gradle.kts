@@ -31,8 +31,8 @@ android {
         applicationId = "dev.agentpush.poc"
         minSdk = 26
         targetSdk = 35
-        versionCode = 17
-        versionName = "0.11.5-dev"
+        versionCode = 18
+        versionName = "0.11.5-beta.1"
 
         buildConfigField(
             "String",
@@ -165,6 +165,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
     testImplementation("org.json:json:20240303")
     testImplementation(platform("androidx.compose:compose-bom:2025.09.01"))
     testImplementation("androidx.compose.ui:ui-test-junit4")

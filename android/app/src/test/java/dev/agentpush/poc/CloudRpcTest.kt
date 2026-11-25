@@ -29,6 +29,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.ByteArrayOutputStream
 import java.util.Base64
+import java.util.zip.GZIPOutputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
@@ -162,7 +163,7 @@ class CloudRpcTest {
     }
 
     @Test
-    fun encryptedAgentsRpcRoundTrip(): Unit = runBlocking {
+    fun encryptedCompressedAgentsRpcRoundTrip(): Unit = runBlocking {
         val server = MockWebServer()
         val serverSocket = AtomicReference<WebSocket>()
         val connected = CountDownLatch(1)
@@ -210,6 +211,7 @@ class CloudRpcTest {
                                 assertEquals("rpc", payload.getString("type"))
                                 assertEquals("GET", payload.getString("method"))
                                 assertEquals("/api/agents", payload.getString("path"))
+                                assertEquals("gzip", payload.getString("accept_encoding"))
                                 assertTrue(payload.getString("rid").isNotBlank())
                                 requestReceived.countDown()
 
@@ -231,7 +233,12 @@ class CloudRpcTest {
                                         .put("type", "rpc_result")
                                         .put("rid", payload.getString("rid"))
                                         .put("status", 200)
-                                        .put("body", body)
+                                        .put("body_encoding", "gzip+base64")
+                                        .put("body_base64", Base64.getEncoder().encodeToString(
+                                            ByteArrayOutputStream().also { output ->
+                                                GZIPOutputStream(output).use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+                                            }.toByteArray(),
+                                        ))
                                         .toString(),
                                     sender = hostKeys,
                                     recipientPublicKey = clientKeys.publicKey,
