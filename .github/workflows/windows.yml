@@ -1,0 +1,56 @@
+name: Windows native
+
+on:
+  push:
+    branches: [main, homing-v3]
+    paths:
+      - 'cmd/homing/**'
+      - 'internal/**'
+      - 'build/winres/**'
+      - 'console/**'
+      - 'web/console/**'
+      - 'go.*'
+      - 'scripts/package-windows.py'
+      - 'scripts/install.ps1'
+      - 'scripts/build-console.sh'
+      - '.github/workflows/windows.yml'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+      - run: npm ci --prefix console
+      - name: Native tests and build
+        shell: bash
+        run: |
+          go test ./cmd/homing ./internal/gui ./internal/platform ./internal/api
+          go build ./...
+      - name: Package Windows amd64 & arm64 bundles
+        shell: bash
+        run: |
+          python scripts/package-windows.py --version 0.0.0-ci --arch amd64 --commit "$GITHUB_SHA" --output "$RUNNER_TEMP/homing-windows"
+          python scripts/package-windows.py --version 0.0.0-ci --arch arm64 --skip-console-build --commit "$GITHUB_SHA" --output "$RUNNER_TEMP/homing-windows"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: homing-windows-native-ci
+          path: |
+            ${{ runner.temp }}/homing-windows/*.zip
+            ${{ runner.temp }}/homing-windows/*.exe
+            ${{ runner.temp }}/homing-windows/BUILD-INFO*.json
+            ${{ runner.temp }}/homing-windows/SHA256SUMS*
+          if-no-files-found: error

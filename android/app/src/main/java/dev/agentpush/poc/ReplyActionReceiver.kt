@@ -13,7 +13,9 @@ class ReplyActionReceiver : BroadcastReceiver() {
         val action = intent.action ?: return
         if (action != NotificationHelper.ACTION_REPLY &&
             action != NotificationHelper.ACTION_READ &&
-            action != NotificationHelper.ACTION_FORWARD
+            action != NotificationHelper.ACTION_FORWARD &&
+            action != NotificationHelper.ACTION_APPROVE &&
+            action != NotificationHelper.ACTION_DENY
         ) {
             return
         }
@@ -40,7 +42,37 @@ class ReplyActionReceiver : BroadcastReceiver() {
         executor.execute {
             try {
                 runBlocking {
-                    if (action == NotificationHelper.ACTION_FORWARD) {
+                    if (action == NotificationHelper.ACTION_APPROVE ||
+                        action == NotificationHelper.ACTION_DENY
+                    ) {
+                        val decision = if (action == NotificationHelper.ACTION_APPROVE) "allow" else "deny"
+                        val ok = if (eventId > 0) {
+                            runCatching {
+                                AgentApi.decideApproval(
+                                    store.state.value.settings,
+                                    eventId,
+                                    decision,
+                                ).ok
+                            }.getOrDefault(false)
+                        } else {
+                            false
+                        }
+                        if (ok) {
+                            runCatching { store.refreshAll() }
+                        }
+                        NotificationHelper.updateReplyFallback(
+                            applicationContext,
+                            notificationId,
+                            sessionId,
+                            title,
+                            ok,
+                            if (ok) {
+                                if (decision == "allow") "已允许" else "已拒绝"
+                            } else {
+                                "处理授权失败，请打开应用查看"
+                            },
+                        )
+                    } else if (action == NotificationHelper.ACTION_FORWARD) {
                         val dispatchId = intent.getStringExtra(
                             NotificationHelper.EXTRA_DISPATCH_ID,
                         ).orEmpty()
@@ -52,7 +84,7 @@ class ReplyActionReceiver : BroadcastReceiver() {
                             sessionId,
                             title,
                             result.ok,
-                            result.message ?: if (result.ok) "已轉交給父 Agent" else "轉交失敗",
+                            result.message ?: if (result.ok) "已转交给父 Agent" else "转交失败",
                         )
                     } else if (action == NotificationHelper.ACTION_READ) {
                         val ids = unreadIds.ifEmpty {

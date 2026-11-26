@@ -59,6 +59,11 @@ Agent 页的目录改为读 Go 版新增的 `/api/agent-catalog`（安装 / 移�
 
 `POST /api/replies/{id}/cancel` 也是 Go 新增的后相容路由：只撤回仍在 Agent 記憶體佇列中的回覆，已開始執行的回合要走 `/stop`。目前由 Codex 實作 `agent.QueuedReplyCanceller`；不支援的 Agent 回 `409 reply_cancel_unsupported`，不會假裝成功。`replies.jsonl` 仍維持 append-only，撤回會追加一筆 `status: "cancelled"`。
 
+`GET /api/devices` 現在合併 `devices.json`（舊設備令牌）與 `cloud/peers.json`（端到端配對）。
+新增 `transport: "token" | "e2e"`；端到端項目的 `paired_via` 是 `e2e`，可在同一個
+`DELETE /api/devices/{id}` 移除。端到端配對沒有舊式 read/reply/drive scopes，控制台
+不會顯示可切換的權限按鈕；嘗試 PATCH scopes 會回 400，而不是假裝保存。
+
 Go 版另有本地歷史層：事件、回覆、調度與離開時段先寫 JSONL，再寫 `history.db`。JSONL 仍是相容／匯出格式，啟動時 replay 進 SQLite；事件已讀標記存 SQLite 的獨立列，重啟或 replay 都不會把已看過的事件改回未讀。資料庫主檔與 WAL/SHM 都是 0600，`homing serve` 收到 SIGINT/SIGTERM 後會先 drain HTTP，再 `Deps.Close()` 讓 SQLite 正常收尾。這層不改變任何 `/api/*` 的 JSON 欄位，所以不在 Node 逐字段對照範圍內。
 
 Go 版另新增：`GET /api/home`（注意力三区）、`GET /api/search`（标题／项目／路径，`scope=content` 时再查最近 300 条正文）、`GET /api/sessions/{id}/commands`、`/export`、`GET /api/fs/complete`。这些是向后兼容的新路由，不影响 Node 对照；旧 Android 对 404 有容错。

@@ -57,7 +57,30 @@ data class CommandResult(
     val message: String? = null,
 )
 
+data class WakeAgentResult(
+    val ok: Boolean,
+    val source: String,
+    val displayName: String = "",
+    val wakeMode: String = "",
+    val processRunning: Boolean = false,
+    val activeOnline: Boolean = true,
+    val message: String = "",
+)
+
 data class EventPage(val events: List<AgentEvent>, val nextSince: Long, val hasMore: Boolean)
+
+data class MobileBootstrapPayload(
+    val events: EventPage,
+    val sessions: List<SessionMeta>,
+    val sessionsOk: Boolean,
+    val projects: List<ProjectInfo>,
+    val away: Boolean?,
+    val inbox: InboxFeed,
+    val home: HomeFeed?,
+    val dispatches: List<AgentDispatch>,
+    val agentDirectory: AgentDirectory?,
+    val agentCatalog: AgentCatalog?,
+)
 
 object AgentApi {
     @Volatile
@@ -90,24 +113,143 @@ object AgentApi {
     suspend fun fetchEventPage(settings: AppSettings, since: Long = 0L): EventPage =
         withContext(Dispatchers.IO) {
             val root = JSONTokener(requestText(settings, "/api/events?since=$since&limit=32", "GET")).nextValue()
-            val array = when (root) {
-                is JSONArray -> root // Older hosts keep their original array contract.
-                is JSONObject -> root.getJSONArray("events")
-                else -> error("事件同步回應格式錯誤")
-            }
-            val events = buildList {
-                for (index in 0 until array.length()) {
-                    val event = AgentEvent.fromJson(array.getJSONObject(index))
-                    require(event.id > since) { "事件同步游標未前進" }
-                    add(event)
-                }
-            }
-            val tail = events.maxOfOrNull { it.id } ?: since
-            val next = (root as? JSONObject)?.getLong("next_since") ?: tail
-            val more = (root as? JSONObject)?.getBoolean("has_more") ?: false
-            require(next == tail && (!more || next > since)) { "事件同步游標不一致" }
-            EventPage(events, next, more)
+            parseEventPageNode(root, since)
         }
+
+    private fun parseEventPageNode(root: Any?, since: Long): EventPage {
+        val array = when (root) {
+            is JSONArray -> root // Older hosts keep their original array contract.
+            is JSONObject -> root.getJSONArray("events")
+            else -> error("事件同步响应格式错误")
+        }
+        val events = buildList {
+            for (index in 0 until array.length()) {
+                val event = AgentEvent.fromJson(array.getJSONObject(index))
+                require(event.id > since) { "事件同步游标未前进" }
+                add(event)
+            }
+        }
+        val tail = events.maxOfOrNull { it.id } ?: since
+        val next = (root as? JSONObject)?.getLong("next_since") ?: tail
+        val more = (root as? JSONObject)?.getBoolean("has_more") ?: false
+        require(next == tail && (!more || next > since)) { "事件同步游标不一致" }
+        return EventPage(events, next, more)
+    }
+
+    suspend fun fetchMobileBootstrap(
+        settings: AppSettings,
+        since: Long = 0L,
+        sessionLimit: Int = 120,
+        includeMeta: Boolean = false,
+    ): MobileBootstrapPayload? = withContext(Dispatchers.IO) {
+        val path = "/api/mobile/bootstrap?since=$since" +
+            "&session_limit=${sessionLimit.coerceIn(1, 500)}" +
+            "&include_meta=${if (includeMeta) 1 else 0}"
+        val body = try {
+            requestText(settings, path, "GET")
+        } catch (error: AgentApiException) {
+            if (error.statusCode in setOf(404, 405, 501)) return@withContext null
+            throw error
+        }
+        val root = JSONTokener(body).nextValue() as? JSONObject ?: return@withContext null
+        val eventsNode = root.opt("events") ?: return@withContext null
+        val eventsPage = parseEventPageNode(eventsNode, since)
+
+        val sessionsNode = root.opt("sessions")
+        val sessionsArray = when (sessionsNode) {
+            is JSONArray -> sessionsNode
+            is JSONObject -> sessionsNode.optJSONArray("sessions")
+                ?: sessionsNode.optJSONArray("items")
+                ?: JSONArray()
+            else -> JSONArray()
+        }
+        val sessions = buildList {
+            for (index in 0 until sessionsArray.length()) {
+                val item = sessionsArray.optJSONObject(index) ?: continue
+                val meta = SessionMeta.fromJson(item)
+                if (meta.sessionId.isNotBlank()) add(meta)
+            }
+        }
+        val sessionsOk = root.optBoolean("sessions_ok", sessionsNode != null)
+
+        val projectsNode = root.opt("projects")
+        val projectsArray = when (projectsNode) {
+            is JSONArray -> projectsNode
+            is JSONObject -> projectsNode.optJSONArray("projects") ?: JSONArray()
+            else -> JSONArray()
+        }
+        val projects = buildList {
+            for (index in 0 until projectsArray.length()) {
+                val item = projectsArray.optJSONObject(index) ?: continue
+                val project = ProjectInfo.fromJson(item)
+                if (project.cwd.isNotBlank()) add(project)
+            }
+        }
+
+        val away = root.optJSONObject("away")?.optBoolean("enabled", false)
+
+        val inbox = root.optJSONObject("inbox")?.let { inboxObj ->
+            val waiting = parseInboxEntries(inboxObj.optJSONArray("waiting"))
+            val running = parseInboxEntries(inboxObj.optJSONArray("running"))
+            val recentDone = parseInboxEntries(inboxObj.optJSONArray("recent_done"))
+            val counts = inboxObj.optJSONObject("counts")
+            InboxFeed(
+                waiting = waiting,
+                running = running,
+                recentDone = recentDone,
+                waitingCount = counts?.optInt("waiting", waiting.size) ?: waiting.size,
+                runningCount = counts?.optInt("running", running.size) ?: running.size,
+                generatedAt = inboxObj.stringOrBlank("generated_at"),
+                available = true,
+            )
+        } ?: InboxFeed(available = false)
+
+        val home = root.optJSONObject("home")?.let { homeObj ->
+            runCatching { HomeFeed.fromJson(homeObj) }.getOrNull()
+        }
+
+        val dispatchesNode = root.opt("dispatches")
+        val dispatchesArray = when (dispatchesNode) {
+            is JSONArray -> dispatchesNode
+            is JSONObject -> dispatchesNode.optJSONArray("dispatches") ?: JSONArray()
+            else -> JSONArray()
+        }
+        val dispatches = buildList {
+            for (index in 0 until dispatchesArray.length()) {
+                val item = dispatchesArray.optJSONObject(index) ?: continue
+                val dispatch = AgentDispatch.fromJson(item)
+                if (dispatch.id.isNotBlank()) add(dispatch)
+            }
+        }
+
+        val directory = if (includeMeta && root.has("agents")) {
+            root.opt("agents")?.toString()?.let { raw ->
+                runCatching { parseAgentDirectory(raw) }.getOrNull()
+            }
+        } else {
+            null
+        }
+        val catalog = if (includeMeta) {
+            root.optJSONObject("agent_catalog")?.let { catObj ->
+                runCatching { AgentCatalog.fromJson(catObj) }.getOrNull()
+            }
+        } else {
+            null
+        }
+
+        MobileBootstrapPayload(
+            events = eventsPage,
+            sessions = sessions,
+            sessionsOk = sessionsOk,
+            projects = projects,
+            away = away,
+            inbox = inbox,
+            home = home,
+            dispatches = dispatches,
+            agentDirectory = directory,
+            agentCatalog = catalog,
+        )
+    }
 
     suspend fun fetchSessions(
         settings: AppSettings,
@@ -331,6 +473,61 @@ object AgentApi {
             throw IOException(message.ifBlank { "接入操作失败" })
         }
         AgentActionResult(ok = true, message = message)
+    }
+
+    suspend fun readProjectFile(
+        settings: AppSettings,
+        path: String,
+        cwd: String,
+    ): dev.agentpush.poc.ui.RemoteTextFile = withContext(Dispatchers.IO) {
+        val query = buildString {
+            append("path=").append(URLEncoder.encode(path, Charsets.UTF_8.name()))
+            if (cwd.isNotBlank()) append("&cwd=").append(URLEncoder.encode(cwd, Charsets.UTF_8.name()))
+        }
+        val body = requestText(settings, "/api/fs/read?$query", "GET", readTimeoutMs = 25_000)
+        val json = runCatching { JSONObject(body) }.getOrNull()
+            ?: throw IOException("电脑返回了无法识别的文件内容")
+        dev.agentpush.poc.ui.RemoteTextFile(
+            path = json.stringOrBlank("path").ifBlank { path },
+            name = json.stringOrBlank("name").ifBlank { path.substringAfterLast('/') },
+            content = json.optString("content"),
+            language = json.stringOrBlank("language"),
+            line = json.optInt("line", 0),
+            truncated = json.optBoolean("truncated", false),
+            size = json.optLong("size", 0L),
+        )
+    }
+
+    suspend fun wakeAgent(
+        settings: AppSettings,
+        agentId: String,
+    ): WakeAgentResult = withContext(Dispatchers.IO) {
+        val cleanId = agentId.trim().lowercase()
+        val encoded = URLEncoder.encode(cleanId, Charsets.UTF_8.name())
+        val body = requestText(
+            settings = settings,
+            path = "/api/agents/$encoded/wake",
+            method = "POST",
+            body = "{}",
+            readTimeoutMs = 15_000,
+        )
+        val json = runCatching { JSONObject(body) }.getOrNull()
+            ?: throw IOException("Mac 返回了无法识别的唤醒响应")
+        val ok = json.optBoolean("ok", true)
+        val message = json.stringOrBlank("message")
+            .ifBlank { json.stringOrBlank("error") }
+        if (!ok) {
+            throw IOException(message.ifBlank { "唤醒 Agent 失败" })
+        }
+        WakeAgentResult(
+            ok = true,
+            source = json.stringOrBlank("source").ifBlank { cleanId },
+            displayName = json.stringOrBlank("display_name"),
+            wakeMode = json.stringOrBlank("wake_mode"),
+            processRunning = json.optBoolean("process_running", false),
+            activeOnline = json.optBoolean("active_online", true),
+            message = message,
+        )
     }
 
     suspend fun searchSessions(
@@ -864,7 +1061,7 @@ object AgentApi {
             router.ensureRoute()
             if (router.kind.value == TransportKind.CLOUD) {
                 if (file.length() > CLOUD_FILE_LIMIT_BYTES) {
-                    throw CloudRpcException("單文件上限 20 MB")
+                    throw CloudRpcException("单文件上限 20 MB")
                 }
                 val bytes = file.readBytes()
                 val json = router.upload("/api/upload?$query", bytes, name)
@@ -1101,11 +1298,56 @@ object AgentApi {
         }
     }
 
+    const val CLOUD_ATTACHMENT_ORIGIN = "https://homing.local"
+
     fun attachmentUrl(settings: AppSettings, attachment: Attachment): String {
         if (attachment.url.startsWith("http://") || attachment.url.startsWith("https://")) {
             return attachment.url
         }
-        return "${settings.baseUrl.trimEnd('/')}/${attachment.url.trimStart('/')}"
+        val base = settings.baseUrl.trimEnd('/').ifBlank { CLOUD_ATTACHMENT_ORIGIN }
+        return "$base/${attachment.url.trimStart('/')}"
+    }
+
+    fun shouldRouteViaCloudTransport(url: String): Boolean {
+        val router = transportRouter ?: return false
+        if (url.startsWith(CLOUD_ATTACHMENT_ORIGIN)) return true
+        if (router.kind.value != TransportKind.CLOUD) return false
+        val path = runCatching { URL(url).path }.getOrDefault("")
+        return path.startsWith("/f/")
+    }
+
+    suspend fun downloadAttachmentBytes(
+        settings: AppSettings,
+        attachment: Attachment,
+    ): ByteArray = withContext(Dispatchers.IO) {
+        val url = attachmentUrl(settings, attachment)
+        val router = transportRouter
+        if (router != null) {
+            router.ensureRoute()
+            if (router.kind.value == TransportKind.CLOUD || url.startsWith(CLOUD_ATTACHMENT_ORIGIN)) {
+                return@withContext router.download(url)
+            }
+        }
+        val connection = URL(url).openConnection() as HttpURLConnection
+        try {
+            connection.connectTimeout = 10_000
+            connection.readTimeout = 90_000
+            connection.instanceFollowRedirects = true
+            connection.setRequestProperty("Accept", "*/*")
+            val code = connection.responseCode
+            if (code !in 200..299) {
+                throw IOException("下载失败 HTTP $code")
+            }
+            connection.inputStream.use { it.readBytes() }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    suspend fun downloadUrlViaCloudTransport(url: String): ByteArray {
+        val router = transportRouter ?: throw IOException("未连接电脑传输通道")
+        router.ensureRoute()
+        return router.download(url)
     }
 
     fun proxyUrl(
@@ -1297,6 +1539,16 @@ internal fun parseAgentDirectory(body: String): AgentDirectory {
             icon = json.stringOrBlank("icon"),
             available = json.optBoolean("available", false),
             installed = json.optBoolean("installed", false),
+            processRunning = json.optBoolean("process_running", false),
+            activeOnline = json.optBoolean(
+                "active_online",
+                json.optBoolean("process_running", false),
+            ),
+            canWake = json.optBoolean(
+                "can_wake",
+                json.optBoolean("installed", false),
+            ),
+            wakeMode = json.stringOrBlank("wake_mode"),
             capabilities = AgentCapabilities.fromJson(
                 json.optJSONObject("capabilities"),
             ),

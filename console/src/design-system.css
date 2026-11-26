@@ -1,0 +1,622 @@
+/* ============================================================================
+   Homing Design System Refinement Layer (Plan B)
+   - Bundled JetBrains Mono (SIL OFL 1.1)
+   - Strict 6-step readable type floor (>=12px metadata, 14px prose at 1280-1440px)
+   - WCAG AA contrast uplift (#475569 / #64748b -> #94a3b8 / #cbd5e1)
+   - Airbus Dark Cockpit semantic status separation (--run sky blue vs --amber)
+   - Unified non-blocking <dialog>, Undo toast, Markdown tables/copy, Rooms R2
+   ============================================================================ */
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("./assets/fonts/jetbrains_mono_regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("./assets/fonts/jetbrains_mono_medium.ttf") format("truetype");
+  font-weight: 500 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --run: #38bdf8;
+  --run-soft: rgba(56, 189, 248, 0.14);
+  --run-border: rgba(56, 189, 248, 0.36);
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 14px;
+  --text-md: 16px;
+  --text-lg: 20px;
+  --text-xl: 24px;
+}
+
+/* ---------------------------------------------------------------- Dark Cockpit Status Colors */
+
+.dot-run {
+  background: var(--run);
+  box-shadow: 0 0 0 3px var(--run-soft);
+}
+
+.tag-run {
+  background: var(--run-soft);
+  border-color: var(--run-border);
+  color: #7dd3fc;
+}
+
+/* ---------------------------------------------------------------- Typography Floor & Contrast Uplift */
+
+.nav-label {
+  font-size: 11.5px;
+  color: #94a3b8;
+  font-weight: 600;
+}
+
+.nav-item {
+  font-size: 13.5px;
+  height: 34px;
+}
+
+.nav-sub .nav-item {
+  font-size: 13px;
+  height: 30px;
+  color: #cbd5e1;
+}
+
+.brand-ver,
+.sidebar-status,
+.sidebar-status .mono,
+.lrow-time,
+.note,
+.page-intro {
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+
+/* Eliminate microscopic 7.5px - 10.5px rules across workbench & management views */
+.session-row-title {
+  font-size: 13px !important;
+  line-height: 1.4 !important;
+}
+
+.session-row-sub,
+.session-row-time,
+.content-search-hit-meta,
+.transcript-who .mono,
+.composer-hint,
+.session-drawer-usage-foot,
+.session-drawer-path code,
+.collab-card-head .mono,
+.agent-capability-level,
+.agent-capability-label,
+.agent-fact-label,
+.integration-state,
+.eyebrow,
+.library-kind,
+.count,
+.home-card-kicker .pill,
+.home-running-main span,
+.collab-lane-bar-label,
+.preview-select,
+.preview-check,
+.composer-config-select {
+  font-size: var(--text-xs) !important;
+}
+
+/* Lift low-contrast #475569 / #64748b text to WCAG AA on dark surfaces */
+.session-row-time,
+.session-row-sub,
+.transcript-who .mono,
+.composer-hint,
+.content-search-hit-meta,
+.agent-fact-label,
+.crumbs .sep {
+  color: var(--muted) !important;
+}
+
+/* Readable prose & code even in default 1320px Wails & 1280px/1440px laptop viewports */
+.transcript .md,
+.room-message-text.md,
+.room-minutes.md {
+  font-size: var(--text-base) !important;
+  line-height: 1.65 !important;
+  color: var(--text);
+}
+
+.transcript .md pre code,
+.md-code pre code,
+.room-minutes pre code {
+  font-size: 12.5px !important;
+  line-height: 1.55 !important;
+}
+
+.tool-body,
+.tool-output,
+.diff-body,
+.composer textarea {
+  font-size: 13px !important;
+  line-height: 1.55 !important;
+}
+
+/* Minimum clickable target sizing for icon buttons */
+.composer-attachment .icon-btn,
+.session-new-attachment .icon-btn,
+.session-drawer-path .icon-btn {
+  min-width: 24px;
+  min-height: 24px;
+}
+
+/* ---------------------------------------------------------------- Topbar Language & Auth Controls */
+
+.lang-btn {
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--divider);
+  background: rgba(38, 48, 67, 0.45);
+  color: var(--body);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.lang-btn:hover {
+  background: var(--raised);
+  border-color: var(--stroke);
+  color: var(--text);
+}
+
+.auth-expired-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(248, 113, 113, 0.45);
+  background: rgba(248, 113, 113, 0.12);
+  color: #fecaca;
+  font-size: 12px;
+}
+
+.auth-expired-pill button {
+  border: 0;
+  background: rgba(248, 113, 113, 0.22);
+  color: #fff;
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* ---------------------------------------------------------------- Unified Non-Blocking <dialog> */
+
+.hm-dialog {
+  width: min(500px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  padding: 20px 22px;
+  border-radius: 14px;
+  border: 1px solid var(--stroke);
+  background: var(--card);
+  color: var(--text);
+  box-shadow: 0 24px 64px rgba(2, 6, 23, 0.65);
+}
+
+.hm-dialog::backdrop {
+  background: rgba(2, 6, 23, 0.68);
+  backdrop-filter: blur(2px);
+}
+
+.hm-dialog-head h3 {
+  margin: 0 0 8px;
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.hm-dialog-msg {
+  margin: 0 0 14px;
+  font-size: var(--text-base);
+  color: var(--body);
+  white-space: pre-wrap;
+  line-height: 1.55;
+}
+
+.hm-dialog-detail {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--divider);
+  background: var(--chrome);
+  color: var(--brand);
+  font: 12.5px/1.5 var(--mono);
+  overflow: auto;
+  max-height: 180px;
+}
+
+.hm-dialog-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.hm-dialog-input,
+.hm-dialog-textarea {
+  width: 100%;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--stroke);
+  border-radius: 8px;
+  padding: 9px 12px;
+  font: 13.5px/1.5 var(--sans);
+}
+
+.hm-dialog-textarea {
+  resize: vertical;
+  min-height: 120px;
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.hm-dialog-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* ---------------------------------------------------------------- Toast with Undo Action */
+
+.toast-with-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.toast-action {
+  border: 1px solid rgba(45, 212, 191, 0.45);
+  background: rgba(45, 212, 191, 0.14);
+  color: var(--brand);
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.toast-action:hover {
+  background: rgba(45, 212, 191, 0.24);
+}
+
+/* ---------------------------------------------------------------- Upgraded Markdown (Tables & Code Copy) */
+
+.md-code {
+  border: 1px solid var(--divider);
+  border-radius: 10px;
+  background: var(--chrome);
+  margin: 10px 0;
+  overflow: hidden;
+}
+
+.md-code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: rgba(30, 41, 59, 0.55);
+  border-bottom: 1px solid var(--divider);
+}
+
+.md-code-head .md-code-lang {
+  position: static !important;
+  font-family: var(--mono);
+  font-size: 12px !important;
+  color: var(--muted);
+  text-transform: lowercase;
+}
+
+.md-code-copy {
+  border: 1px solid var(--stroke);
+  background: transparent;
+  color: var(--body);
+  border-radius: 6px;
+  padding: 2px 9px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.md-code-copy:hover {
+  background: var(--raised);
+  color: var(--text);
+}
+
+.md-code-copy.copied {
+  border-color: var(--brand);
+  color: var(--brand);
+}
+
+.md-code pre {
+  margin: 0;
+  padding: 12px 14px;
+  overflow-x: auto;
+}
+
+.md-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  margin: 12px 0;
+  border: 1px solid var(--divider);
+  border-radius: 8px;
+}
+
+.md-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.md-table th,
+.md-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--divider);
+  border-right: 1px solid rgba(30, 41, 59, 0.65);
+  text-align: left;
+  vertical-align: top;
+}
+
+.md-table th:last-child,
+.md-table td:last-child {
+  border-right: 0;
+}
+
+.md-table thead th {
+  background: rgba(30, 41, 59, 0.65);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.md-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.md-hr {
+  border: 0;
+  border-top: 1px solid var(--divider);
+  margin: 14px 0;
+}
+
+.md-task {
+  list-style: none;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-left: -18px;
+}
+
+.md-task-box {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-top: 3px;
+  border-radius: 4px;
+  border: 1px solid var(--stroke);
+  font-size: 11px;
+  flex: none;
+}
+
+.md-task-box.checked {
+  background: rgba(45, 212, 191, 0.18);
+  border-color: var(--brand);
+  color: var(--brand);
+}
+
+/* ---------------------------------------------------------------- Session Workbench Additions */
+
+.session-approval-cmd {
+  margin: 8px 0 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  background: var(--chrome);
+  color: #fde68a;
+  font: 12.5px/1.5 var(--mono);
+  overflow-x: auto;
+  max-height: 180px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.session-approval-more {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--amber);
+}
+
+.session-queued-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.session-queued-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--run-border);
+  background: var(--run-soft);
+  font-size: 13px;
+}
+
+.session-queued-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.session-status-filters {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.session-status-filters button {
+  border: 1px solid var(--divider);
+  background: transparent;
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.session-status-filters button.on {
+  border-color: var(--brand);
+  background: rgba(45, 212, 191, 0.14);
+  color: var(--text);
+}
+
+/* ---------------------------------------------------------------- Overview Inline Setup Banner */
+
+.home-setup-banner {
+  border: 1px solid rgba(45, 212, 191, 0.3);
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(45, 212, 191, 0.08), rgba(27, 35, 54, 0.96));
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+
+.home-setup-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.home-setup-head strong {
+  font-size: 14.5px;
+  color: var(--text);
+}
+
+.home-setup-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ---------------------------------------------------------------- Rooms R2 Action Panel */
+
+.rooms-grid {
+  grid-template-columns: minmax(210px, 0.8fr) minmax(360px, 2fr) minmax(270px, 1.15fr);
+}
+
+.room-minutes-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 14px 0;
+}
+
+.room-actions-panel {
+  border-top: 1px solid var(--divider);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.room-action-card {
+  border: 1px solid var(--divider);
+  border-radius: 10px;
+  background: var(--bg);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.room-action-card.completed {
+  border-color: rgba(45, 212, 191, 0.45);
+}
+
+.room-action-card.failed {
+  border-color: rgba(248, 113, 113, 0.45);
+}
+
+.room-action-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.room-action-result {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--card);
+  border: 1px solid var(--divider);
+  font-size: 12.5px;
+  max-height: 200px;
+  overflow: auto;
+}
+
+/* ---------------------------------------------------------------- Responsive Breakpoint Alignment (761px-820px fix) */
+
+@media (max-width: 820px) {
+  .shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .sidebar {
+    position: static;
+    height: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--divider);
+  }
+  .nav {
+    flex-direction: row;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    gap: 4px;
+    padding: 6px 10px;
+  }
+  .nav-label,
+  .sidebar-status,
+  .brand-ver {
+    display: none;
+  }
+  .sidebar-foot {
+    display: flex;
+    border-top: 0;
+    padding: 0 8px 6px;
+  }
+}
+
+/* ---------------------------------------------------------------- Library Toolbar Clean Wrapping */
+
+.library-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.library-toolbar .library-kinds {
+  flex-wrap: wrap;
+}

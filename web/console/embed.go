@@ -5,7 +5,7 @@ package consoleweb
 
 import "embed"
 
-// Files is the Vite build output: index.html, favicon.svg and assets/.
+// Files is the Vite build output: index.html, favicon.svg, assets/ and sponsor/.
 //
-//go:embed index.html favicon.svg assets
+//go:embed index.html favicon.svg assets sponsor
 var Files embed.FS

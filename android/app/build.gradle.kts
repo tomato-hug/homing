@@ -28,11 +28,21 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "dev.agentpush.poc"
+        applicationId = "dev.homing.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 18
-        versionName = "0.11.5-beta.1"
+        versionCode = 31
+        versionName = "0.11.6-beta.12"
+
+        val enableDirectDonation =
+            providers.environmentVariable("HOMING_ENABLE_DIRECT_DONATION")
+                .orNull
+                ?.lowercase() != "false"
+        buildConfigField(
+            "boolean",
+            "ENABLE_DIRECT_DONATION",
+            enableDirectDonation.toString(),
+        )
 
         buildConfigField(
             "String",
@@ -70,7 +80,8 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             signingConfig = signingConfigs.findByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

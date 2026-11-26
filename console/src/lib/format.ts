@@ -1,4 +1,5 @@
 // 文案与格式化：所有「人话」都在这里，页面只负责摆位。
+import { t, loc } from "../i18n";
 
 export const AGENT_LABELS: Record<string, string> = {
   codex: "Codex",
@@ -95,47 +96,47 @@ export const AGENT_INITIALS: Record<string, string> = {
 };
 
 export const signalLabel = (signal?: string): string => {
-  if (signal === "hook") return "钩子推送";
-  if (signal === "http_events") return "本地事件";
-  if (signal === "watch") return "监听文件";
-  if (signal === "poll") return "轮询读取";
-  return "未知";
+  if (signal === "hook") return t("signal.hook");
+  if (signal === "http_events") return t("signal.http_events");
+  if (signal === "watch") return t("signal.watch");
+  if (signal === "poll") return t("signal.poll");
+  return t("common.unknown");
 };
 
 export const signalHint = (signal?: string): string => {
-  if (signal === "hook") return "agent 主动推送，最及时";
-  if (signal === "http_events") return "本地服务推送";
-  if (signal === "watch") return "盯住会话目录，比轮询快";
-  if (signal === "poll") return "60 秒轮询一次，略有延迟";
+  if (signal === "hook") return t("signal.hook.hint");
+  if (signal === "http_events") return t("signal.http_events.hint");
+  if (signal === "watch") return t("signal.watch.hint");
+  if (signal === "poll") return t("signal.poll.hint");
   return "";
 };
 
 export const statusLabel = (status?: string): { text: string; tone: "ok" | "warn" | "bad" | "mute" } => {
-  if (status === "connected") return { text: "已连接", tone: "ok" };
-  if (status === "pending") return { text: "待连接", tone: "warn" };
-  if (status === "missing") return { text: "未检测到", tone: "mute" };
-  return { text: "未知", tone: "mute" };
+  if (status === "connected") return { text: t("status.connected"), tone: "ok" };
+  if (status === "pending") return { text: t("status.pending"), tone: "warn" };
+  if (status === "missing") return { text: t("status.missing"), tone: "mute" };
+  return { text: t("common.unknown"), tone: "mute" };
 };
 
 export const kindLabel = (kind?: string): { text: string; tone: "ok" | "warn" | "bad" | "mute" } => {
   switch (kind) {
     case "approval":
     case "permission":
-      return { text: "请求授权", tone: "warn" };
+      return { text: t("kind.approval"), tone: "warn" };
     case "needs_reply":
     case "needs_input":
-      return { text: "等你回复", tone: "warn" };
+      return { text: t("kind.needs_reply"), tone: "warn" };
     case "error":
-      return { text: "出错", tone: "bad" };
+      return { text: t("kind.error"), tone: "bad" };
     case "reply":
-      return { text: "回复", tone: "ok" };
+      return { text: t("kind.reply"), tone: "ok" };
     case "done":
     case "stop":
     case "turn_complete":
     case "completed":
-      return { text: "完成", tone: "ok" };
+      return { text: t("kind.done"), tone: "ok" };
     default:
-      return { text: kind || "事件", tone: "mute" };
+      return { text: kind || t("kind.event"), tone: "mute" };
   }
 };
 
@@ -168,15 +169,15 @@ export function timeAgo(iso?: string | null): string {
   const then = new Date(iso).getTime();
   if (Number.isNaN(then)) return "—";
   const diff = Date.now() - then;
-  if (diff < 0) return "刚刚";
+  if (diff < 0) return t("time.justNow");
   const min = Math.floor(diff / 60_000);
-  if (min < 1) return "刚刚";
-  if (min < 60) return `${min} 分钟前`;
+  if (min < 1) return t("time.justNow");
+  if (min < 60) return t("time.minutesAgo", { n: min });
   const hour = Math.floor(min / 60);
-  if (hour < 24) return `${hour} 小时前`;
+  if (hour < 24) return t("time.hoursAgo", { n: hour });
   const day = Math.floor(hour / 24);
-  if (day === 1) return "昨天";
-  if (day < 30) return `${day} 天前`;
+  if (day === 1) return t("time.yesterday");
+  if (day < 30) return t("time.daysAgo", { n: day });
   return dateTimeShort(iso);
 }
 
@@ -193,10 +194,10 @@ export function duration(fromIso?: string | null): string {
 }
 
 export function uptime(seconds: number): string {
-  if (seconds < 60) return `${seconds} 秒`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟`;
-  if (seconds < 86_400) return `${Math.floor(seconds / 3600)} 小时`;
-  return `${Math.floor(seconds / 86_400)} 天`;
+  if (seconds < 60) return t("time.seconds", { n: seconds });
+  if (seconds < 3600) return t("time.minutes", { n: Math.floor(seconds / 60) });
+  if (seconds < 86_400) return t("time.hours", { n: Math.floor(seconds / 3600) });
+  return t("time.days", { n: Math.floor(seconds / 86_400) });
 }
 
 export function projectOf(session?: { project?: string; title?: string; cwd?: string } | null): string {
@@ -218,5 +219,5 @@ export function truncate(text: string, max: number): string {
 }
 
 export function appVersionLabel(version?: string | null): string {
-  return version ? `App ${version}` : "App 版本未知";
+  return version ? `App ${version}` : loc("App 版本未知", "Unknown App version");
 }

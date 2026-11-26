@@ -6,6 +6,8 @@ import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.Network
+import android.net.wifi.WifiManager
+import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.os.SystemClock
@@ -42,6 +44,7 @@ class PushService : Service() {
     private var forcedDisconnectReason: String? = null
 
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
     private var connectivityManager: ConnectivityManager? = null
     private var networkCallbackRegisteredAt = 0L
 
@@ -57,6 +60,7 @@ class PushService : Service() {
             forceReconnect(null)
             ensureCloudClient()
             store.invalidateTransportRoute()
+            CloudLinkManager.get(this@PushService).refreshComputers()
             CloudLinkManager.get(this@PushService).reconnectNow()
         }
 
@@ -68,6 +72,7 @@ class PushService : Service() {
             Log.w(TAG, "Network lost, closing SSE connection")
             store.onConnectionLost(reason)
             store.invalidateTransportRoute()
+            CloudLinkManager.get(this@PushService).refreshComputers()
             updateServiceNotification("等待网络 · $reason")
             forceReconnect(reason)
         }
@@ -82,6 +87,15 @@ class PushService : Service() {
                 "$packageName:agent-push-reconnect",
             )
             .apply { setReferenceCounted(false) }
+        val wifiLockMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+        } else {
+            @Suppress("DEPRECATION")
+            WifiManager.WIFI_MODE_FULL_HIGH_PERF
+        }
+        wifiLock = applicationContext.getSystemService(WifiManager::class.java)
+            ?.createWifiLock(wifiLockMode, "$packageName:agent-push-lan")
+            ?.apply { setReferenceCounted(false) }
         connectivityManager = getSystemService(ConnectivityManager::class.java)
         networkCallbackRegisteredAt = SystemClock.elapsedRealtime()
         runCatching {
@@ -129,11 +143,22 @@ class PushService : Service() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        Log.i(TAG, "Task removed; foreground service remains active")
+        Log.i(TAG, "Task removed; marking workspace for clean reopen while keeping foreground push alive")
+        runCatching {
+            store.markAppClosedForWorkspaceReset()
+            updateServiceNotification("Homing 后台守护中 · 重新打开将清空历史视图")
+        }
         super.onTaskRemoved(rootIntent)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        Log.w(TAG, "Foreground service timeout notified (fgsType=$fgsType, startId=$startId); stopping cleanly")
+        releaseWakeLock()
+        releaseWifiLock()
+        runCatching { stopSelf(startId) }
+    }
 
     override fun onDestroy() {
         running = false
@@ -144,6 +169,7 @@ class PushService : Service() {
         worker = null
         runCatching { connectivityManager?.unregisterNetworkCallback(networkCallback) }
         releaseWakeLock()
+        releaseWifiLock()
         if (store.state.value.connection == ConnectionState.CONNECTED) {
             store.onConnectionLost("服务已停止")
         }
@@ -162,19 +188,25 @@ class PushService : Service() {
             }
             reconnectRequested = false
             forcedDisconnectReason = null
-            acquireWakeLock()
             try {
                 if (store.state.value.transportKind == TransportKind.CLOUD) {
+                    releaseWifiLock()
                     val cloud = CloudLinkManager.get(this)
                     cloud.ensureStarted()
                     if (cloud.connected.value) {
+                        releaseWakeLock()
                         store.onConnectionEstablished()
+                        updateServiceNotification("Homing 后台守护中 · 云端加密实时在线")
                     } else {
+                        acquireWakeLock()
                         store.markConnecting()
+                        updateServiceNotification("Homing 后台重连中 · 等待云端通道")
                     }
                     Thread.sleep(CLOUD_IDLE_POLL_MILLIS)
                     continue
                 }
+                acquireWakeLock()
+                acquireWifiLock()
                 if (settings.token.isBlank()) {
                     throw IOException("Token 不能为空")
                 }
@@ -189,6 +221,7 @@ class PushService : Service() {
                 updateServiceNotification("重连中 · ${reason.take(90)}")
             } finally {
                 releaseWakeLock()
+                releaseWifiLock()
             }
 
             if (!running) {
@@ -334,10 +367,43 @@ class PushService : Service() {
         }
     }
 
+    private fun acquireWifiLock() {
+        val lock = wifiLock ?: return
+        runCatching {
+            if (!lock.isHeld) {
+                lock.acquire()
+                Log.d(TAG, "LAN Wi-Fi lock acquired")
+            }
+        }.onFailure {
+            Log.w(TAG, "Unable to acquire Wi-Fi lock", it)
+        }
+    }
+
+    private fun releaseWifiLock() {
+        val lock = wifiLock ?: return
+        runCatching {
+            if (lock.isHeld) {
+                lock.release()
+                Log.d(TAG, "LAN Wi-Fi lock released")
+            }
+        }
+    }
+
     private fun handleFrame(eventName: String, data: String) {
         val json = runCatching { JSONObject(data) }.getOrNull() ?: return
+        if (eventName == "away") {
+            store.applyLiveEvent("away", json)
+            val enabled = json.optBoolean("enabled", false)
+            updateServiceNotification(
+                if (enabled) "Homing 离席监听开启中" else "Homing 后台待命（离席监听未开启）",
+            )
+            return
+        }
         if (eventName == "notify") {
             NotifyPayload.fromJson(json)?.let { payload ->
+                val textCheck = payload.previewText.ifBlank { payload.summary }
+                if (isIdlePromptNoiseEvent(payload.kind, textCheck)) return
+                if (!store.shouldSurfaceIncomingSession(payload.sessionId)) return
                 runCatching { NotificationHelper.notifyAgentAlert(this, payload) }
                     .onFailure { Log.w(TAG, "Unable to post notify event", it) }
             }
@@ -368,11 +434,11 @@ class PushService : Service() {
         }
 
         val event = AgentEvent.fromJson(json)
-        if (event.id <= 0) {
+        if (event.id <= 0 || isIdlePromptNoiseEvent(event.kind, event.text)) {
             return
         }
         val isNew = store.ingestEvent(event)
-        if (!isNew || !shouldNotify(event.id)) {
+        if (!isNew || !store.shouldSurfaceIncomingSession(event.sessionId) || !shouldNotify(event.id)) {
             return
         }
         val session = store.session(event.sessionKey) ?: return

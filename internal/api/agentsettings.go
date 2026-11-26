@@ -101,7 +101,7 @@ func (d *Deps) handleAgentTestPush(w http.ResponseWriter, r *http.Request) {
 		WriteJSON(w, http.StatusBadRequest, map[string]any{"error": "agent id 不合法"})
 		return
 	}
-	settings := agentconfig.NewStore(d.DataDir).Read(id)
+	settings := agentconfig.NewStore(d.DataDir).Snapshot([]string{id})[id]
 	if !settings.PushToPhone {
 		WriteJSON(w, http.StatusConflict, map[string]any{
 			"ok":    false,

@@ -150,6 +150,33 @@ data class Attachment(
     }
 }
 
+private val CODEBUDDY_WORD_REGEX = Regex("\\bCodeBuddy(\\s+Code)?\\b", RegexOption.IGNORE_CASE)
+
+internal fun isIdlePromptNoiseEvent(kind: String, text: String): Boolean {
+    val cleanKind = kind.trim().lowercase()
+    if (cleanKind !in setOf("needs_input", "waiting_input", "needs_reply", "waiting")) {
+        return false
+    }
+    val cleaned = text.trim().lowercase().trimEnd('.', '!', '。', '！', ' ')
+    if (cleaned.isEmpty()) return false
+    if (cleaned == "waiting for your input") return true
+    val suffix = " is waiting for your input"
+    if (cleaned.endsWith(suffix)) {
+        val prefix = cleaned.removeSuffix(suffix).trim()
+        if (prefix.isNotEmpty() && prefix.split(Regex("\\s+")).size <= 4) {
+            return true
+        }
+    }
+    return false
+}
+
+internal fun normalizeHookSourceBrand(source: String, text: String): String {
+    if (!source.trim().equals("workbuddy", ignoreCase = true) || text.isBlank()) {
+        return text
+    }
+    return CODEBUDDY_WORD_REGEX.replace(text, "WorkBuddy")
+}
+
 data class AgentEvent(
     val id: Long,
     val ts: String,
@@ -246,16 +273,20 @@ data class AgentEvent(
                 addAll(json.optJSONArray("approval_options"))
                 addAll(nestedMeta?.optJSONObject("acp")?.optJSONArray("options"))
             }
+            val parsedKind = json.stringOrBlank("kind").ifBlank { "reply" }
+            val rawTitle = json.stringOrBlank("title")
+            val rawText = json.stringOrBlank("text")
+            val shouldNormalizeBrand = parsedKind in setOf("needs_input", "permission", "needs_reply", "approval")
             return AgentEvent(
                 id = json.optLong("id", 0L),
                 ts = json.stringOrBlank("ts").ifBlank { Instant.now().toString() },
                 source = source,
-                kind = json.stringOrBlank("kind").ifBlank { "reply" },
+                kind = parsedKind,
                 sessionId = sessionId,
                 cwd = cwd,
                 project = project,
-                title = json.stringOrBlank("title"),
-                text = json.stringOrBlank("text"),
+                title = if (shouldNormalizeBrand) normalizeHookSourceBrand(source, rawTitle) else rawTitle,
+                text = if (shouldNormalizeBrand) normalizeHookSourceBrand(source, rawText) else rawText,
                 read = json.optBoolean("read", false),
                 attachments = Attachment.listFromJson(json.optJSONArray("attachments")),
                 sessionMeta = nestedMeta?.let {
@@ -652,6 +683,10 @@ data class AgentProfile(
     val icon: String = "",
     val available: Boolean = false,
     val installed: Boolean = false,
+    val processRunning: Boolean = false,
+    val activeOnline: Boolean = false,
+    val canWake: Boolean = false,
+    val wakeMode: String = "",
     val capabilities: AgentCapabilities = AgentCapabilities(),
     val models: List<AgentModel> = emptyList(),
     val defaultModel: String = "",
@@ -669,7 +704,7 @@ data class AgentProfile(
             )
 
     val label: String
-        get() = displayName.ifBlank { brand.displayName }
+        get() = displayName.ifBlank { defaultAgentDisplayName(source) }
 
     val initial: String
         get() = label.trim().firstOrNull()?.uppercase() ?: brand.initial
@@ -678,6 +713,145 @@ data class AgentProfile(
         get() = models.firstOrNull { it.isDefault }
             ?: models.firstOrNull { it.id == defaultModel }
             ?: models.firstOrNull()
+}
+
+fun defaultAgentDisplayName(source: String): String {
+    return when (source.trim().lowercase()) {
+        "claude", "claude-code" -> "Claude"
+        "codex" -> "Codex"
+        "workbuddy" -> "WorkBuddy"
+        "kimi" -> "Kimi"
+        "opencode" -> "OpenCode"
+        "zcode" -> "ZCode"
+        "cursor" -> "Cursor"
+        "windsurf" -> "Windsurf"
+        "trae" -> "Trae"
+        "zed" -> "Zed"
+        "antigravity" -> "Antigravity"
+        "gemini", "gemini-cli" -> "Gemini CLI"
+        "qwen", "qwen-code" -> "Qwen Code"
+        "copilot-cli", "github-copilot" -> "Copilot CLI"
+        "dsh", "deepseek", "deepseek-harness" -> "DSH"
+        "codebuddy" -> "CodeBuddy"
+        "kiro" -> "Kiro"
+        "openclaw" -> "OpenClaw"
+        "goose" -> "Goose"
+        "roo", "roo-code" -> "Roo Code"
+        "cline" -> "Cline"
+        "amp" -> "Amp"
+        "openhands" -> "OpenHands"
+        "kilo", "kilocode" -> "Kilo Code"
+        "junie" -> "Junie"
+        "minimax", "minimax-design" -> "MiniMax"
+        "warp" -> "Warp"
+        "aider" -> "Aider"
+        "droid" -> "Droid"
+        "crush" -> "Crush"
+        "pi" -> "Pi"
+        "auggie" -> "Auggie"
+        "" -> "Agent"
+        else -> source.trim().replace('-', ' ').replace('_', ' ')
+            .split(' ')
+            .filter { it.isNotBlank() }
+            .joinToString(" ") { word ->
+                word.replaceFirstChar { ch -> ch.uppercase() }
+            }
+            .ifBlank { "Agent" }
+    }
+}
+
+data class MobileWorkspaceUndo(
+    val clearedAtEpochMs: Long,
+    val baselineMaxEventId: Long,
+    val baselineReady: Boolean,
+    val restoredSessionIds: Set<String>,
+    val liveSessionIds: Set<String>,
+    val dismissedSessions: Map<String, PhoneActivity>,
+)
+
+data class MobileWorkspaceState(
+    val clearedAtEpochMs: Long = 0L,
+    val baselineMaxEventId: Long = 0L,
+    val baselineReady: Boolean = true,
+    val restoredSessionIds: Set<String> = emptySet(),
+    val liveSessionIds: Set<String> = emptySet(),
+    val dismissedSessions: Map<String, PhoneActivity> = emptyMap(),
+    val wokenAgentIds: Set<String> = emptySet(),
+    val undo: MobileWorkspaceUndo? = null,
+) {
+    val canUndo: Boolean
+        get() = undo != null
+}
+
+/**
+ * "Online on the Mac" means the agent process is running, the Mac reports it as
+ * active (recently used or woken), or the user explicitly woke it from this phone.
+ * Merely being installed does not count.
+ */
+fun AgentUiState.isAgentActiveOnMac(source: String): Boolean {
+    val key = source.trim().lowercase()
+    if (key.isBlank()) return false
+    if (key in mobileWorkspace.wokenAgentIds) return true
+    val profile = agentDirectory.agents[key] ?: return false
+    return profile.processRunning || profile.activeOnline
+}
+
+/** Groups sessions by the project directory they belong to. */
+data class ProjectSessionGroup(
+    val key: String,
+    val name: String,
+    val cwd: String,
+    val sessions: List<SessionSummary>,
+) {
+    val primary: SessionSummary
+        get() = sessions.first()
+    val urgentCount: Int
+        get() = sessions.count { it.isUrgentForPhone() }
+    val runningCount: Int
+        get() = sessions.count { it.running }
+    val lastTs: String
+        get() = sessions.maxOfOrNull { it.lastTs.ifBlank { "" } }.orEmpty()
+    val sources: List<String>
+        get() = sessions.map { it.source.lowercase() }.filter { it.isNotBlank() }.distinct()
+}
+
+internal fun SessionSummary.isUrgentForPhone(): Boolean {
+    if (archived || isEmpty) return false
+    return status == SessionStatus.NEEDS_PERMISSION ||
+        status == SessionStatus.WAITING_INPUT ||
+        status == SessionStatus.ERROR ||
+        pendingEvent != null
+}
+
+internal fun SessionSummary.projectGroupKey(): String {
+    val dir = cwd.trim().trimEnd('/')
+    if (dir.isNotBlank()) return dir
+    val name = project.trim()
+    return if (name.isNotBlank()) "project:$name" else "project:未命名项目"
+}
+
+internal fun groupSessionsByProject(sessions: List<SessionSummary>): List<ProjectSessionGroup> {
+    return sessions
+        .groupBy { it.projectGroupKey() }
+        .map { (key, list) ->
+            val ordered = list.sortedWith(
+                compareByDescending<SessionSummary> { it.isUrgentForPhone() }
+                    .thenByDescending { it.running }
+                    .thenByDescending { it.lastTs },
+            )
+            val head = ordered.first()
+            ProjectSessionGroup(
+                key = key,
+                name = head.project.ifBlank { projectFromCwd(head.cwd) }.ifBlank { "未命名项目" },
+                cwd = head.cwd,
+                sessions = ordered,
+            )
+        }
+        .sortedWith(
+            compareByDescending<ProjectSessionGroup> { it.urgentCount > 0 }
+                .thenByDescending { it.runningCount > 0 }
+                .thenByDescending { it.lastTs },
+        )
 }
 
 data class AgentDirectory(
@@ -1303,6 +1477,7 @@ data class AwayPeriod(
     val source: String = "manual",
     val deviceId: String = "",
     val clearedAt: String = "",
+    val startedAfterEventId: Long? = null,
 ) {
     val active: Boolean
         get() = endedAt.isBlank()
@@ -1315,6 +1490,7 @@ data class AwayPeriod(
             .put("source", source)
             .put("device_id", deviceId)
             .put("cleared_at", clearedAt.ifBlank { JSONObject.NULL })
+            .put("started_after_event_id", startedAfterEventId ?: JSONObject.NULL)
     }
 
     companion object {
@@ -1322,6 +1498,11 @@ data class AwayPeriod(
             if (json == null) return null
             val id = json.stringOrBlank("id")
             if (id.isBlank()) return null
+            val afterEventId = if (json.has("started_after_event_id") && !json.isNull("started_after_event_id")) {
+                json.optLong("started_after_event_id", -1L).takeIf { it >= 0L }
+            } else {
+                null
+            }
             return AwayPeriod(
                 id = id,
                 startedAt = json.stringOrBlank("started_at"),
@@ -1329,6 +1510,7 @@ data class AwayPeriod(
                 source = json.stringOrBlank("source").ifBlank { "manual" },
                 deviceId = json.stringOrBlank("device_id"),
                 clearedAt = json.stringOrBlank("cleared_at"),
+                startedAfterEventId = afterEventId,
             )
         }
     }
@@ -1619,6 +1801,7 @@ data class AgentUiState(
     val localSessionFlags: Map<String, LocalSessionFlags> = emptyMap(),
     val mobileInbox: MobileInboxMode = MobileInboxMode(),
     val phoneConversations: PhoneConversationState = PhoneConversationState(),
+    val mobileWorkspace: MobileWorkspaceState = MobileWorkspaceState(),
     val activeComputerKey: String = "",
     val inbox: InboxFeed? = null,
     val home: HomeFeed? = null,
@@ -1637,7 +1820,8 @@ data class AgentUiState(
         return keys.distinct().mapNotNull { key ->
             val meta = sessionMeta[key]
             val sessionEvents = grouped[key].orEmpty().filter {
-                meta == null || it.source == meta.source
+                (meta == null || it.source == meta.source) &&
+                    !isIdlePromptNoiseEvent(it.kind, it.text)
             }.sortedBy { it.id }
             val latest = sessionEvents.lastOrNull()
             if (latest == null && meta == null) return@mapNotNull null
@@ -1662,9 +1846,19 @@ data class AgentUiState(
                 sessionId = key,
                 source = source,
             )
-            val status = SessionStatus.fromWire(meta?.status)
-                ?: SessionStatus.fromKind(latest?.kind)
-                ?: SessionStatus.IDLE
+            val wireStatus = SessionStatus.fromWire(meta?.status)
+            val status = when {
+                wireStatus == SessionStatus.WAITING_INPUT &&
+                    isIdlePromptNoiseEvent("needs_input", meta?.lastPreview.orEmpty()) ->
+                    SessionStatus.fromKind(latest?.kind) ?: SessionStatus.COMPLETED
+                wireStatus == SessionStatus.WAITING_INPUT &&
+                    sessionEvents.isNotEmpty() &&
+                    latest?.kind != "needs_input" ->
+                    SessionStatus.fromKind(latest?.kind) ?: SessionStatus.COMPLETED
+                else -> wireStatus
+                    ?: SessionStatus.fromKind(latest?.kind)
+                    ?: SessionStatus.IDLE
+            }
             val itemsState = sessionItems[key]
             val running = (
                 itemsState?.running == true ||

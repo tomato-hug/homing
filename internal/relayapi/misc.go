@@ -16,6 +16,7 @@ import (
 
 	"github.com/tomato-hug/homing/internal/api"
 	"github.com/tomato-hug/homing/internal/awayauto"
+	"github.com/tomato-hug/homing/internal/cloud"
 	filepaths "github.com/tomato-hug/homing/internal/files"
 	"github.com/tomato-hug/homing/internal/platform"
 	"github.com/tomato-hug/homing/internal/store"
@@ -75,7 +76,8 @@ func awayPOST(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 	if !enabled {
 		releaseStopHolds()
 	}
-	payload := map[string]any{"ok": true, "enabled": enabled}
+	keepAwake := platform.KeepAwakeFor(d.DataDir).Sync(enabled)
+	payload := map[string]any{"ok": true, "enabled": enabled, "keep_awake": keepAwake}
 	if okPeriod {
 		payload["period"] = period
 		if enabled {
@@ -84,6 +86,7 @@ func awayPOST(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 			payload["last"] = period
 		}
 	}
+	api.PublishNamed("away", "", payload)
 	api.WriteJSON(w, http.StatusOK, payload)
 }
 
@@ -114,7 +117,7 @@ func awaySettingsPATCH(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 	}
 	if enabled && !autoAwayAvailable() {
 		api.WriteJSON(w, http.StatusConflict, map[string]any{
-			"error": "這個平台尚未提供自動離開探測", "code": "auto_away_unavailable",
+			"error": "当前平台尚未提供自动离开探测", "code": "auto_away_unavailable",
 		})
 		return
 	}
@@ -122,7 +125,7 @@ func awaySettingsPATCH(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 	if raw, present := body["idle_minutes"]; present {
 		value, numeric := raw.(float64)
 		if !numeric || value < 1 || value != math.Trunc(value) {
-			api.WriteJSON(w, http.StatusBadRequest, map[string]any{"error": "idle_minutes 必須是正整數"})
+			api.WriteError(w, http.StatusBadRequest, "invalid_idle_minutes", "idle_minutes 必须是正整数")
 			return
 		}
 		minutes = int(value)
@@ -255,15 +258,15 @@ func uploadHandler(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 	written, copyErr := io.Copy(tmp, io.LimitReader(r.Body, filepaths.MaxAttachmentBytes+1))
 	closeErr := tmp.Close()
 	if copyErr != nil || closeErr != nil {
-		api.WriteJSON(w, http.StatusBadRequest, map[string]any{"error": "上传被中断"})
+		api.WriteError(w, http.StatusBadRequest, "upload_interrupted", "上传被中断")
 		return
 	}
 	if written > filepaths.MaxAttachmentBytes {
-		api.WriteJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": "文件超过 50MB 上限"})
+		api.WriteError(w, http.StatusRequestEntityTooLarge, "file_too_large", "文件超过 50MB 上限")
 		return
 	}
 	if err := os.Rename(tmpPath, finalPath); err != nil {
-		api.WriteJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存失败：" + err.Error()})
+		api.WriteError(w, http.StatusInternalServerError, "save_failed", "保存失败："+err.Error())
 		return
 	}
 	api.WriteJSON(w, http.StatusOK, map[string]any{
@@ -326,25 +329,53 @@ func capabilityFile(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
 }
 
+const defaultAPKReleaseURL = "https://github.com/tomato-hug/homing/releases/latest/download/homing-android.apk"
+
+func apkReleaseURL() string {
+	raw := strings.TrimSpace(os.Getenv("APK_RELEASE_URL"))
+	if strings.EqualFold(raw, "none") || strings.EqualFold(raw, "off") {
+		return ""
+	}
+	if raw != "" {
+		return raw
+	}
+	if strings.TrimSpace(os.Getenv("APK_PATH")) != "" {
+		return ""
+	}
+	return defaultAPKReleaseURL
+}
+
 func downloadAPK(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		api.WriteJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "Method Not Allowed"})
+		api.WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method Not Allowed")
 		return
 	}
 	if !isLocalOrLAN(r) {
-		api.WriteJSON(w, http.StatusForbidden, map[string]any{"error": "Forbidden"})
+		api.WriteError(w, http.StatusForbidden, "lan_only", "Forbidden")
 		return
 	}
 	path := apkPath()
 	f, err := os.Open(path)
 	if err != nil {
-		api.WriteJSON(w, http.StatusNotFound, map[string]any{"error": "APK 尚未构建"})
+		if r.Method == http.MethodGet {
+			if fallback := apkReleaseURL(); fallback != "" {
+				http.Redirect(w, r, fallback, http.StatusFound)
+				return
+			}
+		}
+		api.WriteError(w, http.StatusNotFound, "apk_not_built", "APK 尚未构建")
 		return
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil || !info.Mode().IsRegular() {
-		api.WriteJSON(w, http.StatusNotFound, map[string]any{"error": "APK 尚未构建"})
+		if r.Method == http.MethodGet {
+			if fallback := apkReleaseURL(); fallback != "" {
+				http.Redirect(w, r, fallback, http.StatusFound)
+				return
+			}
+		}
+		api.WriteError(w, http.StatusNotFound, "apk_not_built", "APK 尚未构建")
 		return
 	}
 	w.Header().Set("Content-Type", "application/vnd.android.package-archive")
@@ -489,6 +520,7 @@ type publicDevice struct {
 	LastSeenAt *string  `json:"last_seen_at"`
 	Online     bool     `json:"online"`
 	PairedVia  string   `json:"paired_via"`
+	Transport  string   `json:"transport"`
 	LastIP     *string  `json:"last_ip"`
 	Scopes     []string `json:"scopes"`
 }
@@ -502,12 +534,27 @@ func listDevices(d *api.Deps, w http.ResponseWriter, _ *http.Request) {
 	devices := s.Devices()
 	items := make([]publicDevice, 0, len(devices))
 	online := 0
+	seen := make(map[string]bool, len(devices))
 	for _, device := range devices {
 		item := publicDeviceOf(device)
+		seen[item.DeviceID] = true
 		if item.Online {
 			online++
 		}
 		items = append(items, item)
+	}
+	if hub, ok := cloud.HubFor(d.DataDir); ok {
+		onlinePeers := hub.OnlinePeers()
+		for _, peer := range hub.Peers().List() {
+			if seen[peer.DeviceID] {
+				continue
+			}
+			item := publicPeerOf(peer, onlinePeers[peer.DeviceID])
+			if item.Online {
+				online++
+			}
+			items = append(items, item)
+		}
 	}
 	api.WriteJSON(w, http.StatusOK, map[string]any{
 		"devices": items, "count": len(items), "online": online,
@@ -544,11 +591,14 @@ func heartbeatDevice(d *api.Deps) http.HandlerFunc {
 	}
 }
 
-var deviceIDPattern = regexp.MustCompile(`^[0-9a-f]{12}$`)
+var (
+	deviceIDPattern = regexp.MustCompile(`^[0-9a-f]{12}$`)
+	peerIDPattern   = regexp.MustCompile(`^[a-z2-7]{26}$`)
+)
 
 func renameDevice(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if !deviceIDPattern.MatchString(id) {
+	if !deviceIDPattern.MatchString(id) && !peerIDPattern.MatchString(id) {
 		api.WriteJSON(w, http.StatusNotFound, map[string]any{"error": "Not Found"})
 		return
 	}
@@ -557,43 +607,84 @@ func renameDevice(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 		api.WriteJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-	s, err := d.Store()
-	if err != nil {
-		api.WriteJSON(w, http.StatusInternalServerError, map[string]any{"error": "数据目录不可用"})
+	if deviceIDPattern.MatchString(id) {
+		s, err := d.Store()
+		if err != nil {
+			api.WriteJSON(w, http.StatusInternalServerError, map[string]any{"error": "数据目录不可用"})
+			return
+		}
+		device, ok := s.RenameDevice(id, stringField(body, "name"))
+		if !ok {
+			api.WriteJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "没有这台设备"})
+			return
+		}
+		if _, present := body["scopes"]; present {
+			scoped, saved := s.SetDeviceScopes(id, stringList(body["scopes"]))
+			if !saved {
+				api.WriteJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "没有这台设备"})
+				return
+			}
+			device = scoped
+		}
+		api.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "device": publicDeviceOf(device)})
 		return
 	}
-	device, ok := s.RenameDevice(id, stringField(body, "name"))
+
+	hub, ok := cloud.HubFor(d.DataDir)
 	if !ok {
 		api.WriteJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "没有这台设备"})
 		return
 	}
+	peer, found := hub.Peers().Get(id)
+	if !found {
+		api.WriteJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "没有这台设备"})
+		return
+	}
 	if _, present := body["scopes"]; present {
-		scoped, saved := s.SetDeviceScopes(id, stringList(body["scopes"]))
-		if !saved {
-			api.WriteJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "没有这台设备"})
+		api.WriteJSON(w, http.StatusBadRequest, map[string]any{
+			"ok": false, "error": "端到端配对设备不支持单独调整权限",
+		})
+		return
+	}
+	if name := strings.TrimSpace(stringField(body, "name")); name != "" {
+		peer.Name = truncateRunes(name, 60)
+		if err := hub.Peers().Add(peer); err != nil {
+			api.WriteJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存设备名称失败"})
 			return
 		}
-		device = scoped
 	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "device": publicDeviceOf(device)})
+	api.WriteJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "device": publicPeerOf(peer, hub.OnlinePeers()[peer.DeviceID]),
+	})
 }
 
 func removeDevice(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if !deviceIDPattern.MatchString(id) {
+	if !deviceIDPattern.MatchString(id) && !peerIDPattern.MatchString(id) {
 		api.WriteJSON(w, http.StatusNotFound, map[string]any{"error": "Not Found"})
 		return
 	}
-	s, err := d.Store()
-	if err != nil {
-		api.WriteJSON(w, http.StatusInternalServerError, map[string]any{"error": "数据目录不可用"})
-		return
+	if deviceIDPattern.MatchString(id) {
+		s, err := d.Store()
+		if err != nil {
+			api.WriteJSON(w, http.StatusInternalServerError, map[string]any{"error": "数据目录不可用"})
+			return
+		}
+		if s.RemoveDevice(id) {
+			api.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "device_id": id, "transport": "token"})
+			return
+		}
 	}
-	if !s.RemoveDevice(id) {
+	hub, ok := cloud.HubFor(d.DataDir)
+	if !ok {
 		api.WriteJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "没有这台设备"})
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "device_id": id})
+	if err := hub.RevokePeer(id); err != nil {
+		api.WriteJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "没有这台设备"})
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "device_id": id, "transport": "e2e"})
 }
 
 func publicDeviceOf(device store.Device) publicDevice {
@@ -604,6 +695,8 @@ func publicDeviceOf(device store.Device) publicDevice {
 		Platform:  firstNonEmpty(device.Platform, "android"),
 		Online:    online,
 		PairedVia: firstNonEmpty(device.PairedVia, "qr"),
+		Transport: "token",
+		Scopes:    append([]string(nil), device.Scopes...),
 	}
 	if device.AppVersion != "" {
 		value := device.AppVersion
@@ -621,9 +714,25 @@ func publicDeviceOf(device store.Device) publicDevice {
 		value := device.LastIP
 		out.LastIP = &value
 	}
-	out.Scopes = append([]string(nil), device.Scopes...)
 	if len(out.Scopes) == 0 {
 		out.Scopes = []string{"read", "reply", "drive"}
+	}
+	return out
+}
+
+func publicPeerOf(peer cloud.Peer, online bool) publicDevice {
+	out := publicDevice{
+		DeviceID:  peer.DeviceID,
+		Name:      firstNonEmpty(strings.TrimSpace(peer.Name), "手机"),
+		Platform:  firstNonEmpty(strings.TrimSpace(peer.Platform), "android"),
+		Online:    online,
+		PairedVia: "e2e",
+		Transport: "e2e",
+		Scopes:    []string{"read", "reply", "drive"},
+	}
+	if !peer.PairedAt.IsZero() {
+		pairedAt := peer.PairedAt.UTC().Format("2006-01-02T15:04:05.000Z")
+		out.CreatedAt = &pairedAt
 	}
 	return out
 }

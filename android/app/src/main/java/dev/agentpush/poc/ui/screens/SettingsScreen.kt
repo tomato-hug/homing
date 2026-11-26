@@ -11,6 +11,7 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,6 +35,7 @@ import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -57,6 +59,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -67,8 +70,17 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.agentpush.poc.AgentViewModel
+import dev.agentpush.poc.CrashReporter
+import dev.agentpush.poc.KeepAliveHelper
+import dev.agentpush.poc.RomKeepAliveProfile
+import dev.agentpush.poc.ui.AppLanguage
+import dev.agentpush.poc.ui.AboutAndSponsorCard
 import dev.agentpush.poc.ui.CodexGreen
+import dev.agentpush.poc.ui.CreditsAndLicensesSheet
+import dev.agentpush.poc.ui.LanguagePreferences
+import dev.agentpush.poc.ui.LocalHomingStrings
 import dev.agentpush.poc.ui.SectionCard
+import dev.agentpush.poc.ui.SponsorBottomSheet
 
 @Composable
 fun SettingsScreen(
@@ -76,6 +88,8 @@ fun SettingsScreen(
     snackbarHostState: SnackbarHostState,
     onBack: () -> Unit,
 ) {
+    val strings = LocalHomingStrings.current
+    val currentLanguage by LanguagePreferences.language.collectAsStateWithLifecycle()
     val state by viewModel.state.collectAsStateWithLifecycle()
     val settingsUi by viewModel.settingsUi.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -85,6 +99,9 @@ fun SettingsScreen(
     var permissionTick by remember { mutableIntStateOf(0) }
     var batteryTick by remember { mutableIntStateOf(0) }
     var confirmClearCache by remember { mutableStateOf(false) }
+    var crashReportingEnabled by remember { mutableStateOf(CrashReporter.isEnabled(context)) }
+    var licensesOpen by remember { mutableStateOf(false) }
+    var sponsorOpen by remember { mutableStateOf(false) }
 
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
         permissionTick += 1
@@ -99,9 +116,11 @@ fun SettingsScreen(
             ) == PackageManager.PERMISSION_GRANTED
     }
     val batteryIgnored = remember(batteryTick) {
-        context.getSystemService(PowerManager::class.java)
-            .isIgnoringBatteryOptimizations(context.packageName)
+        KeepAliveHelper.isIgnoringBatteryOptimizations(context)
     }
+    val detectedRom = remember { KeepAliveHelper.detectCurrentRom() }
+    var selectedRomId by rememberSaveable { mutableStateOf(detectedRom.id) }
+    val selectedRom = RomKeepAliveProfile.entries.firstOrNull { it.id == selectedRomId } ?: detectedRom
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
     ) {
@@ -119,15 +138,34 @@ fun SettingsScreen(
                 .verticalScroll(rememberScrollState())
                 .padding(bottom = 28.dp),
         ) {
-            SettingsHeader(onBack)
+            SettingsHeader(strings.settingsTitle, onBack)
             Column(
                 modifier = Modifier.padding(horizontal = 20.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
                 SectionCard {
-                    SectionTitle("连接")
+                    SectionTitle(strings.languageSection)
                     Text(
-                        text = "填写 Mac 上中继服务的地址和 token。",
+                        text = strings.languageDesc,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        AppLanguage.entries.forEach { lang ->
+                            FilterChip(
+                                selected = currentLanguage == lang,
+                                onClick = { LanguagePreferences.save(context, lang) },
+                                label = { Text(lang.displayName) },
+                            )
+                        }
+                    }
+                }
+
+                SectionCard {
+                    SectionTitle(strings.connectionSection)
+                    Text(
+                        text = strings.connectionDesc,
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -136,7 +174,8 @@ fun SettingsScreen(
                         value = server,
                         onValueChange = { server = it },
                         modifier = Modifier.fillMaxWidth(),
-                        label = { Text("服务器地址") },
+                        label = { Text(strings.serverAddress) },
+                        placeholder = { Text("http://192.168.x.x:18787") },
                         singleLine = true,
                         shape = RoundedCornerShape(14.dp),
                     )
@@ -283,10 +322,10 @@ fun SettingsScreen(
                     Spacer(Modifier.height(13.dp))
                     PermissionRow(
                         title = "电池优化白名单",
-                        value = if (batteryIgnored) "已允许后台运行" else "可能被系统限制",
+                        value = if (batteryIgnored) "已允许后台无限制运行" else "可能被系统省电策略限制",
                         good = batteryIgnored,
-                        actionLabel = if (batteryIgnored) null else "去设置",
-                        onAction = { requestBatteryWhitelist(context) },
+                        actionLabel = if (batteryIgnored) null else "一键加白名单",
+                        onAction = { KeepAliveHelper.requestIgnoreBatteryOptimizations(context) },
                     )
                     if (!notificationsGranted) {
                         Spacer(Modifier.height(4.dp))
@@ -305,37 +344,124 @@ fun SettingsScreen(
                 }
 
                 SectionCard {
-                    SectionTitle("ColorOS 保活指引")
-                    GuideStep("1", "允许自启动", "设置 → 应用 → 自启动，把「Homing」设为允许。")
-                    GuideStep("2", "允许后台运行", "应用信息 → 耗电管理，关闭「智能限制后台运行」或选「允许后台运行」。")
-                    GuideStep("3", "锁定最近任务", "在最近任务卡片上长按本应用并选择「锁定」，减少被清理的概率。")
-                    Spacer(Modifier.height(3.dp))
+                    SectionTitle("多机型后台保活适配")
                     Text(
-                        text = "ColorOS 各版本文案略有差异，核心是同时允许自启动、后台运行和通知。",
+                        text = "已自动识别本机系统：${detectedRom.shortLabel}（支持开机/升级自恢复与局域网休眠不断连，也可切换查看其他品牌设置）",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    Spacer(Modifier.height(10.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        RomKeepAliveProfile.entries.forEach { rom ->
+                            FilterChip(
+                                selected = selectedRom == rom,
+                                onClick = { selectedRomId = rom.id },
+                                modifier = Modifier.testTag("keepalive-rom-${rom.id}"),
+                                label = {
+                                    Text(
+                                        if (rom == detectedRom) "本机 · ${rom.shortLabel}" else rom.shortLabel,
+                                    )
+                                },
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = selectedRom.fullTitle,
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    selectedRom.steps.forEach { step ->
+                        GuideStep(step.number, step.title, step.body)
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = selectedRom.note,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedButton(
+                        onClick = { KeepAliveHelper.openOemAutoStartSettings(context, selectedRom) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("settings-open-oem-autostart"),
+                        shape = RoundedCornerShape(13.dp),
+                    ) {
+                        Text(selectedRom.autoStartButtonLabel)
+                    }
+                    if (!batteryIgnored) {
+                        Spacer(Modifier.height(8.dp))
+                        Button(
+                            onClick = { KeepAliveHelper.requestIgnoreBatteryOptimizations(context) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("settings-request-battery-unrestricted"),
+                            shape = RoundedCornerShape(13.dp),
+                        ) {
+                            Text("一键申请后台无限制白名单")
+                        }
+                    }
                 }
 
                 SectionCard {
-                    SectionTitle("本地数据")
+                    SectionTitle(strings.localDataSection)
                     Text(
-                        text = "Homing 会在本机保存首頁快照、最近会话和未发送草稿，方便飞航模式或弱网时打开。",
+                        text = strings.localDataDesc,
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    Spacer(Modifier.height(12.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = strings.crashReportingTitle,
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.Medium,
+                            )
+                            Spacer(Modifier.height(3.dp))
+                            Text(
+                                text = strings.crashReportingDesc,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(
+                            checked = crashReportingEnabled,
+                            onCheckedChange = {
+                                crashReportingEnabled = it
+                                CrashReporter.setEnabled(context, it)
+                            },
+                        )
+                    }
                     Spacer(Modifier.height(12.dp))
                     OutlinedButton(
                         onClick = { confirmClearCache = true },
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(13.dp),
                     ) {
-                        Text("清除本地快照与草稿")
+                        Text(strings.clearLocalData)
                     }
                 }
 
+                AboutAndSponsorCard(
+                    onOpenSponsor = { sponsorOpen = true },
+                    onOpenCredits = { licensesOpen = true },
+                )
+
                 Text(
-                    text = "Homing ${dev.agentpush.poc.BuildConfig.VERSION_NAME} · PoC",
+                    text = "Homing ${dev.agentpush.poc.BuildConfig.VERSION_NAME}",
                     modifier = Modifier.fillMaxWidth(),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -348,9 +474,9 @@ fun SettingsScreen(
     if (confirmClearCache) {
         AlertDialog(
             onDismissRequest = { confirmClearCache = false },
-            title = { Text("清除本地数据？") },
+            title = { Text(strings.clearLocalDataTitle) },
             text = {
-                Text("这不会删除 Mac 上的会话或 Homing 配置，只会清掉这台手机上缓存的首頁快照、会话摘要和草稿。")
+                Text(strings.clearLocalDataConfirm)
             },
             confirmButton = {
                 TextButton(
@@ -359,20 +485,28 @@ fun SettingsScreen(
                         viewModel.clearLocalCache()
                     },
                 ) {
-                    Text("清除")
+                    Text(strings.confirm)
                 }
             },
             dismissButton = {
                 TextButton(onClick = { confirmClearCache = false }) {
-                    Text("取消")
+                    Text(strings.cancel)
                 }
             },
         )
     }
+
+    if (sponsorOpen) {
+        SponsorBottomSheet(onDismiss = { sponsorOpen = false })
+    }
+
+    if (licensesOpen) {
+        CreditsAndLicensesSheet(onDismiss = { licensesOpen = false })
+    }
 }
 
 @Composable
-private fun SettingsHeader(onBack: () -> Unit) {
+private fun SettingsHeader(title: String, onBack: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -384,7 +518,7 @@ private fun SettingsHeader(onBack: () -> Unit) {
             Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
         }
         Text(
-            text = "设置",
+            text = title,
             style = MaterialTheme.typography.headlineMedium,
             fontWeight = FontWeight.Bold,
         )
@@ -466,17 +600,5 @@ private fun GuideStep(number: String, title: String, body: String) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-    }
-}
-
-private fun requestBatteryWhitelist(context: android.content.Context) {
-    val directIntent = Intent(
-        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-        Uri.parse("package:${context.packageName}"),
-    )
-    try {
-        context.startActivity(directIntent)
-    } catch (_: Exception) {
-        context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
     }
 }

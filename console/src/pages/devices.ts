@@ -5,7 +5,9 @@ import { icons } from "../lib/icons";
 import { appVersionLabel, timeAgo } from "../lib/format";
 import { endpoints, poll, type Device } from "../lib/api";
 import { createPairCard } from "../lib/pair-card";
+import { confirmDialog } from "../lib/dialog";
 import { button, emptyState, groupHead, listCard, reportError, tag, toast } from "../lib/ui";
+import { loc, t } from "../i18n";
 import type { PageContext, PageResult } from "../main";
 
 const ALL_DEVICE_SCOPES = ["read", "reply", "drive"] as const;
@@ -58,55 +60,92 @@ export function renderDevices(ctx: PageContext, query: URLSearchParams): PageRes
                     "div",
                     { class: "lrow-title" },
                     h("span", { class: "txt", text: device.name }),
-                    tag(device.online ? "在线" : "离线", device.online ? "ok" : "mute"),
+                    tag(
+                      device.transport === "e2e"
+                        ? device.online
+                          ? loc("在线", "Online")
+                          : loc("端到端", "E2E")
+                        : device.online
+                          ? loc("在线", "Online")
+                          : loc("离线", "Offline"),
+                      device.online ? "ok" : "mute",
+                    ),
                   ),
                   h(
                     "div",
                     { class: "lrow-sub" },
                     h("span", { class: "mono", text: `${device.platform === "android" ? "Android" : device.platform} · ${appVersionLabel(device.app_version)}` }),
-                    ` · ${device.paired_via === "qr" ? "扫码配对" : "配对码配对"} · ${device.last_seen_at ? timeAgo(device.last_seen_at) : "还没连过"}`,
+                    ` · ${
+                      device.transport === "e2e"
+                        ? "端到端配对"
+                        : device.paired_via === "qr"
+                          ? "扫码配对"
+                          : "配对码配对"
+                    } · ${
+                      device.last_seen_at
+                        ? timeAgo(device.last_seen_at)
+                        : device.transport === "e2e" && device.created_at
+                          ? `配对于 ${timeAgo(device.created_at)}`
+                          : "还没连过"
+                    }`,
                   ),
                   h(
                     "div",
                     { class: "lrow-sub" },
-                    `权限：${(device.scopes?.length ? device.scopes : ALL_DEVICE_SCOPES)
-                      .map((scope) => DEVICE_SCOPE_LABELS[scope] || scope)
-                      .join(" / ")}`,
+                    device.transport === "e2e"
+                      ? "权限：端到端加密连接（读取 / 回复 / 操作）"
+                      : `权限：${(device.scopes?.length ? device.scopes : ALL_DEVICE_SCOPES)
+                          .map((scope) => DEVICE_SCOPE_LABELS[scope] || scope)
+                          .join(" / ")}`,
                   ),
                 ),
                 h(
                   "div",
                   { class: "lrow-actions" },
-                  ...ALL_DEVICE_SCOPES.map((scope) => {
-                    const enabled = (device.scopes?.length ? device.scopes : ALL_DEVICE_SCOPES).includes(scope);
-                    return button(`${DEVICE_SCOPE_LABELS[scope]}${enabled ? " ✓" : " ✕"}`, {
-                      small: true,
-                      variant: "quiet",
-                      title: enabled ? `关闭「${DEVICE_SCOPE_LABELS[scope]}」权限` : `开启「${DEVICE_SCOPE_LABELS[scope]}」权限`,
-                      onClick: async () => {
-                        const current = device.scopes?.length ? device.scopes : [...ALL_DEVICE_SCOPES];
-                        const next = enabled
-                          ? current.filter((item) => item !== scope)
-                          : [...current, scope];
-                        if (enabled && scope === "read") {
-                          const ok = window.confirm("关闭读取权限后，这台手机会看不到任何会话。继续？");
-                          if (!ok) return;
-                        }
-                        try {
-                          await endpoints.setDeviceScopes(device.device_id, next);
-                          toast("权限已更新", "ok");
-                          await refreshDevices();
-                        } catch (err) {
-                          reportError(err, "更新权限失败");
-                        }
-                      },
-                    });
-                  }),
-                  button("移除", {
+                  ...(device.transport === "e2e"
+                    ? []
+                    : ALL_DEVICE_SCOPES.map((scope) => {
+                        const enabled = (device.scopes?.length ? device.scopes : ALL_DEVICE_SCOPES).includes(scope);
+                        return button(`${DEVICE_SCOPE_LABELS[scope]}${enabled ? " ✓" : " ✕"}`, {
+                          small: true,
+                          variant: "quiet",
+                          title: enabled ? `关闭「${DEVICE_SCOPE_LABELS[scope]}」权限` : `开启「${DEVICE_SCOPE_LABELS[scope]}」权限`,
+                          onClick: async () => {
+                            const current = device.scopes?.length ? device.scopes : [...ALL_DEVICE_SCOPES];
+                            const next = enabled
+                              ? current.filter((item) => item !== scope)
+                              : [...current, scope];
+                            if (enabled && scope === "read") {
+                              const ok = await confirmDialog({
+                                title: loc("关闭读取权限", "Disable Read Permission"),
+                                message: loc("关闭读取权限后，这台手机会看不到任何会话。继续？", "This phone will no longer see any sessions. Continue?"),
+                                danger: true,
+                              });
+                              if (!ok) return;
+                            }
+                            try {
+                              await endpoints.setDeviceScopes(device.device_id, next);
+                              toast("权限已更新", "ok");
+                              await refreshDevices();
+                            } catch (err) {
+                              reportError(err, "更新权限失败");
+                            }
+                          },
+                        });
+                      })),
+                  button(t("common.remove"), {
                     small: true,
                     variant: "quiet",
                     onClick: async () => {
-                      const ok = window.confirm(`移除「${device.name}」？它的设备令牌会立刻作废，手机需要重新配对。`);
+                      const ok = await confirmDialog({
+                        title: loc("移除已配对设备", "Remove Paired Device"),
+                        message:
+                          device.transport === "e2e"
+                            ? loc(`移除「${device.name}」？这台手机会失去配对，必须重新扫码。`, `Remove "${device.name}"? This phone will lose pairing and must rescan.`)
+                            : loc(`移除「${device.name}」？它的设备令牌会立刻作废，手机需要重新配对。`, `Remove "${device.name}"? Its token will be revoked immediately.`),
+                        confirmLabel: t("common.remove"),
+                        danger: true,
+                      });
                       if (!ok) return;
                       try {
                         await endpoints.revokeDevice(device.device_id);

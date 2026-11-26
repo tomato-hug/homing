@@ -1,0 +1,275 @@
+package dev.agentpush.poc.ui
+
+import android.content.Context
+import androidx.compose.runtime.compositionLocalOf
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+
+enum class AppLanguage(val wire: String, val displayName: String) {
+    ZH_CN("zh-CN", "简体中文"),
+    EN("en", "English"),
+    ;
+
+    companion object {
+        fun fromWire(value: String?): AppLanguage =
+            entries.firstOrNull { it.wire.equals(value, ignoreCase = true) } ?: ZH_CN
+    }
+}
+
+object LanguagePreferences {
+    private const val PREFS = "homing_ui_prefs"
+    private const val KEY_LANG = "app_language"
+    private val _language = MutableStateFlow(AppLanguage.ZH_CN)
+    val language: StateFlow<AppLanguage> = _language.asStateFlow()
+
+    fun load(context: Context): AppLanguage {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val saved = AppLanguage.fromWire(prefs.getString(KEY_LANG, null))
+        _language.value = saved
+        return saved
+    }
+
+    fun save(context: Context, lang: AppLanguage) {
+        context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_LANG, lang.wire)
+            .apply()
+        _language.value = lang
+    }
+}
+
+data class HomingStrings(
+    val tabInbox: String,
+    val tabSessions: String,
+    val tabRooms: String,
+    val tabMe: String,
+    val meTitle: String,
+    val myComputers: String,
+    val addComputer: String,
+    val noCloudComputer: String,
+    val noCloudComputerSub: String,
+    val activeTag: String,
+    val switchTag: String,
+    val rename: String,
+    val remove: String,
+    val unpairTitle: String,
+    val unpairConfirm: String,
+    val renameComputerTitle: String,
+    val cancel: String,
+    val confirm: String,
+    val save: String,
+    val settingsTitle: String,
+    val languageSection: String,
+    val languageDesc: String,
+    val connectionSection: String,
+    val connectionDesc: String,
+    val serverAddress: String,
+    val testConnection: String,
+    val saveAndReconnect: String,
+    val collabSection: String,
+    val previewMentionsTitle: String,
+    val previewMentionsDesc: String,
+    val permissionsSection: String,
+    val notificationPermission: String,
+    val allowed: String,
+    val notAllowed: String,
+    val grant: String,
+    val batteryWhitelist: String,
+    val backgroundAllowed: String,
+    val mayBeRestricted: String,
+    val openSettings: String,
+    val localDataSection: String,
+    val localDataDesc: String,
+    val clearLocalData: String,
+    val clearLocalDataTitle: String,
+    val clearLocalDataConfirm: String,
+    val crashReportingTitle: String,
+    val crashReportingDesc: String,
+    val openSourceLicenses: String,
+    val licensesTitle: String,
+    val splashSubtitle: String,
+    val splashConnected: String,
+    val splashConnecting: String,
+    val pairWelcomeTitle: String,
+    val pairWelcomeDesc: String,
+    val pairScanCta: String,
+    val deny: String,
+    val allow: String,
+    val allowOnce: String,
+    val cameraPermissionRequired: String,
+    val replyPlaceholder: String,
+    val replyDispatchPlaceholder: String,
+    val waitingSessionReady: String,
+    val reconnect: String,
+    val repair: String,
+    val reminders: String,
+    val agents: String,
+    val addComputerDesc: String,
+    val scanQrTab: String,
+    val pairCodeTab: String,
+    val scanQrTitle: String,
+    val scanQrDesc: String,
+    val openCameraScan: String,
+    val relayServerLabel: String,
+    val relayServerPlaceholder: String,
+)
+
+val ZhCnStrings = HomingStrings(
+    tabInbox = "收件箱",
+    tabSessions = "会话",
+    tabRooms = "会议室",
+    tabMe = "我的",
+    meTitle = "我的",
+    myComputers = "我的电脑",
+    addComputer = "添加电脑",
+    noCloudComputer = "还没有通过云中转添加电脑",
+    noCloudComputerSub = "扫码或在电脑上生成 6 位配对码",
+    activeTag = "当前",
+    switchTag = "切换",
+    rename = "重命名",
+    remove = "移除",
+    unpairTitle = "移除这台电脑？",
+    unpairConfirm = "移除后手机将断开与这台电脑的加密连接，可随时重新扫码配对。",
+    renameComputerTitle = "重命名电脑",
+    cancel = "取消",
+    confirm = "确认",
+    save = "保存",
+    settingsTitle = "设置",
+    languageSection = "界面语言",
+    languageDesc = "在简体中文与 English 之间即时切换。",
+    connectionSection = "局域网直连（高级）",
+    connectionDesc = "如需绕过端到端云中转直接连局域网服务，可填写电脑地址和 Token。",
+    serverAddress = "服务器地址",
+    testConnection = "测试连接",
+    saveAndReconnect = "保存并重连",
+    collabSection = "协作",
+    previewMentionsTitle = "发送前预览",
+    previewMentionsDesc = "有 @Agent 时先显示收件人和任务拆分，确认后再发送。",
+    permissionsSection = "系统权限",
+    notificationPermission = "通知权限",
+    allowed = "已允许",
+    notAllowed = "未允许",
+    grant = "授权",
+    batteryWhitelist = "电池优化白名单",
+    backgroundAllowed = "已允许后台运行",
+    mayBeRestricted = "可能被系统限制",
+    openSettings = "去设置",
+    localDataSection = "本地数据与隐私",
+    localDataDesc = "Homing 会在本机保存首页快照、最近会话和未发送草稿，方便弱网时打开。",
+    clearLocalData = "清除本地快照与草稿",
+    clearLocalDataTitle = "清除本地数据？",
+    clearLocalDataConfirm = "这不会删除电脑上的会话或 Homing 配置，只会清掉这台手机上缓存的首页快照、会话摘要和草稿。",
+    crashReportingTitle = "允许保存本地崩溃诊断",
+    crashReportingDesc = "关闭后发生异常时不再记录堆栈到本地或上传到电脑。",
+    openSourceLicenses = "开源许可与致谢",
+    licensesTitle = "开源许可",
+    splashSubtitle = "每个 agent 的回复，都能飞回你手里。",
+    splashConnected = "已连接 我的 Mac",
+    splashConnecting = "正在连接 我的 Mac…",
+    pairWelcomeTitle = "连接你的电脑开始使用",
+    pairWelcomeDesc = "在电脑上打开 Homing 控制台，点击「配置与配对」生成二维码，用手机扫码即可建立端到端加密连接。",
+    pairScanCta = "扫码连接电脑",
+    deny = "拒绝",
+    allow = "允许",
+    allowOnce = "允许一次",
+    cameraPermissionRequired = "需要相机权限才能拍照",
+    replyPlaceholder = "回复这个会话…",
+    replyDispatchPlaceholder = "回复这个会话，使用下方 @ 可派生子任务",
+    waitingSessionReady = "等待会话就绪…",
+    reconnect = "重新连接",
+    repair = "重新配对",
+    reminders = "提醒",
+    agents = "Agent",
+    addComputerDesc = "电脑端启动 homingd 后，用二维码或 6 位配对码建立端到端加密连接。",
+    scanQrTab = "扫码",
+    pairCodeTab = "配对码",
+    scanQrTitle = "扫描电脑上的配对二维码",
+    scanQrDesc = "二维码只包含服务器、配对 token、电脑 ID 和指纹。",
+    openCameraScan = "打开相机扫码",
+    relayServerLabel = "中转服务器",
+    relayServerPlaceholder = "wss://homing.douqu.online/v1/ws",
+)
+
+val EnStrings = HomingStrings(
+    tabInbox = "Inbox",
+    tabSessions = "Sessions",
+    tabRooms = "Rooms",
+    tabMe = "Me",
+    meTitle = "Me",
+    myComputers = "My Computers",
+    addComputer = "Add Computer",
+    noCloudComputer = "No paired computer yet",
+    noCloudComputerSub = "Scan QR or enter a 6-digit pairing code from your computer",
+    activeTag = "Active",
+    switchTag = "Switch",
+    rename = "Rename",
+    remove = "Remove",
+    unpairTitle = "Remove this computer?",
+    unpairConfirm = "Your phone will disconnect from this computer. You can pair again anytime.",
+    renameComputerTitle = "Rename Computer",
+    cancel = "Cancel",
+    confirm = "Confirm",
+    save = "Save",
+    settingsTitle = "Settings",
+    languageSection = "Language",
+    languageDesc = "Switch between Simplified Chinese and English immediately.",
+    connectionSection = "Direct LAN Connection (Advanced)",
+    connectionDesc = "Optionally enter a local homingd address and token to connect directly over LAN.",
+    serverAddress = "Server URL",
+    testConnection = "Test Connection",
+    saveAndReconnect = "Save & Reconnect",
+    collabSection = "Collaboration",
+    previewMentionsTitle = "Preview before sending",
+    previewMentionsDesc = "Show recipients and task split when using @Agent mentions.",
+    permissionsSection = "System Permissions",
+    notificationPermission = "Notifications",
+    allowed = "Allowed",
+    notAllowed = "Not allowed",
+    grant = "Allow",
+    batteryWhitelist = "Battery optimization",
+    backgroundAllowed = "Unrestricted in background",
+    mayBeRestricted = "May be restricted by OS",
+    openSettings = "Open Settings",
+    localDataSection = "Local Data & Privacy",
+    localDataDesc = "Homing caches recent sessions, snapshots, and drafts on this phone for weak networks.",
+    clearLocalData = "Clear Local Cache & Drafts",
+    clearLocalDataTitle = "Clear local data?",
+    clearLocalDataConfirm = "This only clears cached summaries and drafts on this phone. Sessions on your computer are untouched.",
+    crashReportingTitle = "Save local crash diagnostics",
+    crashReportingDesc = "When disabled, uncaught stack traces are neither stored nor sent to your computer.",
+    openSourceLicenses = "Open Source Licenses",
+    licensesTitle = "Open Source Licenses",
+    splashSubtitle = "Every agent's reply flies right back to you.",
+    splashConnected = "Connected to computer",
+    splashConnecting = "Connecting to computer…",
+    pairWelcomeTitle = "Connect your computer to begin",
+    pairWelcomeDesc = "Open Homing on your computer, open Setup & Pair to show the QR code, then scan to establish an end-to-end encrypted link.",
+    pairScanCta = "Scan QR to Connect",
+    deny = "Deny",
+    allow = "Allow",
+    allowOnce = "Allow Once",
+    cameraPermissionRequired = "Camera permission is required to take a photo",
+    replyPlaceholder = "Reply to this session…",
+    replyDispatchPlaceholder = "Reply… use @ below to dispatch a subtask",
+    waitingSessionReady = "Waiting for session…",
+    reconnect = "Reconnect",
+    repair = "Re-pair",
+    reminders = "Reminders",
+    agents = "Agents",
+    addComputerDesc = "Start homingd on your computer, then scan the QR code or enter the 6-digit code to pair with E2E encryption.",
+    scanQrTab = "Scan QR",
+    pairCodeTab = "Pair Code",
+    scanQrTitle = "Scan the pairing QR code on your computer",
+    scanQrDesc = "The QR code only contains relay URL, pairing token, computer ID, and fingerprint.",
+    openCameraScan = "Open Camera Scanner",
+    relayServerLabel = "Relay Server",
+    relayServerPlaceholder = "wss://homing.douqu.online/v1/ws",
+)
+
+val LocalHomingStrings = compositionLocalOf<HomingStrings> { ZhCnStrings }
+
+fun stringsFor(language: AppLanguage): HomingStrings = when (language) {
+    AppLanguage.ZH_CN -> ZhCnStrings
+    AppLanguage.EN -> EnStrings
+}

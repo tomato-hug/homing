@@ -164,6 +164,9 @@ func (d *Deps) buildHome(r *http.Request) Home {
 		if event.SessionID == "" {
 			continue
 		}
+		if event.Kind == "needs_input" && scanlib.IsIdlePromptNotification("", event.Text) {
+			continue
+		}
 		key := event.Source + ":" + event.SessionID
 		bySession[key] = append(bySession[key], event)
 		if event.ID > maxID[key] {

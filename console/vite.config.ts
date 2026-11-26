@@ -21,6 +21,10 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/api": { target: "http://127.0.0.1:18787", changeOrigin: false },
+      "/apk": { target: "http://127.0.0.1:18787", changeOrigin: false },
+      "/get": { target: "http://127.0.0.1:18787", changeOrigin: false },
+      "/f": { target: "http://127.0.0.1:18787", changeOrigin: false },
+      "/p": { target: "http://127.0.0.1:18787", changeOrigin: false },
     },
   },
 });

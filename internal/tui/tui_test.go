@@ -78,4 +78,25 @@ func TestRenderIsTerminalSafe(t *testing.T) {
 	if !strings.Contains(text, "Homing TUI") || !strings.Contains(text, "登录 按钮") {
 		t.Fatalf("render missing content: %q", text)
 	}
+	app.tab = tabSessions
+	sessionsText := app.render(80, 24)
+	if !strings.Contains(sessionsText, "\x1b[1;36m[2] 会话\x1b[0m") {
+		t.Fatalf("active tab highlight did not follow tabSessions: %q", sessionsText)
+	}
+}
+
+func TestReadKeysMapsArrowsAndAnsiTruncatePreservesReset(t *testing.T) {
+	keys := make(chan byte, 16)
+	failed := make(chan error, 1)
+	go readKeys(strings.NewReader("\x1b[A\x1b[B\x1b[C\x1b[D"), keys, failed)
+	want := []byte{'k', 'j', 'l', 'h'}
+	for _, expected := range want {
+		if got := <-keys; got != expected {
+			t.Fatalf("arrow key mapped to %q, want %q", got, expected)
+		}
+	}
+	got := ansiTruncate("\x1b[7m> WorkBuddy   超长标题测试内容\x1b[0m", 14)
+	if !strings.HasPrefix(got, "\x1b[7m> WorkBuddy") {
+		t.Fatalf("ansiTruncate = %q", got)
+	}
 }

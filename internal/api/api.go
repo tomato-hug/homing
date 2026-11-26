@@ -82,13 +82,24 @@ func WriteJSON(w http.ResponseWriter, status int, v any) {
 	var buf bytes.Buffer
 	encoder := json.NewEncoder(&buf)
 	if err := encoder.Encode(v); err != nil {
-		http.Error(w, `{"error":"encode response"}`, http.StatusInternalServerError)
+		http.Error(w, `{"error":"encode response","code":"encode_error"}`, http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Content-Length", strconv.Itoa(buf.Len()))
 	w.WriteHeader(status)
 	_, _ = w.Write(buf.Bytes())
+}
+
+// WriteError writes a backward-compatible JSON error payload with both a
+// human-readable fallback message ("error") and a stable machine code ("code")
+// so bilingual clients (zh-CN / en) can localize API errors cleanly.
+func WriteError(w http.ResponseWriter, status int, code, message string) {
+	payload := map[string]any{"error": message}
+	if code != "" {
+		payload["code"] = code
+	}
+	WriteJSON(w, status, payload)
 }
 
 func init() {

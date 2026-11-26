@@ -160,7 +160,7 @@ func (m *Manager) pollOnce(ctx context.Context, tracked *tracker) {
 		return
 	}
 	items, err := read(ctx, tracked.source, tracked.sessionID, defaultItemLimit)
-	if err != nil {
+	if err != nil || ctx.Err() != nil {
 		return
 	}
 	maximum := maxSeq(items)
@@ -187,7 +187,9 @@ func (m *Manager) pollOnce(ctx context.Context, tracked *tracker) {
 		}
 		return
 	}
+	m.mu.Lock()
 	tracked.lastActive = time.Now()
+	m.mu.Unlock()
 	tracked.lastSeq = maximum
 	tracked.idleTicks = 0
 	if emit == nil {

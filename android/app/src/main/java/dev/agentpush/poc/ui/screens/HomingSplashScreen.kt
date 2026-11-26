@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.sp
 import dev.agentpush.poc.ConnectionState
 import dev.agentpush.poc.TransportKind
 import dev.agentpush.poc.ui.HomingPigeonScene
+import dev.agentpush.poc.ui.LocalHomingStrings
 import dev.agentpush.poc.ui.PigeonScene
 import dev.agentpush.poc.ui.isReducedMotion
 import dev.agentpush.poc.ui.theme.HomingMono
@@ -69,8 +70,10 @@ private val TopBarPigeonCenterYBelowStatusBar = 30.dp
 fun HomingSplashScreen(
     connection: ConnectionState,
     transportKind: TransportKind = TransportKind.LAN,
+    skipConnectionWait: Boolean = false,
     onFinished: () -> Unit,
 ) {
+    val strings = LocalHomingStrings.current
     val context = LocalContext.current
     val density = LocalDensity.current
     val reducedMotion = remember(context) { isReducedMotion(context) }
@@ -103,12 +106,16 @@ fun HomingSplashScreen(
             subtitleVisible = true
         }
         val startedAt = System.currentTimeMillis()
-        delay(2_200)
-        while (
-            liveConnection != ConnectionState.CONNECTED &&
-            System.currentTimeMillis() - startedAt < 6_000
-        ) {
-            delay(200)
+        if (skipConnectionWait) {
+            delay(800)
+        } else {
+            delay(2_200)
+            while (
+                liveConnection != ConnectionState.CONNECTED &&
+                System.currentTimeMillis() - startedAt < 6_000
+            ) {
+                delay(200)
+            }
         }
         if (reducedMotion) {
             backdrop.animateTo(0f, tween(180))
@@ -199,7 +206,7 @@ fun HomingSplashScreen(
                     softWrap = false,
                 )
                 androidx.compose.material3.Text(
-                    text = "每个 agent 的回复，都能飞回你手里。",
+                    text = strings.splashSubtitle,
                     modifier = Modifier
                         .padding(top = 10.dp)
                         .alpha(subtitleAlpha),
@@ -225,9 +232,9 @@ fun HomingSplashScreen(
                 Column {
                     androidx.compose.material3.Text(
                         text = if (connection == ConnectionState.CONNECTED) {
-                            "已连接 我的 Mac"
+                            strings.splashConnected
                         } else {
-                            "正在连接 我的 Mac…"
+                            strings.splashConnecting
                         },
                         color = HomingPalette.Body,
                         fontSize = 13.sp,

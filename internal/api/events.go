@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/tomato-hug/homing/internal/agent"
+	"github.com/tomato-hug/homing/internal/agent/scanlib"
 	"github.com/tomato-hug/homing/internal/driver"
 	filepaths "github.com/tomato-hug/homing/internal/files"
 	"github.com/tomato-hug/homing/internal/live"
@@ -78,6 +79,13 @@ func (d *Deps) handleEvents(w http.ResponseWriter, r *http.Request) {
 	for _, event := range s.Events() {
 		if event.ID <= since {
 			continue
+		}
+		if event.Kind == "needs_input" && scanlib.IsIdlePromptNotification("", event.Text) {
+			continue
+		}
+		if event.Source == "workbuddy" && (event.Kind == "needs_input" || event.Kind == "permission") {
+			event.Title = scanlib.NormalizeHookSourceBranding(event.Source, event.Title)
+			event.Text = scanlib.NormalizeHookSourceBranding(event.Source, event.Text)
 		}
 		out = append(out, decorateEvent(event))
 	}

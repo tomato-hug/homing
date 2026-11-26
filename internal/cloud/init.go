@@ -107,11 +107,13 @@ func EnsureConnector(
 		return connector, nil
 	}
 	connector, err := NewConnector(ConnectorConfig{
-		ServerURL: server,
-		Identity:  identity,
-		Peers:     peers,
-		Handler:   handler,
-		Logger:    log,
+		ServerURL:      server,
+		RelayKey:       peers.RelayKey(),
+		Identity:       identity,
+		Peers:          peers,
+		Handler:        handler,
+		Logger:         log,
+		UseSystemProxy: peers.UseSystemProxy(),
 	})
 	if err != nil {
 		return nil, err
@@ -131,14 +133,28 @@ func ConnectorFor(dataDir string) (*Connector, bool) {
 
 // StatusFor reports the live relay connector state for one data directory.
 func StatusFor(dataDir string, hub *Hub) api.CloudStatus {
-	status := api.CloudStatus{}
+	status := api.CloudStatus{
+		DirectDial:       true,
+		ProxyEnvDetected: hasLocalProxyEnv(),
+	}
 	if hub != nil {
 		status.Server = hub.Peers().Server()
 		status.Configured = status.Server != ""
 		status.Peers = len(hub.Peers().List())
+		status.DirectDial = !hub.Peers().UseSystemProxy()
+		status.RelayKeyHint = hub.Peers().RelayKeyHint()
+		status.RelayKeyConfigured = status.RelayKeyHint != ""
 	}
 	if connector, ok := ConnectorFor(dataDir); ok && connector != nil {
 		status.Connected = connector.Connected()
+		status.DirectDial = connector.DirectDial()
+		status.LatencyMs = connector.LatencyMs()
+		status.LastError = connector.LastError()
+		status.RelayNotice = connector.RelayNotice()
+		fakeDetected, fakeBypassed, resolvedIP := connector.DialDiagnostics()
+		status.TunFakeIPDetected = fakeDetected
+		status.TunFakeIPBypassed = fakeBypassed
+		status.ResolvedIP = resolvedIP
 	}
 	return status
 }

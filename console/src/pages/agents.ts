@@ -25,6 +25,9 @@ import {
   toast,
   toggle,
 } from "../lib/ui";
+import { confirmDialog } from "../lib/dialog";
+import { isContainerBusy } from "../lib/guard";
+import { loc } from "../i18n";
 import type { PageContext, PageResult } from "../main";
 
 type Filter = "all" | "connected" | "detected" | "installable" | "discover";
@@ -333,7 +336,15 @@ export function renderAgents(ctx: PageContext): PageResult {
 
   async function enableDrive(entry: AgentCatalogEntry) {
     const command = entry.drive?.command || "ACP";
-    if (!window.confirm(`跑一次隔离握手来启用 ${entry.name} 的驱动？\n\n${command}\n\n握手只在临时目录创建空会话；失败不会写入清单。`)) {
+    const ok = await confirmDialog({
+      title: loc(`启用 ${entry.name} 驱动`, `Enable ${entry.name} driver`),
+      message: loc(
+        `跑一次隔离握手来启用 ${entry.name} 的驱动？\n\n${command}\n\n握手只在临时目录创建空会话；失败不会写入清单。`,
+        `Run an isolated handshake to enable ${entry.name}?\n\n${command}\n\nCreates an empty temp session only; failure does not write a manifest.`,
+      ),
+      confirmLabel: loc("启用驱动", "Enable"),
+    });
+    if (!ok) {
       return;
     }
     try {
@@ -352,7 +363,16 @@ export function renderAgents(ctx: PageContext): PageResult {
   }
 
   async function removeDrive(entry: AgentCatalogEntry) {
-    if (!window.confirm(`停用 ${entry.name} 的 ACP 驱动？只会移除 Homing 的 drive 清单，不碰 Agent 本体。`)) {
+    const ok = await confirmDialog({
+      title: loc(`停用 ${entry.name} 驱动`, `Disable ${entry.name} driver`),
+      message: loc(
+        `停用 ${entry.name} 的 ACP 驱动？只会移除 Homing 的 drive 清单，不碰 Agent 本体。`,
+        `Disable ${entry.name}'s ACP driver? Only removes Homing's drive manifest.`,
+      ),
+      confirmLabel: loc("停用", "Disable"),
+      danger: true,
+    });
+    if (!ok) {
       return;
     }
     try {
@@ -371,7 +391,16 @@ export function renderAgents(ctx: PageContext): PageResult {
   }
 
   async function removeKit(entry: AgentCatalogEntry) {
-    if (!window.confirm(`移除 ${entry.name} 的接入套件？目录会改名保留，不会直接删除。`)) return;
+    const ok = await confirmDialog({
+      title: loc(`移除 ${entry.name} 接入套件`, `Remove ${entry.name} kit`),
+      message: loc(
+        `移除 ${entry.name} 的接入套件？目录会改名保留，不会直接删除。`,
+        `Remove ${entry.name}'s integration kit? The folder will be moved to trash, not deleted.`,
+      ),
+      confirmLabel: loc("移除", "Remove"),
+      danger: true,
+    });
+    if (!ok) return;
     try {
       const result = await endpoints.removeCatalogKit(entry.id);
       toast(`已移除接入套件，原目录保存在 ${result.trash}`, "ok", 7000);
@@ -382,7 +411,16 @@ export function renderAgents(ctx: PageContext): PageResult {
   }
 
   async function remove(entry: AgentCatalogEntry) {
-    if (!window.confirm(`移除 ${entry.name} 的接入清单？原文件会改名保留，不会真的删除。`)) return;
+    const ok = await confirmDialog({
+      title: loc(`移除 ${entry.name} 接入清单`, `Remove ${entry.name} manifest`),
+      message: loc(
+        `移除 ${entry.name} 的接入清单？原文件会改名保留，不会真的删除。`,
+        `Remove ${entry.name}'s manifest? The original file will be moved to trash.`,
+      ),
+      confirmLabel: loc("移除", "Remove"),
+      danger: true,
+    });
+    if (!ok) return;
     try {
       const result = await endpoints.removeCatalogAgent(entry.id);
       settings[entry.id] = result.settings;
@@ -1372,7 +1410,9 @@ export function renderAgents(ctx: PageContext): PageResult {
   }
 
   void load();
-  const stop = poll(() => load(true), 15_000);
+  const stop = poll(() => {
+    if (!isContainerBusy(root)) return load(true);
+  }, 15_000);
 
   return {
     el: root,

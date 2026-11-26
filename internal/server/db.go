@@ -105,6 +105,9 @@ func (d *DB) migrate() error {
 	if err != nil {
 		return fmt.Errorf("server: migrate database: %w", err)
 	}
+	if err := d.migrateManaged(); err != nil {
+		return fmt.Errorf("server: migrate managed tables: %w", err)
+	}
 	return nil
 }
 

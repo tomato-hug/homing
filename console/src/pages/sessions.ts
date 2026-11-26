@@ -9,6 +9,7 @@ import {
   type ComposePlan,
   type DispatchRecord,
   type InboxItem,
+  type ReplyRecord,
   type SearchHit,
   type SessionCommand,
   type SessionItem,
@@ -19,6 +20,9 @@ import { AGENT_INITIALS, AGENT_LABELS, timeAgo } from "../lib/format";
 import { agentLogo } from "../lib/agent-icons";
 import { icons } from "../lib/icons";
 import { approvalButtons } from "../lib/approval";
+import { confirmDialog, promptDialog } from "../lib/dialog";
+import { captureOpenDetails, restoreOpenDetails } from "../lib/guard";
+import { renderMarkdown } from "../lib/markdown";
 import { parseMentions } from "../lib/mentions";
 import { startedSessionSummary } from "../lib/session-start";
 import {
@@ -28,7 +32,9 @@ import {
   reportError,
   tag,
   toast,
+  toastWithAction,
 } from "../lib/ui";
+import { loc, t } from "../i18n";
 import type { PageContext, PageResult } from "../main";
 
 const PRESET_LABELS: Record<string, string> = {
@@ -123,129 +129,12 @@ function projectKey(session: SessionSummary): string {
   return session.project || session.workspace || session.cwd || "未分组";
 }
 
-// A deliberately small, safe Markdown subset. Everything is created as text
-// nodes; agent output is never interpreted as HTML.
-function inlineMarkdown(text: string): Node[] {
-  const nodes: Node[] = [];
-  const pattern = /(`[^`\n]+`|\*\*[^*\n]+\*\*|https?:\/\/[^\s)]+)/g;
-  let cursor = 0;
-  for (const match of text.matchAll(pattern)) {
-    const index = match.index ?? 0;
-    if (index > cursor) nodes.push(document.createTextNode(text.slice(cursor, index)));
-    const token = match[0];
-    if (token.startsWith("`")) {
-      nodes.push(h("code", { text: token.slice(1, -1) }));
-    } else if (token.startsWith("**")) {
-      nodes.push(h("strong", { text: token.slice(2, -2) }));
-    } else {
-      nodes.push(h("a", { href: token, target: "_blank", rel: "noopener noreferrer", text: token }));
-    }
-    cursor = index + token.length;
-  }
-  if (cursor < text.length) nodes.push(document.createTextNode(text.slice(cursor)));
-  return nodes;
-}
-
-function renderMarkdown(text: string): HTMLElement {
-  const root = h("div", { class: "md" });
-  const lines = text.replace(/\r\n/g, "\n").split("\n");
-  let index = 0;
-  while (index < lines.length) {
-    const line = lines[index];
-    if (line.startsWith("```")) {
-      const language = line.slice(3).trim();
-      const code: string[] = [];
-      index++;
-      while (index < lines.length && !lines[index].startsWith("```")) {
-        code.push(lines[index]);
-        index++;
-      }
-      if (index < lines.length) index++;
-      root.append(
-        h(
-          "div",
-          { class: "md-code" },
-          language ? h("span", { class: "md-code-lang", text: language }) : null,
-          h("pre", null, h("code", { text: code.join("\n") })),
-        ),
-      );
-      continue;
-    }
-    if (!line.trim()) {
-      index++;
-      continue;
-    }
-    const heading = /^(#{1,3})\s+(.+)$/.exec(line);
-    if (heading) {
-      const level = Math.min(3, heading[1].length);
-      const element = h(level === 1 ? "h2" : level === 2 ? "h3" : "h4");
-      element.append(...inlineMarkdown(heading[2]));
-      root.append(element);
-      index++;
-      continue;
-    }
-    if (/^\s*[-*]\s+/.test(line)) {
-      const list = h("ul");
-      while (index < lines.length && /^\s*[-*]\s+/.test(lines[index])) {
-        const item = h("li");
-        item.append(...inlineMarkdown(lines[index].replace(/^\s*[-*]\s+/, "")));
-        list.append(item);
-        index++;
-      }
-      root.append(list);
-      continue;
-    }
-    if (/^\s*\d+[.)]\s+/.test(line)) {
-      const list = h("ol");
-      while (index < lines.length && /^\s*\d+[.)]\s+/.test(lines[index])) {
-        const item = h("li");
-        item.append(...inlineMarkdown(lines[index].replace(/^\s*\d+[.)]\s+/, "")));
-        list.append(item);
-        index++;
-      }
-      root.append(list);
-      continue;
-    }
-    if (line.startsWith(">")) {
-      const quote = h("blockquote");
-      while (index < lines.length && lines[index].startsWith(">")) {
-        const part = h("p");
-        part.append(...inlineMarkdown(lines[index].replace(/^>\s?/, "")));
-        quote.append(part);
-        index++;
-      }
-      root.append(quote);
-      continue;
-    }
-    const paragraph: string[] = [line];
-    index++;
-    while (
-      index < lines.length &&
-      lines[index].trim() &&
-      !lines[index].startsWith("```") &&
-      !/^(#{1,3})\s+/.test(lines[index]) &&
-      !/^\s*[-*]\s+/.test(lines[index]) &&
-      !/^\s*\d+[.)]\s+/.test(lines[index]) &&
-      !lines[index].startsWith(">")
-    ) {
-      paragraph.push(lines[index]);
-      index++;
-    }
-    const paragraphEl = h("p");
-    paragraph.forEach((part, partIndex) => {
-      if (partIndex > 0) paragraphEl.append(document.createElement("br"));
-      paragraphEl.append(...inlineMarkdown(part));
-    });
-    root.append(paragraphEl);
-  }
-  return root;
-}
-
 function itemStatus(item: SessionItem): string {
   return item.tool?.status || (item.exit_code === 0 ? "ok" : item.exit_code ? "error" : "");
 }
 
 function transcriptItem(item: SessionItem, source = ""): HTMLElement {
+  const detailsKey = item.id || `${item.type}:${item.seq || 0}`;
   if (item.type === "message") {
     const user = item.role === "user";
     return h(
@@ -255,9 +144,9 @@ function transcriptItem(item: SessionItem, source = ""): HTMLElement {
         "div",
         { class: "transcript-who" },
         user
-          ? h("span", { class: "agent-square sm me", text: "你" })
+          ? h("span", { class: "agent-square sm me", text: loc("你", "You") })
           : agentBadge(source || "agent"),
-        h("strong", { text: user ? "你" : "Agent" }),
+        h("strong", { text: user ? loc("你", "You") : agentName(source || "agent") }),
         item.model ? h("span", { class: "mono", text: item.model }) : null,
         h("div", { class: "spacer", style: "flex:1" }),
         h("span", { class: "mono", text: formatClock(item.ts) }),
@@ -268,25 +157,32 @@ function transcriptItem(item: SessionItem, source = ""): HTMLElement {
   if (item.type === "reasoning") {
     return h(
       "details",
-      { class: "transcript-detail reasoning" },
-      h("summary", null, h("span", { class: "dot dot-warn" }), h("span", { text: "思考过程" }), h("span", { class: "mono", text: `#${item.seq}` })),
+      { class: "transcript-detail reasoning", "data-details-key": detailsKey },
+      h("summary", null, h("span", { class: "dot dot-warn" }), h("span", { text: loc("思考过程", "Reasoning") }), h("span", { class: "mono", text: `#${item.seq}` })),
       renderMarkdown(item.text || ""),
     );
   }
   if (item.type === "tool_call") {
     const status = itemStatus(item);
+    const snippetSource = item.command || item.tool?.input_summary || "";
+    const snippet = snippetSource.replace(/\s+/g, " ").trim().slice(0, 80);
     return h(
       "details",
-      { class: "transcript-detail tool" },
+      { class: "transcript-detail tool", "data-details-key": detailsKey },
       h(
         "summary",
         null,
         icon(icons.terminal, 14),
-        h("strong", { text: item.tool?.name || "工具调用" }),
+        h("strong", { text: item.tool?.name || loc("工具调用", "Tool call") }),
+        snippet ? h("span", { class: "mono", style: "opacity:.78;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:340px", text: snippet }) : null,
         status
           ? tag(
-              status === "error" || status === "failed" ? "失败" : status === "running" ? "运行中" : "完成",
-              status === "error" || status === "failed" ? "bad" : status === "running" ? "warn" : "ok",
+              status === "error" || status === "failed"
+                ? loc("失败", "Failed")
+                : status === "running"
+                  ? loc("运行中", "Running")
+                  : loc("完成", "Done"),
+              status === "error" || status === "failed" ? "bad" : status === "running" ? "run" : "ok",
             )
           : null,
         h("span", { class: "mono", text: formatClock(item.ts) }),
@@ -302,12 +198,12 @@ function transcriptItem(item: SessionItem, source = ""): HTMLElement {
   if (item.type === "file_change") {
     return h(
       "details",
-      { class: "transcript-detail files" },
+      { class: "transcript-detail files", "data-details-key": detailsKey },
       h(
         "summary",
         null,
         icon(icons.fileText, 14),
-        h("strong", { text: `文件改动 · ${item.files?.length || 0}` }),
+        h("strong", { text: loc(`文件改动 · ${item.files?.length || 0}`, `File changes · ${item.files?.length || 0}`) }),
         h("span", { class: "mono", text: formatClock(item.ts) }),
       ),
       ...(item.files || []).map((file) =>
@@ -330,7 +226,12 @@ function transcriptItem(item: SessionItem, source = ""): HTMLElement {
                   null,
                   ...file.diff.split("\n").map((line) =>
                     h("span", {
-                      class: line.startsWith("+") ? "diff-add" : line.startsWith("-") ? "diff-del" : "",
+                      class:
+                        line.startsWith("+") && !line.startsWith("+++")
+                          ? "diff-add"
+                          : line.startsWith("-") && !line.startsWith("---")
+                            ? "diff-del"
+                            : "",
                       text: line,
                     }),
                   ),
@@ -344,8 +245,8 @@ function transcriptItem(item: SessionItem, source = ""): HTMLElement {
   if (item.type === "plan") {
     return h(
       "details",
-      { class: "transcript-detail plan", open: true },
-      h("summary", null, icon(icons.check, 14), h("strong", { text: "计划" })),
+      { class: "transcript-detail plan", open: true, "data-details-key": detailsKey },
+      h("summary", null, icon(icons.check, 14), h("strong", { text: loc("计划", "Plan") })),
       ...(item.plan || []).map((step) =>
         h(
           "div",
@@ -476,8 +377,10 @@ export function renderSessions(_ctx: PageContext): PageResult {
   let selectedCommands: SessionCommand[] = [];
   let selectedDispatches: DispatchRecord[] = [];
   let selectedInbox: InboxItem[] = [];
+  let selectedReplies: ReplyRecord[] = [];
   let search = "";
   let sourceFilter = "";
+  let statusFilter: "all" | "unread" | "running" | "pinned" | "archived" = "all";
   let contentSearchQuery = "";
   let contentSearchHits: SearchHit[] = [];
   let contentSearchNotice = "";
@@ -503,6 +406,7 @@ export function renderSessions(_ctx: PageContext): PageResult {
   let transcriptHost: HTMLElement | null = null;
   let collabHost: HTMLElement | null = null;
   let approvalHost: HTMLElement | null = null;
+  let queuedHost: HTMLElement | null = null;
   let composerTextarea: HTMLTextAreaElement | null = null;
   let sendRowHost: HTMLElement | null = null;
   let previewHost: HTMLElement | null = null;
@@ -553,7 +457,14 @@ export function renderSessions(_ctx: PageContext): PageResult {
   function visibleSessions(): SessionSummary[] {
     const needle = search.trim().toLowerCase();
     return sessions.filter((session) => {
-      if (session.archived) return false;
+      if (statusFilter === "archived") {
+        if (!session.archived) return false;
+      } else {
+        if (session.archived) return false;
+        if (statusFilter === "unread" && session.read !== false) return false;
+        if (statusFilter === "running" && !session.running) return false;
+        if (statusFilter === "pinned" && !session.pinned) return false;
+      }
       if (sourceFilter && session.source !== sourceFilter) return false;
       if (!needle) return true;
       return [session.title, session.session_id, session.project, session.cwd, session.model, session.branch]
@@ -595,9 +506,9 @@ export function renderSessions(_ctx: PageContext): PageResult {
           ? `索引不可用，已降级为逐会话搜索：${result.degraded_reason}`
           : "索引不可用，已降级为逐会话搜索。";
       } else if (result.fallback_like) {
-        contentSearchNotice = "查詢短於 3 個字元，已使用較慢的字串比對。";
+        contentSearchNotice = loc("查询短于 3 个字符，已使用较慢的子串比对。", "Query under 3 chars; using slower substring match.");
       } else if (result.truncated) {
-        contentSearchNotice = "命中較多，目前只顯示前 50 條。";
+        contentSearchNotice = loc("命中较多，当前只显示前 50 条。", "Many hits; showing the first 50.");
       }
     } catch (err) {
       if (disposed || request !== contentSearchRequest) return;
@@ -714,6 +625,7 @@ export function renderSessions(_ctx: PageContext): PageResult {
     }
     for (const group of map.values()) {
       group.sort((a, b) => {
+        if (Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1;
         if (a.collab?.role === "parent" && b.collab?.parent?.session_id === a.session_id) return -1;
         if (b.collab?.role === "parent" && a.collab?.parent?.session_id === b.session_id) return 1;
         return (b.last_ts || "").localeCompare(a.last_ts || "");
@@ -790,17 +702,38 @@ export function renderSessions(_ctx: PageContext): PageResult {
     });
     listClose.append(icon(icons.close, 14));
     listClose.addEventListener("click", () => setListOpen(false));
+    const statusFilters = h("div", { class: "session-status-filters" });
+    const statusOptions: Array<{ key: typeof statusFilter; label: string }> = [
+      { key: "all", label: loc("全部", "All") },
+      { key: "unread", label: loc("未读", "Unread") },
+      { key: "running", label: loc("运行中", "Running") },
+      { key: "pinned", label: loc("置顶", "Pinned") },
+      { key: "archived", label: loc("已归档", "Archived") },
+    ];
+    for (const opt of statusOptions) {
+      const chip = h("button", {
+        class: statusFilter === opt.key ? "session-filter-chip active" : "session-filter-chip",
+        type: "button",
+        text: opt.label,
+      });
+      chip.addEventListener("click", () => {
+        if (statusFilter === opt.key) return;
+        statusFilter = opt.key;
+        paintList();
+      });
+      statusFilters.append(chip);
+    }
     left.append(
       h(
         "div",
         { class: "workbench-sidebar-head" },
-        h("div", null, h("h2", { text: "会话" })),
+        h("div", null, h("h2", { text: loc("会话", "Sessions") })),
         h("div", { class: "spacer", style: "flex:1" }),
         h("span", { class: "count", text: String(visibleRows.length) }),
         newButton,
         listClose,
       ),
-      h("div", { class: "workbench-filters" }, searchInput, sourceSelect),
+      h("div", { class: "workbench-filters" }, searchInput, sourceSelect, statusFilters),
     );
     const tree = h("div", { class: "project-tree" });
     const pendingRows: Array<{ host: HTMLElement; session: SessionSummary }> = [];
@@ -866,10 +799,11 @@ export function renderSessions(_ctx: PageContext): PageResult {
         h(
           "span",
           { class: "session-row-title" },
+          session.pinned ? h("span", { class: "session-pin-mark", title: loc("置顶", "Pinned"), text: "★" }) : null,
           child ? h("span", { class: "session-child-mark", text: "↳" }) : null,
           h("span", { class: "txt", text: session.title || session.session_id.slice(0, 14) }),
-          session.running ? h("span", { class: "dot dot-warn" }) : null,
-          session.read === false ? h("span", { class: "unread-dot", title: "未读" }) : null,
+          session.running ? h("span", { class: "dot dot-run" }) : null,
+          session.read === false ? h("span", { class: "unread-dot", title: loc("未读", "Unread") }) : null,
         ),
         h(
           "span",
@@ -888,57 +822,16 @@ export function renderSessions(_ctx: PageContext): PageResult {
     return row;
   }
 
-  function sessionCard(session: SessionSummary): HTMLElement {
-    const active = selected?.session_id === session.session_id && selected?.source === session.source;
-    const card = h(
-      "button",
-      { class: `session-card${active ? " active" : ""}`, type: "button" },
-      h(
-        "span",
-        { class: "session-card-head" },
-        agentBadge(session.source),
-        h("span", { class: "session-card-name", text: agentName(session.source) }),
-        h("div", { class: "spacer", style: "flex:1" }),
-        session.running ? tag("运行中", "warn") : null,
-        session.read === false ? tag("未读", "ok") : null,
-        h("span", { class: "mono session-card-time", text: timeAgo(session.last_ts) }),
-      ),
-      h("strong", { class: "session-card-title", text: session.title || session.session_id.slice(0, 14) }),
-      h("span", { class: "session-card-preview", text: session.last_preview || session.cwd || "—" }),
-      h(
-        "span",
-        { class: "session-card-meta" },
-        h("span", { text: session.project || "未分组" }),
-        session.model ? h("span", { text: session.model }) : null,
-        session.collab?.role === "child" ? h("span", { class: "collab-mark", text: "协作子会话" }) : null,
-        session.collab?.role === "parent" && session.collab.children?.length
-          ? h("span", { class: "collab-mark", text: `${session.collab.children.length} 协作` })
-          : null,
-      ),
-    );
-    card.addEventListener("click", () => selectSession(session));
-    return card;
-  }
-
   function paintList() {
     const paintToken = ++listPaintToken;
     const rows = visibleSessions();
     paintSidebar(paintToken, rows);
     clear(center);
     root.classList.toggle("search-open", Boolean(contentSearchQuery));
+    if (!contentSearchQuery) return;
     const cards = h("div", { class: "session-card-list" });
-    if (contentSearchQuery) cards.append(contentSearchPanel());
+    cards.append(contentSearchPanel());
     center.append(cards);
-    if (rows.length) {
-      scheduleBatch(
-        rows,
-        (session) => cards.append(sessionCard(session)),
-        () => !disposed && paintToken === listPaintToken,
-        SESSION_RENDER_BATCH,
-      );
-    } else {
-      cards.append(emptyState("没有会话", "调整搜索或 Agent 筛选，或先让一个 Agent 跑一轮。"));
-    }
   }
 
   async function loadSessions(initial = false) {
@@ -948,13 +841,15 @@ export function renderSessions(_ctx: PageContext): PageResult {
         endpoints.agents().catch(() => ({ agents: [] as Agent[], generated_at: "" })),
       ]);
       if (disposed) return;
-      sessions = sessionPayload.sessions.filter((session) => !session.archived);
+      sessions = sessionPayload.sessions;
       agents = agentPayload.agents;
       const requested = selected?.session_id || currentFromURL();
+      const nonArchived = sessions.filter((session) => !session.archived);
       const next =
         sessions.find((session) => session.session_id === requested && (!selected || session.source === selected.source)) ||
         selected ||
-        sessions.find((session) => !session.is_empty) ||
+        nonArchived.find((session) => !session.is_empty) ||
+        nonArchived[0] ||
         sessions[0] ||
         null;
       if (initial || !selected || next?.session_id !== selected.session_id) {
@@ -1002,6 +897,7 @@ export function renderSessions(_ctx: PageContext): PageResult {
     selectedCommands = [];
     selectedDispatches = [];
     selectedInbox = [];
+    selectedReplies = [];
     autoExpandFor(session);
     setURLSession(session.session_id);
     paintList();
@@ -1584,7 +1480,7 @@ export function renderSessions(_ctx: PageContext): PageResult {
     const id = selected.session_id;
     const token = ++loadToken;
     try {
-      const [detail, items, commands, dispatches, inbox] = await Promise.all([
+      const [detail, items, commands, dispatches, inbox, replies] = await Promise.all([
         endpoints.session(id).catch(() => selected!),
         endpoints.sessionItems(id, TRANSCRIPT_ITEM_LIMIT, undefined, true).catch(() => ({
           session_id: id,
@@ -1592,11 +1488,12 @@ export function renderSessions(_ctx: PageContext): PageResult {
           count: 0,
           items: [] as SessionItem[],
           turns: [] as unknown[],
-          reason: "读取会话正文失败",
+          reason: loc("读取会话正文失败", "Failed to load transcript"),
         })),
         endpoints.sessionCommands(id).catch(() => ({ session_id: id, source: selected!.source, commands: [] as SessionCommand[], count: 0 })),
         endpoints.dispatches(id).catch(() => ({ dispatches: [] as DispatchRecord[], count: 0 })),
         endpoints.inbox().catch(() => ({ waiting: [] as InboxItem[], running: [] as InboxItem[], recent_done: [] as InboxItem[], counts: { waiting: 0, running: 0 }, generated_at: "" })),
+        endpoints.replies(id).catch(() => ({ replies: [] as ReplyRecord[] })),
       ]);
       if (disposed || token !== loadToken || selected?.session_id !== id) return;
       selected = detail;
@@ -1606,10 +1503,14 @@ export function renderSessions(_ctx: PageContext): PageResult {
       selectedInbox = inbox.waiting.filter(
         (item) => item.session.session_id === id && item.session.source === detail.source,
       );
+      selectedReplies = (replies.replies || []).filter(
+        (item) => item.status === "queued" || item.status === "pending",
+      );
       paintHeaderOnly();
       paintTranscript(true);
       paintCollab();
       paintApproval();
+      paintQueued();
       connectStream(id);
       if (markRead && detail.read === false) {
         const state = await endpoints.patchSession(id, { read: true }).catch(() => null);
@@ -1649,11 +1550,12 @@ export function renderSessions(_ctx: PageContext): PageResult {
     const afterSeq = fullItems
       ? undefined
       : selectedItems.reduce((maximum, item) => Math.max(maximum, item.seq || 0), 0);
-    const [items, dispatches, inbox, detail] = await Promise.all([
+    const [items, dispatches, inbox, detail, replies] = await Promise.all([
       endpoints.sessionItems(id, TRANSCRIPT_ITEM_LIMIT, afterSeq, true).catch(() => null),
       endpoints.dispatches(id).catch(() => null),
       endpoints.inbox().catch(() => null),
       endpoints.session(id).catch(() => null),
+      endpoints.replies(id).catch(() => null),
     ]);
     if (disposed || token !== loadToken || selected?.session_id !== id) return;
     let transcriptChanged = false;
@@ -1672,10 +1574,16 @@ export function renderSessions(_ctx: PageContext): PageResult {
         (item) => item.session.session_id === id && item.session.source === selected?.source,
       );
     }
+    if (replies) {
+      selectedReplies = (replies.replies || []).filter(
+        (item) => item.status === "queued" || item.status === "pending",
+      );
+    }
     paintHeaderOnly();
     if (transcriptChanged) paintTranscript(false);
     paintCollab();
     paintApproval();
+    paintQueued();
   }
 
   function connectStream(id: string) {
@@ -1723,6 +1631,7 @@ export function renderSessions(_ctx: PageContext): PageResult {
     transcriptHost = null;
     collabHost = null;
     approvalHost = null;
+    queuedHost = null;
     composerTextarea = null;
     palettesHost = null;
     if (!selected) {
@@ -1732,8 +1641,8 @@ export function renderSessions(_ctx: PageContext): PageResult {
           "div",
           { class: "workbench-empty" },
           h("div", { class: "big-pigeon", text: "◎" }),
-          h("h2", { text: "选一个会话开始" }),
-          h("p", { text: "左边是会话库；打开后可读正文、处理授权、回复，或输入 @ 交给另一个 Agent。" }),
+          h("h2", { text: loc("选一个会话开始", "Select a session") }),
+          h("p", { text: loc("左边是会话库；打开后可读正文、处理授权、回复，或输入 @ 交给另一个 Agent。", "Pick a session on the left to read the transcript, handle approvals, reply, or @mention another agent.") }),
         ),
       );
       return;
@@ -1742,10 +1651,12 @@ export function renderSessions(_ctx: PageContext): PageResult {
     collabHost = h("div", { class: "collab-host" });
     approvalHost = h("div", { class: "approval-host" });
     transcriptHost = h("div", { class: "transcript" });
-    main.append(headerHost, collabHost, approvalHost, transcriptHost, composer());
+    queuedHost = h("div", { class: "queued-host" });
+    main.append(headerHost, collabHost, approvalHost, transcriptHost, queuedHost, composer());
     paintHeaderOnly();
     paintCollab();
     paintApproval();
+    paintQueued();
     paintTranscript(true);
   }
 
@@ -1787,13 +1698,29 @@ export function renderSessions(_ctx: PageContext): PageResult {
     moreSummary.append(icon(icons.grip, 15));
     const moreMenu = h("div", { class: "session-more-menu" });
     moreMenu.append(
-      button("重命名", {
+      button(loc("重命名", "Rename"), {
         variant: "quiet",
         small: true,
         iconSvg: icons.edit,
         onClick: () => {
           more.open = false;
           void renameSession();
+        },
+      }),
+      button(session.pinned ? loc("取消置顶", "Unpin") : loc("置顶会话", "Pin session"), {
+        variant: "quiet",
+        small: true,
+        onClick: () => {
+          more.open = false;
+          void togglePinSelected();
+        },
+      }),
+      button(session.read === false ? loc("标为已读", "Mark read") : loc("标为未读", "Mark unread"), {
+        variant: "quiet",
+        small: true,
+        onClick: () => {
+          more.open = false;
+          void toggleReadSelected();
         },
       }),
       h(
@@ -1804,15 +1731,15 @@ export function renderSessions(_ctx: PageContext): PageResult {
           download: "",
         },
         icon(icons.download, 13),
-        h("span", { text: "导出 Markdown" }),
+        h("span", { text: loc("导出 Markdown", "Export Markdown") }),
       ),
-      button("归档会话", {
+      button(session.archived ? loc("取消归档", "Unarchive") : loc("归档会话", "Archive session"), {
         variant: "quiet",
         small: true,
         iconSvg: icons.trash,
         onClick: () => {
           more.open = false;
-          void archiveSelected();
+          void (session.archived ? unarchiveSession(session) : archiveSelected());
         },
       }),
     );
@@ -1858,8 +1785,9 @@ export function renderSessions(_ctx: PageContext): PageResult {
           { class: "workbench-title-row" },
           agentBadge(session.source),
           h("h2", { text: session.title || session.session_id.slice(0, 16) }),
-          session.running ? pill("运行中", "warn") : null,
-          session.read === false ? tag("未读", "ok") : null,
+          session.running ? pill(loc("运行中", "Running"), "run") : null,
+          session.archived ? tag(loc("已归档", "Archived"), "mute") : null,
+          session.read === false ? tag(loc("未读", "Unread"), "ok") : null,
         ),
         h(
           "div",
@@ -1943,9 +1871,9 @@ export function renderSessions(_ctx: PageContext): PageResult {
     copy.addEventListener("click", async () => {
       try {
         await navigator.clipboard.writeText(text);
-        toast(`${label}已复制`, "ok");
+        toast(loc(`${label}已复制`, `${label} copied`), "ok");
       } catch {
-        window.prompt(`复制${label}`, text);
+        await promptDialog({ title: loc(`复制${label}`, `Copy ${label}`), defaultValue: text, confirmLabel: loc("确定", "OK") });
       }
     });
     return copy;
@@ -2089,11 +2017,11 @@ export function renderSessions(_ctx: PageContext): PageResult {
     );
     drawerFoot.append(
       exportAction,
-      button("归档", {
+      button(session.archived ? loc("取消归档", "Unarchive") : loc("归档", "Archive"), {
         variant: "quiet",
         small: true,
         iconSvg: icons.trash,
-        onClick: () => void archiveSelected(),
+        onClick: () => void (session.archived ? unarchiveSession(session) : archiveSelected()),
       }),
     );
   }
@@ -2172,6 +2100,7 @@ export function renderSessions(_ctx: PageContext): PageResult {
   function paintTranscript(scroll: boolean) {
     if (!transcriptHost) return;
     const wasNearBottom = transcriptHost.scrollHeight - transcriptHost.scrollTop - transcriptHost.clientHeight < 180;
+    const openDetailKeys = captureOpenDetails(transcriptHost);
     const paintToken = ++transcriptPaintToken;
     transcriptPainted = false;
     transcriptItemNodes.clear();
@@ -2213,6 +2142,9 @@ export function renderSessions(_ctx: PageContext): PageResult {
       if (transcriptItemNodes.size < selectedItems.length) {
         paintTranscript(false);
         return;
+      }
+      if (openDetailKeys.size && transcriptHost) {
+        restoreOpenDetails(transcriptHost, openDetailKeys);
       }
       transcriptPainted = true;
       const focusNode = pendingTranscriptItemId
@@ -2420,6 +2352,7 @@ export function renderSessions(_ctx: PageContext): PageResult {
     const pending = selectedInbox[0];
     if (!pending) return;
     const approval = pending.kind === "approval";
+    const extraCount = selectedInbox.length - 1;
     approvalHost.append(
       h(
         "div",
@@ -2428,10 +2361,24 @@ export function renderSessions(_ctx: PageContext): PageResult {
         h(
           "div",
           { class: "approval-copy" },
-          h("strong", {
-            text: approval ? "Agent 请求授权" : pending.kind === "error" ? "Agent 出错" : "Agent 等你回复",
-          }),
+          h(
+            "div",
+            { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap" },
+            h("strong", {
+              text: approval
+                ? loc("Agent 请求授权", "Approval Required")
+                : pending.kind === "error"
+                  ? loc("Agent 出错", "Agent Error")
+                  : loc("Agent 等你回复", "Waiting for Reply"),
+            }),
+            extraCount > 0
+              ? tag(loc(`还有 ${extraCount} 条待处理`, `+${extraCount} more`), "warn")
+              : null,
+          ),
           h("p", { text: pending.summary || pending.title }),
+          approval && pending.approval?.command
+            ? h("pre", { class: "session-approval-cmd" }, h("code", { text: pending.approval.command }))
+            : null,
         ),
         approval
           ? approvalButtons(pending.approval, (decision, optionId) =>
@@ -2440,6 +2387,39 @@ export function renderSessions(_ctx: PageContext): PageResult {
           : null,
       ),
     );
+  }
+
+  function paintQueued() {
+    if (!queuedHost) return;
+    clear(queuedHost);
+    if (!selectedReplies.length) return;
+    const list = h("div", { class: "session-queued-bar" });
+    for (const item of selectedReplies) {
+      list.append(
+        h(
+          "div",
+          { class: "session-queued-item" },
+          tag(loc("排队中", "Queued"), "warn"),
+          h("span", { class: "session-queued-text", text: item.text || item.message || `#${item.reply_id}` }),
+          button(loc("撤回", "Withdraw"), {
+            variant: "quiet",
+            small: true,
+            onClick: () => void withdrawReply(item),
+          }),
+        ),
+      );
+    }
+    queuedHost.append(list);
+  }
+
+  async function withdrawReply(item: ReplyRecord) {
+    try {
+      await endpoints.cancelReply(String(item.reply_id));
+      toast(loc("已撤回排队回复", "Queued reply withdrawn"), "ok");
+      await refreshSelectedData();
+    } catch (err) {
+      reportError(err, loc("撤回失败", "Failed to withdraw"));
+    }
   }
 
   async function resolveApproval(
@@ -2686,9 +2666,9 @@ export function renderSessions(_ctx: PageContext): PageResult {
     const textarea = h("textarea", {
       class: "composer-input",
       rows: "3",
-      placeholder: "回复…  输入 @ 指派 Agent，/ 查看命令",
+      placeholder: loc("回复…  输入 @ 指派 Agent，/ 查看命令（⌘Enter 发送，Enter 换行，可粘贴截图）", "Reply… Type @ to mention an agent, / for commands (⌘Enter to send, Enter for newline, paste images)"),
       "aria-keyshortcuts": "Meta+Enter Control+Enter",
-      title: "⌘Enter 发送 · Shift+Enter 换行",
+      title: loc("⌘Enter / Ctrl+Enter 发送 · Enter 换行", "⌘Enter / Ctrl+Enter to send · Enter for newline"),
     }) as HTMLTextAreaElement;
     textarea.value = draft;
     composerTextarea = textarea;
@@ -2699,12 +2679,23 @@ export function renderSessions(_ctx: PageContext): PageResult {
       repaintPreview();
       paintSendRow();
       if (draft.endsWith("@")) showAgentPalette();
+      else if (palettesHost && palettesHost.childElementCount > 0 && !draft.includes("@") && !draft.includes("/")) {
+        clear(palettesHost);
+      }
     });
     textarea.addEventListener("keydown", (event) => {
-      if (event.metaKey || event.ctrlKey) return;
-      if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+      if (event.key === "Escape" && palettesHost && palettesHost.childElementCount > 0) {
         event.preventDefault();
-        void sendMessage();
+        clear(palettesHost);
+      }
+    });
+    textarea.addEventListener("paste", (event) => {
+      const files = Array.from(event.clipboardData?.files || []).filter(
+        (file) => file.type.startsWith("image/") || file.size > 0,
+      );
+      if (files.length) {
+        event.preventDefault();
+        void addAttachments(files);
       }
     });
     sendRowHost = h("div", { class: "composer-actions" });
@@ -2880,11 +2871,11 @@ export function renderSessions(_ctx: PageContext): PageResult {
               mentionEdits[index]?.target || "auto",
               (value) => updateMentionEdit(index, { target: value as MentionEdit["target"] }),
             )),
-            mentionControl("工作区", mentionEditSelect(
+            mentionControl(loc("工作区", "Workspace"), mentionEditSelect(
               [
-                ["auto", "自动"],
-                ["readonly", "唯读"],
-                ["shared", "共享"],
+                ["auto", loc("自动", "Auto")],
+                ["readonly", loc("只读", "Read-only")],
+                ["shared", loc("共享", "Shared")],
                 ["worktree", "worktree"],
               ],
               mentionEdits[index]?.workspace || "auto",
@@ -3055,20 +3046,39 @@ export function renderSessions(_ctx: PageContext): PageResult {
         mentions: mentionEdits,
         dry_run: false,
       });
-      if (!result.ok) throw new Error(result.error || "发送失败");
+      if (!result.ok) throw new Error(result.error || loc("发送失败", "Send failed"));
       const count = result.dispatches?.length || 0;
-      toast(count ? `已发送，并派发 ${count} 个协作任务` : result.reply?.message || "已发送", "ok");
+      const sentText = draft.trim();
+      toast(
+        count
+          ? loc(`已发送，并派发 ${count} 个协作任务`, `Sent and dispatched ${count} task(s)`)
+          : result.reply?.message || loc("已发送", "Sent"),
+        "ok",
+      );
+      // Optimistic user message echo before the next SSE/poll frame arrives.
+      if (sentText) {
+        const nextSeq = selectedItems.reduce((m, it) => Math.max(m, it.seq || 0), 0) + 1;
+        applyStreamItem({
+          id: `optimistic-${Date.now()}`,
+          seq: nextSeq,
+          type: "message",
+          role: "user",
+          text: sentText,
+          ts: new Date().toISOString(),
+        });
+      }
       draft = "";
       pendingAttachments = [];
       pendingPlan = null;
       mentionEdits = [];
       if (composerTextarea) composerTextarea.value = "";
+      if (palettesHost) clear(palettesHost);
       paintAttachments();
       paintPreview();
       await refreshSelectedData();
       await loadSessions(false);
     } catch (err) {
-      reportError(err, "发送失败");
+      reportError(err, loc("发送失败", "Failed to send"));
     } finally {
       sending = false;
       paintSendRow();
@@ -3077,16 +3087,62 @@ export function renderSessions(_ctx: PageContext): PageResult {
 
   async function renameSession() {
     if (!selected) return;
-    const next = window.prompt("新的会话标题（只改 Homing 的显示名）", selected.title || "");
+    const next = await promptDialog({
+      title: loc("重命名会话", "Rename session"),
+      message: loc("只修改 Homing 中的显示名称，不影响 Agent 原生记录。", "Only updates the display title in Homing."),
+      defaultValue: selected.title || "",
+      confirmLabel: t("common.save"),
+    });
     if (next === null) return;
     try {
       const payload = await endpoints.patchSession(selected.session_id, { title: next.trim() });
       if (payload.session) selected = payload.session;
-      toast("标题已更新", "ok");
+      toast(loc("标题已更新", "Title updated"), "ok");
       paintHeaderOnly();
       await loadSessions(false);
     } catch (err) {
-      reportError(err, "重命名失败");
+      reportError(err, loc("重命名失败", "Failed to rename"));
+    }
+  }
+
+  async function togglePinSelected() {
+    if (!selected) return;
+    const nextPinned = !selected.pinned;
+    try {
+      const payload = await endpoints.patchSession(selected.session_id, { pinned: nextPinned });
+      if (payload.session) selected = payload.session;
+      toast(nextPinned ? loc("已置顶会话", "Session pinned") : loc("已取消置顶", "Session unpinned"), "ok");
+      paintHeaderOnly();
+      await loadSessions(false);
+    } catch (err) {
+      reportError(err, loc("更新置顶状态失败", "Failed to update pin state"));
+    }
+  }
+
+  async function toggleReadSelected() {
+    if (!selected) return;
+    const nextRead = selected.read === false;
+    try {
+      const payload = await endpoints.patchSession(selected.session_id, { read: nextRead });
+      if (payload.session) selected = payload.session;
+      toast(nextRead ? loc("已标为已读", "Marked as read") : loc("已标为未读", "Marked as unread"), "ok");
+      paintHeaderOnly();
+      await loadSessions(false);
+    } catch (err) {
+      reportError(err, loc("更新已读状态失败", "Failed to update read state"));
+    }
+  }
+
+  async function unarchiveSession(target: SessionSummary) {
+    try {
+      const payload = await endpoints.patchSession(target.session_id, { archived: false });
+      if (selected?.session_id === target.session_id && payload.session) selected = payload.session;
+      toast(loc("已取消归档", "Session unarchived"), "ok");
+      await loadSessions(false);
+      paintHeaderOnly();
+      paintList();
+    } catch (err) {
+      reportError(err, loc("取消归档失败", "Failed to unarchive"));
     }
   }
 
@@ -3095,89 +3151,123 @@ export function renderSessions(_ctx: PageContext): PageResult {
     const target = selected;
     try {
       await endpoints.patchSession(target.session_id, { archived: true });
-      toast("会话已归档", "ok");
-      sessions = sessions.filter(
-        (session) =>
-          session.session_id !== target.session_id || session.source !== target.source,
+      toastWithAction(
+        loc("会话已归档", "Session archived"),
+        loc("撤销", "Undo"),
+        () => {
+          void unarchiveSession(target).then(() => selectSession(target));
+        },
+        "ok",
+        6000,
       );
+      target.archived = true;
       selected = null;
       await loadSessions(false);
       paintList();
       if (!selected) paintMain();
     } catch (err) {
-      reportError(err, "归档失败");
+      reportError(err, loc("归档失败", "Failed to archive"));
     }
   }
 
   async function stopSession() {
     if (!selected) return;
-    if (!window.confirm("停止当前会话正在运行的回合？只对 Homing 启动的进程或支持的 Agent 有效。")) return;
+    const ok = await confirmDialog({
+      title: loc("停止当前回合", "Stop current turn"),
+      message: loc(
+        "停止当前会话正在运行的回合？只对 Homing 启动的进程或支持的 Agent 有效。",
+        "Stop the active turn? Only applies to Homing-launched processes or supported agents.",
+      ),
+      confirmLabel: loc("停止", "Stop"),
+      danger: true,
+    });
+    if (!ok) return;
     try {
       const result = await endpoints.stopSession(selected.session_id);
-      if (!result.ok) throw new Error(result.message || result.error || "Agent 不支持停止");
-      toast("已发送停止请求", "ok");
+      if (!result.ok) throw new Error(result.message || result.error || loc("Agent 不支持停止", "Agent does not support stop"));
+      toast(loc("已发送停止请求", "Stop request sent"), "ok");
       await refreshSelectedData();
     } catch (err) {
-      reportError(err, "停止失败");
+      reportError(err, loc("停止失败", "Failed to stop"));
     }
   }
 
   async function cancelDispatch(dispatch: DispatchRecord) {
-    if (!window.confirm(`取消 ${agentName(dispatch.target_agent)} 的协作任务？`)) return;
+    const ok = await confirmDialog({
+      title: loc("取消协作任务", "Cancel dispatch"),
+      message: loc(
+        `取消 ${agentName(dispatch.target_agent)} 的协作任务？`,
+        `Cancel the dispatch to ${agentName(dispatch.target_agent)}?`,
+      ),
+      confirmLabel: loc("取消任务", "Cancel task"),
+      danger: true,
+    });
+    if (!ok) return;
     try {
       await endpoints.cancelDispatch(dispatch.dispatch_id);
-      toast("协作任务已取消", "ok");
+      toast(loc("协作任务已取消", "Dispatch cancelled"), "ok");
       await refreshSelectedData();
     } catch (err) {
-      reportError(err, "取消失败");
+      reportError(err, loc("取消失败", "Failed to cancel"));
     }
   }
 
   async function forwardDispatch(dispatch: DispatchRecord) {
     if (!dispatch.result?.text) return;
-    const text = window.prompt(
-      "转交给父 Agent 的文本（可编辑）",
-      `【@${dispatch.target_agent} 的结论】\n${dispatch.result.text}${
+    const text = await promptDialog({
+      title: loc("转交给父 Agent", "Forward to parent agent"),
+      message: loc("可编辑后再发送给父会话：", "Edit the summary before forwarding:"),
+      defaultValue: `【@${dispatch.target_agent} 的结论】\n${dispatch.result.text}${
         dispatch.result.branch ? `\n\n请检查并合并分支 ${dispatch.result.branch}。` : ""
       }`,
-    );
+      multiline: true,
+      confirmLabel: loc("转交", "Forward"),
+    });
     if (text === null || !text.trim()) return;
     try {
       await endpoints.forwardDispatch(dispatch.dispatch_id, text.trim());
-      toast("已转交给父 Agent", "ok");
+      toast(loc("已转交给父 Agent", "Forwarded to parent agent"), "ok");
       await refreshSelectedData();
     } catch (err) {
-      reportError(err, "转交失败");
+      reportError(err, loc("转交失败", "Failed to forward"));
     }
   }
 
   async function askDispatch(dispatch: DispatchRecord) {
-    const text = window.prompt(`追问 @${agentName(dispatch.target_agent)} 的协作线`, "");
+    const text = await promptDialog({
+      title: loc(`追问 @${agentName(dispatch.target_agent)}`, `Follow up with @${agentName(dispatch.target_agent)}`),
+      placeholder: loc("输入要追问的内容…", "Type a follow-up question…"),
+      multiline: true,
+      confirmLabel: loc("发送追问", "Send"),
+    });
     if (!text?.trim()) return;
     try {
       await endpoints.replyDispatch(dispatch.dispatch_id, text.trim());
-      toast("已追问，协作任务回到运行中", "ok");
+      toast(loc("已追问，协作任务回到运行中", "Follow-up sent; task resumed"), "ok");
       await refreshSelectedData();
     } catch (err) {
-      reportError(err, "追问失败");
+      reportError(err, loc("追问失败", "Failed to send follow-up"));
     }
   }
 
   async function discardDispatchWorktree(dispatch: DispatchRecord) {
-    if (
-      !window.confirm(
+    const ok = await confirmDialog({
+      title: loc("丢弃协作 Worktree", "Discard worktree"),
+      message: loc(
         `丢弃 ${dispatch.branch || "协作 worktree"}？\n\n未合并的改动会一并删除，主工作区不会受影响。`,
-      )
-    ) {
-      return;
-    }
+        `Discard ${dispatch.branch || "worktree"}?\n\nUnmerged changes in this worktree will be deleted; the main workspace is untouched.`,
+      ),
+      confirmLabel: loc("丢弃", "Discard"),
+      danger: true,
+    });
+    if (!ok) return;
     try {
       const result = await endpoints.discardDispatchWorktree(dispatch.dispatch_id, true);
-      if (!result.ok) throw new Error(result.error || "丢弃 worktree 失败");
-      toast("已丢弃协作 worktree 与分支", "ok");
+      if (!result.ok) throw new Error(result.error || loc("丢弃 worktree 失败", "Failed to discard worktree"));
+      toast(loc("已丢弃协作 worktree 与分支", "Worktree and branch discarded"), "ok");
       await refreshSelectedData();
     } catch (err) {
-      reportError(err, "丢弃 worktree 失败");
+      reportError(err, loc("丢弃 worktree 失败", "Failed to discard worktree"));
     }
   }
 
@@ -3186,9 +3276,9 @@ export function renderSessions(_ctx: PageContext): PageResult {
     if (!branch) return;
     try {
       await navigator.clipboard.writeText(branch);
-      toast("分支名已复制", "ok");
+      toast(loc("分支名已复制", "Branch name copied"), "ok");
     } catch {
-      window.prompt("复制分支名", branch);
+      await promptDialog({ title: loc("复制分支名", "Copy branch name"), defaultValue: branch, confirmLabel: loc("确定", "OK") });
     }
   }
 
@@ -3283,12 +3373,16 @@ export function renderSessions(_ctx: PageContext): PageResult {
     } else if (key === "k") {
       event.preventDefault();
       moveSelection(-1);
-    } else if (key === "e") {
-      event.preventDefault();
-      void archiveSelected();
     }
   };
+  const handleOutsidePointer = (event: PointerEvent) => {
+    if (!palettesHost || palettesHost.childElementCount === 0) return;
+    const node = event.target as Node | null;
+    if (node && (palettesHost.contains(node) || composerTextarea?.contains(node))) return;
+    clear(palettesHost);
+  };
   document.addEventListener("keydown", handleShortcut);
+  document.addEventListener("pointerdown", handleOutsidePointer);
   const stopSessionsPoll = window.setInterval(() => void loadSessions(false), 15_000);
   const stopDataPoll = window.setInterval(() => void refreshSelectedData(), 12_000);
 
@@ -3301,6 +3395,7 @@ export function renderSessions(_ctx: PageContext): PageResult {
       window.clearInterval(stopSessionsPoll);
       window.clearInterval(stopDataPoll);
       document.removeEventListener("keydown", handleShortcut);
+      document.removeEventListener("pointerdown", handleOutsidePointer);
     },
   };
 }

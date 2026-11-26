@@ -310,6 +310,7 @@ fun AttachmentCardList(
     if (attachments.isEmpty()) return
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val viewer = LocalDocumentViewer.current
     val images = attachments.filter { it.isImage }
     Column(
         modifier = modifier.fillMaxWidth(),
@@ -327,6 +328,7 @@ fun AttachmentCardList(
                 onClick = {
                     when {
                         attachment.isHtml -> onOpenHtml(attachment)
+                        viewer != null && isTextLikeAttachment(attachment) -> viewer.openAttachment(attachment)
                         else -> {
                             busy = true
                             scope.launch {

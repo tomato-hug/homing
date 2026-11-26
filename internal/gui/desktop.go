@@ -3,6 +3,7 @@
 package gui
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -12,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,6 +43,7 @@ type traySnapshot struct {
 
 type trayController struct {
 	baseURL string
+	dataDir string
 	client  *http.Client
 	token   string
 	log     *slog.Logger
@@ -69,11 +72,48 @@ func run(ctx context.Context, options Options) error {
 	instanceHash := sha256.Sum256([]byte(profile + "|" + baseURL))
 	type shellWindows struct{ main, panel *application.WebviewWindow }
 	var windows atomic.Pointer[shellWindows]
-	showMain := func() {
-		if w := windows.Load(); w != nil {
+	var appRef atomic.Pointer[application.App]
+
+	showMain := func(targetPath string) {
+		application.InvokeAsync(func() {
+			w := windows.Load()
+			if w == nil {
+				return
+			}
 			w.panel.Hide()
-			w.main.Show().Focus()
-		}
+			cleanPath := strings.TrimSpace(targetPath)
+			if cleanPath != "" && strings.HasPrefix(cleanPath, "/console") && !strings.HasPrefix(cleanPath, "//") {
+				pathJSON, _ := json.Marshal(cleanPath)
+				fullJSON, _ := json.Marshal(baseURL + cleanPath)
+				js := fmt.Sprintf(
+					`(function(){var p=%s,u=%s;try{if(location.pathname.indexOf("/console")===0){if(location.pathname+location.search!==p){history.pushState(null,"",p);window.dispatchEvent(new PopStateEvent("popstate"));}}else{location.replace(u);}}catch(_){location.href=u;}})();`,
+					string(pathJSON),
+					string(fullJSON),
+				)
+				w.main.ExecJS(js)
+			}
+			if a := appRef.Load(); a != nil {
+				a.Show()
+			}
+			if w.main.IsMinimised() {
+				w.main.UnMinimise()
+				w.main.Restore()
+			}
+			w.main.Show()
+			w.main.Focus()
+			if runtime.GOOS == "darwin" {
+				// Accessory (LSUIElement) apps on macOS Sonoma/Sequoia need an explicit
+				// window-level bump to surface reliably above fullscreen/active apps.
+				w.main.SetAlwaysOnTop(true)
+				w.main.Focus()
+				time.AfterFunc(120*time.Millisecond, func() {
+					application.InvokeAsync(func() {
+						w.main.SetAlwaysOnTop(false)
+						w.main.Focus()
+					})
+				})
+			}
+		})
 	}
 	app := application.New(application.Options{
 		Name:        "Homing",
@@ -84,19 +124,25 @@ func run(ctx context.Context, options Options) error {
 		Logger: options.Log,
 		SingleInstance: &application.SingleInstanceOptions{
 			UniqueID:               fmt.Sprintf("dev.homing.desktop.%x", instanceHash[:12]),
-			OnSecondInstanceLaunch: func(application.SecondInstanceData) { showMain() },
+			OnSecondInstanceLaunch: func(application.SecondInstanceData) { showMain("") },
 		},
 	})
+	appRef.Store(app)
 
 	devTools := options.Version == "" || options.Version == "dev" || os.Getenv("HOMING_DEVTOOLS") == "1"
+	mainURL := baseURL + "/console/"
+	if v := strings.TrimSpace(options.Version); v != "" && v != "dev" {
+		mainURL += "?desktop_version=" + url.QueryEscape(v)
+	}
 	mainWindow := app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:             "main",
 		Title:            "Homing",
-		URL:              baseURL + "/console/",
+		URL:              mainURL,
 		Width:            1320,
 		Height:           860,
 		MinWidth:         820,
 		MinHeight:        560,
+		Hidden:           options.StartHidden,
 		BackgroundColour: application.NewRGB(15, 23, 42),
 		DevToolsEnabled:  devTools,
 	})
@@ -136,7 +182,7 @@ func run(ctx context.Context, options Options) error {
 		// Wails' default reopen listener shows every hidden window, including
 		// our tray panel. Finder launches should bring back only the main window.
 		app.Event.RegisterApplicationEventHook(events.Mac.ApplicationShouldHandleReopen, func(event *application.ApplicationEvent) {
-			showMain()
+			showMain("")
 			event.Cancel()
 		})
 	}
@@ -152,16 +198,16 @@ func run(ctx context.Context, options Options) error {
 	menu := app.NewMenu()
 	menu.Add("Homing " + options.Version).SetEnabled(false)
 	menu.AddSeparator()
-	openMain := menu.Add("打开 Homing")
+	openMain := menu.Add("打开主窗口")
 	openMain.OnClick(func(*application.Context) {
-		mainWindow.Show().Focus()
+		showMain("")
 	})
 	openConsole := menu.Add("在浏览器打开控制台")
 	openConsole.OnClick(func(*application.Context) {
 		_ = openExternal(baseURL + "/console/")
 	})
 	menu.AddSeparator()
-	awayItem := menu.AddCheckbox("离开模式", false)
+	awayItem := menu.AddCheckbox("离席监听（向手机推送新消息）", false)
 	awayItem.OnClick(func(ctx *application.Context) {
 		checked := ctx.ClickedMenuItem().Checked()
 		if err := setAway(baseURL, tokenFromDataDir(options.DataDir), checked); err != nil {
@@ -177,6 +223,21 @@ func run(ctx context.Context, options Options) error {
 			pauseItem.SetChecked(!checked)
 		}
 	})
+	var keepAwakeItem *application.MenuItem
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		label := "防止电脑休眠"
+		if runtime.GOOS == "darwin" {
+			label = "防止 Mac 休眠"
+		}
+		keepAwakeItem = menu.AddCheckbox(label, false)
+		keepAwakeItem.OnClick(func(ctx *application.Context) {
+			checked := ctx.ClickedMenuItem().Checked()
+			if err := setKeepAwake(baseURL, tokenFromDataDir(options.DataDir), checked); err != nil {
+				options.Log.Warn("toggle keepawake from tray", "err", err)
+				keepAwakeItem.SetChecked(!checked)
+			}
+		})
+	}
 	menu.AddSeparator()
 	statusItem := menu.Add("正在连接本机服务…").SetEnabled(false)
 	menu.AddSeparator()
@@ -187,6 +248,7 @@ func run(ctx context.Context, options Options) error {
 
 	controller := &trayController{
 		baseURL: baseURL,
+		dataDir: options.DataDir,
 		client:  &http.Client{Timeout: 3 * time.Second},
 		token:   tokenFromDataDir(options.DataDir),
 		log:     options.Log,
@@ -198,7 +260,8 @@ func run(ctx context.Context, options Options) error {
 		controller.playTap(tray)
 		tray.ToggleWindow()
 	})
-	go controller.poll(ctx, app, tray, awayItem, pauseItem, statusItem)
+	go controller.poll(ctx, app, tray, awayItem, pauseItem, keepAwakeItem, statusItem)
+	go controller.watchWindowStream(ctx, showMain)
 
 	if ctx.Done() != nil {
 		go func() {
@@ -215,12 +278,13 @@ func (c *trayController) poll(
 	tray *application.SystemTray,
 	awayItem *application.MenuItem,
 	pauseItem *application.MenuItem,
+	keepAwakeItem *application.MenuItem,
 	statusItem *application.MenuItem,
 ) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
-		c.update(tray, awayItem, pauseItem, statusItem)
+		c.update(tray, awayItem, pauseItem, keepAwakeItem, statusItem)
 		select {
 		case <-ctx.Done():
 			return
@@ -233,6 +297,7 @@ func (c *trayController) update(
 	tray *application.SystemTray,
 	awayItem *application.MenuItem,
 	pauseItem *application.MenuItem,
+	keepAwakeItem *application.MenuItem,
 	statusItem *application.MenuItem,
 ) {
 	snapshot, err := c.fetchSnapshot()
@@ -248,7 +313,6 @@ func (c *trayController) update(
 		state = "new"
 	}
 	c.apply(tray, statusItem, snapshot, state)
-	awayItem.SetChecked(snapshot.away)
 
 	paused := false
 	if body, err := c.get("/api/push/pause"); err == nil {
@@ -259,7 +323,25 @@ func (c *trayController) update(
 			paused = payload.Paused
 		}
 	}
-	pauseItem.SetChecked(paused)
+
+	keepActive := false
+	if keepAwakeItem != nil {
+		if body, err := c.get("/api/keepawake"); err == nil {
+			var payload struct {
+				Active bool `json:"active"`
+			}
+			if json.Unmarshal(body, &payload) == nil {
+				keepActive = payload.Active
+			}
+		}
+	}
+	application.InvokeAsync(func() {
+		awayItem.SetChecked(snapshot.away)
+		pauseItem.SetChecked(paused)
+		if keepAwakeItem != nil {
+			keepAwakeItem.SetChecked(keepActive)
+		}
+	})
 }
 
 func (c *trayController) apply(
@@ -272,29 +354,83 @@ func (c *trayController) apply(
 	changed := c.state != state || c.snapshot != snapshot
 	c.state = state
 	c.snapshot = snapshot
+	tapping := c.tapping
 	c.mu.Unlock()
 	if !changed {
 		return
 	}
-	c.mu.Lock()
-	tapping := c.tapping
-	c.mu.Unlock()
-	if !tapping {
-		setTrayFrame(tray, state)
-	}
+	var label, tooltip string
 	switch {
 	case !snapshot.online:
-		statusItem.SetLabel("本机服务未响应")
-		tray.SetTooltip("Homing · 本机服务未响应")
+		label = "本机服务未响应"
+		tooltip = "Homing · 本机服务未响应"
 	case snapshot.needsYou > 0:
-		statusItem.SetLabel(fmt.Sprintf("%d 件事等你处理 · %d 个运行中", snapshot.needsYou, snapshot.running))
-		tray.SetTooltip(fmt.Sprintf("Homing · %d 件事等你处理", snapshot.needsYou))
+		label = fmt.Sprintf("%d 件事等你处理 · %d 个运行中", snapshot.needsYou, snapshot.running)
+		tooltip = fmt.Sprintf("Homing · %d 件事等你处理", snapshot.needsYou)
 	case snapshot.newItems > 0:
-		statusItem.SetLabel(fmt.Sprintf("%d 个新动态 · %d 个运行中", snapshot.newItems, snapshot.running))
-		tray.SetTooltip(fmt.Sprintf("Homing · %d 个新动态", snapshot.newItems))
+		label = fmt.Sprintf("%d 个新动态 · %d 个运行中", snapshot.newItems, snapshot.running)
+		tooltip = fmt.Sprintf("Homing · %d 个新动态", snapshot.newItems)
 	default:
-		statusItem.SetLabel(fmt.Sprintf("已连接 · %d 个运行中", snapshot.running))
-		tray.SetTooltip("Homing · 已连接")
+		label = fmt.Sprintf("已连接 · %d 个运行中", snapshot.running)
+		tooltip = "Homing · 已连接"
+	}
+	application.InvokeAsync(func() {
+		if !tapping {
+			setTrayFrame(tray, state)
+		}
+		statusItem.SetLabel(label)
+		tray.SetTooltip(tooltip)
+	})
+}
+
+// watchWindowStream subscribes to GET /api/desktop/window/stream so clicks inside
+// the HTTP-served /console/tray popover ("打开主窗口", "配对手机", session rows)
+// immediately raise the native Wails main window—even when homingd runs in launchd.
+func (c *trayController) watchWindowStream(ctx context.Context, onOpen func(path string)) {
+	streamClient := &http.Client{}
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		tok := strings.TrimSpace(c.token)
+		if c.dataDir != "" {
+			if fresh := tokenFromDataDir(c.dataDir); fresh != "" {
+				tok = fresh
+				c.token = fresh
+			}
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/desktop/window/stream", nil)
+		if err == nil {
+			if tok != "" {
+				req.Header.Set("Authorization", "Bearer "+tok)
+			}
+			resp, doErr := streamClient.Do(req)
+			if doErr == nil {
+				if resp.StatusCode == http.StatusOK {
+					scanner := bufio.NewScanner(resp.Body)
+					for scanner.Scan() {
+						line := scanner.Text()
+						if !strings.HasPrefix(line, "data:") {
+							continue
+						}
+						raw := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+						var payload struct {
+							Action string `json:"action"`
+							Path   string `json:"path"`
+						}
+						if json.Unmarshal([]byte(raw), &payload) == nil && payload.Action == "open" {
+							onOpen(payload.Path)
+						}
+					}
+				}
+				_ = resp.Body.Close()
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(1500 * time.Millisecond):
+		}
 	}
 }
 
@@ -403,6 +539,28 @@ func setPause(baseURL, token string, paused bool) error {
 	return nil
 }
 
+func setKeepAwake(baseURL, token string, enabled bool) error {
+	body, _ := json.Marshal(map[string]any{"enabled": enabled})
+	request, err := http.NewRequest(http.MethodPost, baseURL+"/api/keepawake", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode >= 300 {
+		raw, _ := io.ReadAll(io.LimitReader(response.Body, 8<<10))
+		return fmt.Errorf("%s: %s", response.Status, strings.TrimSpace(string(raw)))
+	}
+	return nil
+}
+
 func tokenFromDataDir(dataDir string) string {
 	var config struct {
 		Token string `json:"token"`
@@ -436,7 +594,10 @@ func (c *trayController) playTap(tray *application.SystemTray) {
 	c.mu.Unlock()
 	go func() {
 		for frame := 1; frame <= 20; frame++ {
-			setTrayFrame(tray, fmt.Sprintf("tap-%02d", frame))
+			name := fmt.Sprintf("tap-%02d", frame)
+			application.InvokeAsync(func() {
+				setTrayFrame(tray, name)
+			})
 			time.Sleep(30 * time.Millisecond)
 		}
 		c.mu.Lock()
@@ -446,7 +607,9 @@ func (c *trayController) playTap(tray *application.SystemTray) {
 		if state == "" {
 			state = "ok"
 		}
-		setTrayFrame(tray, state)
+		application.InvokeAsync(func() {
+			setTrayFrame(tray, state)
+		})
 	}()
 }
 

@@ -1,9 +1,11 @@
 import "./styles.css";
+import "./design-system.css";
 import { h, clear, icon } from "./lib/dom";
 import { icons } from "./lib/icons";
 import { createPigeon, type PigeonPlayer } from "./lib/pigeon";
-import { endpoints, poll, type ConnectionInfo, type Inbox } from "./lib/api";
-import { pill } from "./lib/ui";
+import { ApiError, endpoints, poll, type ConnectionInfo, type Inbox } from "./lib/api";
+import { pill, reportError, toast } from "./lib/ui";
+import { getLocale, loc, onLocaleChange, t, toggleLocale } from "./i18n";
 import { renderInbox } from "./pages/inbox";
 import { renderHome } from "./pages/home";
 import { renderHub } from "./pages/hub";
@@ -39,8 +41,8 @@ export interface PageResult {
 
 interface Route {
   path: string;
-  /** 面包屑，最后一段是当前页 */
-  crumbs: string[];
+  /** 面包屑（动态按当前语言计算） */
+  crumbs: () => string[];
   iconSvg: string;
   render: (ctx: PageContext, query: URLSearchParams) => PageResult;
 }
@@ -48,51 +50,52 @@ interface Route {
 // ---------------------------------------------------------------- 路由表
 
 const routes: Route[] = [
-  { path: "/console/tray", crumbs: ["Homing"], iconSvg: icons.overview, render: renderTray },
-  { path: "/console/", crumbs: ["Agent"], iconSvg: icons.agents, render: renderHub },
-  { path: "/console/overview", crumbs: ["使用", "总览"], iconSvg: icons.overview, render: renderHome },
-  { path: "/console/flow", crumbs: ["使用", "实时流"], iconSvg: icons.bolt, render: renderFlow },
-  { path: "/console/inbox", crumbs: ["使用", "收件箱"], iconSvg: icons.inbox, render: renderInbox },
-  { path: "/console/sessions", crumbs: ["使用", "会话"], iconSvg: icons.chat, render: renderSessions },
-  { path: "/console/rooms", crumbs: ["使用", "会议室"], iconSvg: icons.chat, render: renderRooms },
-  { path: "/console/collab", crumbs: ["使用", "协作"], iconSvg: icons.cornerDown, render: renderCollab },
-  { path: "/console/agents", crumbs: ["Agent", "全部 Agent"], iconSvg: icons.puzzle, render: renderAgents },
-  { path: "/console/devices", crumbs: ["手机", "设备"], iconSvg: icons.phone, render: renderDevices },
-  { path: "/console/notifications", crumbs: ["手机", "通知"], iconSvg: icons.bell, render: renderNotifications },
-  { path: "/console/relay", crumbs: ["连接", "中转与局域网"], iconSvg: icons.plug, render: renderRelay },
+  { path: "/console/tray", crumbs: () => ["Homing"], iconSvg: icons.overview, render: renderTray },
+  { path: "/console/", crumbs: () => [t("nav.group.work"), t("nav.overview")], iconSvg: icons.overview, render: renderHome },
+  { path: "/console/overview", crumbs: () => [t("nav.group.work"), t("nav.overview")], iconSvg: icons.overview, render: renderHome },
+  { path: "/console/hub", crumbs: () => [t("nav.group.connect"), t("nav.hub")], iconSvg: icons.agents, render: renderHub },
+  { path: "/console/flow", crumbs: () => [t("nav.group.work"), t("nav.flow")], iconSvg: icons.bolt, render: renderFlow },
+  { path: "/console/inbox", crumbs: () => [t("nav.group.work"), loc("收件箱", "Inbox")], iconSvg: icons.inbox, render: renderInbox },
+  { path: "/console/sessions", crumbs: () => [t("nav.group.work"), t("nav.sessions")], iconSvg: icons.chat, render: renderSessions },
+  { path: "/console/rooms", crumbs: () => [t("nav.group.work"), t("nav.rooms")], iconSvg: icons.chat, render: renderRooms },
+  { path: "/console/collab", crumbs: () => [t("nav.group.work"), t("nav.collab")], iconSvg: icons.cornerDown, render: renderCollab },
+  { path: "/console/agents", crumbs: () => [t("nav.group.connect"), t("nav.agents")], iconSvg: icons.puzzle, render: renderAgents },
+  { path: "/console/devices", crumbs: () => [t("nav.group.connect"), t("nav.devices")], iconSvg: icons.phone, render: renderDevices },
+  { path: "/console/notifications", crumbs: () => [t("nav.group.connect"), t("nav.notifications")], iconSvg: icons.bell, render: renderNotifications },
+  { path: "/console/relay", crumbs: () => [t("nav.group.connect"), t("nav.relay")], iconSvg: icons.plug, render: renderRelay },
   {
     path: "/console/adapters",
-    crumbs: ["Agent", "目录与接入", "内置"],
+    crumbs: () => [t("nav.group.connect"), t("nav.adapters"), loc("内置", "Built-in")],
     iconSvg: icons.puzzle,
     render: (ctx) => renderAdapters(ctx, "builtin"),
   },
   {
     path: "/console/adapters/discover",
-    crumbs: ["Agent", "目录与接入", "发现"],
+    crumbs: () => [t("nav.group.connect"), t("nav.adapters"), loc("发现", "Discover")],
     iconSvg: icons.puzzle,
     render: (ctx) => renderAdapters(ctx, "discover"),
   },
   {
     path: "/console/adapters/installed",
-    crumbs: ["Agent", "目录与接入", "已安装"],
+    crumbs: () => [t("nav.group.connect"), t("nav.adapters"), loc("已安装", "Installed")],
     iconSvg: icons.puzzle,
     render: (ctx) => renderAdapters(ctx, "installed"),
   },
   {
     path: "/console/adapters/custom",
-    crumbs: ["Agent", "目录与接入", "自定义"],
+    crumbs: () => [t("nav.group.connect"), t("nav.adapters"), loc("自定义", "Custom")],
     iconSvg: icons.puzzle,
     render: (ctx) => renderAdapters(ctx, "custom"),
   },
-  { path: "/console/library", crumbs: ["Agent", "资源库"], iconSvg: icons.library, render: renderLibrary },
-  { path: "/console/settings", crumbs: ["设置"], iconSvg: icons.gear, render: renderSettings },
-  { path: "/console/logs", crumbs: ["设置", "运行日志"], iconSvg: icons.logs, render: renderLogs },
-  { path: "/console/about", crumbs: ["设置", "关于"], iconSvg: icons.info, render: renderAbout },
+  { path: "/console/library", crumbs: () => [t("nav.group.connect"), t("nav.library")], iconSvg: icons.library, render: renderLibrary },
+  { path: "/console/settings", crumbs: () => [t("nav.settings")], iconSvg: icons.gear, render: renderSettings },
+  { path: "/console/logs", crumbs: () => [t("nav.settings"), t("nav.logs")], iconSvg: icons.logs, render: renderLogs },
+  { path: "/console/about", crumbs: () => [t("nav.settings"), t("nav.about")], iconSvg: icons.info, render: renderAbout },
 ];
 
 const setupRoute: Route = {
   path: "/console/setup",
-  crumbs: ["设置", "首次设置"],
+  crumbs: () => [t("nav.settings"), loc("首次设置", "Setup")],
   iconSvg: icons.key,
   render: renderSetup,
 };
@@ -104,61 +107,76 @@ interface NavLeaf {
   label: string;
   iconSvg?: string;
   badge?: "waiting";
+  aliases?: string[];
 }
 
 interface NavGroup {
   label: string;
+  collapsible?: boolean;
   items: NavLeaf[];
-  /** 有 children 的项是父级：点它进第一个子项，同时把子项列出来 */
   children?: Array<{ parent: string; items: NavLeaf[] }>;
 }
 
-const navGroups: NavGroup[] = [
-  {
-    label: "开始",
-    items: [{ path: "/console/", label: "Agent", iconSvg: icons.agents }],
-  },
-  {
-    label: "使用",
-    items: [
-      { path: "/console/overview", label: "总览", iconSvg: icons.overview, badge: "waiting" },
-      { path: "/console/sessions", label: "会话", iconSvg: icons.chat },
-      { path: "/console/flow", label: "实时流", iconSvg: icons.bolt },
-      { path: "/console/rooms", label: "会议室", iconSvg: icons.chat },
-      { path: "/console/collab", label: "协作", iconSvg: icons.cornerDown },
-    ],
-  },
-  {
-    label: "Agent 管理",
-    items: [
-      { path: "/console/agents", label: "全部 Agent", iconSvg: icons.puzzle },
-      { path: "/console/adapters", label: "适配器", iconSvg: icons.terminal },
-      { path: "/console/library", label: "资源库", iconSvg: icons.library },
-    ],
-    children: [
-      {
-        parent: "/console/adapters",
-        items: [
-          { path: "/console/adapters", label: "内置" },
-          { path: "/console/adapters/discover", label: "发现" },
-          { path: "/console/adapters/installed", label: "已安装" },
-          { path: "/console/adapters/custom", label: "自定义" },
-        ],
-      },
-    ],
-  },
-  {
-    label: "手机",
-    items: [
-      { path: "/console/devices", label: "设备", iconSvg: icons.phone },
-      { path: "/console/notifications", label: "通知", iconSvg: icons.bell },
-    ],
-  },
-  {
-    label: "连接",
-    items: [{ path: "/console/relay", label: "中转与局域网", iconSvg: icons.plug }],
-  },
-];
+let workbenchExpanded = false;
+
+export function getDesktopAppVersion(): string {
+  try {
+    return sessionStorage.getItem("homing.desktopVersion") || "";
+  } catch {
+    return "";
+  }
+}
+
+function captureDesktopVersionFromURL() {
+  try {
+    const url = new URL(location.href);
+    const dv = url.searchParams.get("desktop_version");
+    if (dv) {
+      sessionStorage.setItem("homing.desktopVersion", dv.trim());
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+function getNavGroups(): NavGroup[] {
+  return [
+    {
+      label: loc("离席守护", "Away Guardian"),
+      items: [
+        { path: "/console/", label: loc("离席守护中心", "Guardian Hub"), iconSvg: icons.shield, badge: "waiting", aliases: ["/console/overview"] },
+        { path: "/console/hub", label: loc("安装与配对向导", "Setup & Pair"), iconSvg: icons.phone },
+        { path: "/console/notifications", label: t("nav.notifications"), iconSvg: icons.bell },
+      ],
+    },
+    {
+      label: loc("进阶工作台", "Workbench & Advanced"),
+      collapsible: true,
+      items: [
+        { path: "/console/sessions", label: t("nav.sessions"), iconSvg: icons.chat },
+        { path: "/console/rooms", label: t("nav.rooms"), iconSvg: icons.chat },
+        { path: "/console/collab", label: t("nav.collab"), iconSvg: icons.cornerDown },
+        { path: "/console/flow", label: t("nav.flow"), iconSvg: icons.bolt },
+        { path: "/console/agents", label: t("nav.agents"), iconSvg: icons.puzzle },
+        { path: "/console/adapters", label: t("nav.adapters"), iconSvg: icons.terminal },
+        { path: "/console/library", label: t("nav.library"), iconSvg: icons.library },
+        { path: "/console/devices", label: t("nav.devices"), iconSvg: icons.phone },
+        { path: "/console/relay", label: t("nav.relay"), iconSvg: icons.plug },
+      ],
+      children: [
+        {
+          parent: "/console/adapters",
+          items: [
+            { path: "/console/adapters", label: loc("内置", "Built-in") },
+            { path: "/console/adapters/discover", label: loc("发现", "Discover") },
+            { path: "/console/adapters/installed", label: loc("已安装", "Installed") },
+            { path: "/console/adapters/custom", label: loc("自定义", "Custom") },
+          ],
+        },
+      ],
+    },
+  ];
+}
 
 // ---------------------------------------------------------------- 外壳状态
 
@@ -167,7 +185,8 @@ const shellState: {
   inbox: Inbox | null;
   home: Awaited<ReturnType<typeof endpoints.home>> | null;
   online: boolean;
-} = { connection: null, inbox: null, home: null, online: false };
+  authExpired: boolean;
+} = { connection: null, inbox: null, home: null, online: false, authExpired: false };
 
 let appRoot: HTMLElement;
 let sidebarNav: HTMLElement;
@@ -180,6 +199,56 @@ let currentDispose: (() => void) | null = null;
 let shellPoll: (() => void) | null = null;
 let currentPath = "/console/";
 let versionBadge: HTMLElement | null = null;
+
+// 客户端导航历史栈：为 macOS / Windows 原生桌面壳提供与浏览器一致的后退 / 前进能力。
+const navHistory: string[] = [];
+let navIndex = -1;
+
+function fullLocationPath(): string {
+  return `${normalizePath(location.pathname)}${location.search || ""}`;
+}
+
+function syncNavStackOnPopState() {
+  const current = fullLocationPath();
+  const stateIdx = typeof history.state?.homingNavIdx === "number" ? history.state.homingNavIdx : -1;
+  if (stateIdx >= 0 && stateIdx < navHistory.length) {
+    navIndex = stateIdx;
+    navHistory[navIndex] = current;
+    return;
+  }
+  if (navHistory.length === 0) {
+    navHistory.push(current);
+    navIndex = 0;
+    return;
+  }
+  if (navIndex > 0 && navHistory[navIndex - 1] === current) {
+    navIndex -= 1;
+  } else if (navIndex < navHistory.length - 1 && navHistory[navIndex + 1] === current) {
+    navIndex += 1;
+  } else {
+    navHistory.splice(navIndex + 1);
+    navHistory.push(current);
+    navIndex = navHistory.length - 1;
+  }
+}
+
+export function canGoBack(): boolean {
+  return navIndex > 0;
+}
+
+export function canGoForward(): boolean {
+  return navIndex >= 0 && navIndex < navHistory.length - 1;
+}
+
+export function goBack() {
+  if (!canGoBack()) return;
+  history.back();
+}
+
+export function goForward() {
+  if (!canGoForward()) return;
+  history.forward();
+}
 
 function normalizePath(path: string): string {
   const url = new URL(path, location.origin);
@@ -199,14 +268,29 @@ export function navigate(path: string, options: { replace?: boolean } = {}) {
   const normalized = normalizePath(path);
   const search = path.includes("?") ? path.slice(path.indexOf("?")) : "";
   const target = `${normalized}${search}`;
-  if (options.replace) history.replaceState({}, "", target);
-  else history.pushState({}, "", target);
+  if (!options.replace && target === fullLocationPath()) {
+    renderRoute();
+    return;
+  }
+  if (options.replace) {
+    if (navIndex >= 0 && navIndex < navHistory.length) {
+      navHistory[navIndex] = target;
+    } else {
+      navHistory.push(target);
+      navIndex = navHistory.length - 1;
+    }
+    history.replaceState({ homingNavIdx: navIndex }, "", target);
+  } else {
+    navHistory.splice(navIndex + 1);
+    navHistory.push(target);
+    navIndex = navHistory.length - 1;
+    history.pushState({ homingNavIdx: navIndex }, "", target);
+  }
   renderRoute();
 }
 
 // ---------------------------------------------------------------- 侧栏
 
-// 侧栏品牌鸽子在整个会话里只有一个实例：换页时把同一个 SVG 挂回去，动画不中断。
 let brandPigeon: PigeonPlayer | null = null;
 let lastNeedsYou = -1;
 
@@ -224,7 +308,6 @@ function brandPigeonEl(): HTMLElement {
   return btn;
 }
 
-/** 按服务状态切换鸽子：离线睡觉、有事等你时衔信张望、来新消息时收信 */
 function paintBrandPigeon() {
   const bird = brandPigeon;
   if (!bird) return;
@@ -242,18 +325,21 @@ function paintBrandPigeon() {
 
 function navItem(leaf: NavLeaf, active: boolean): HTMLElement {
   const el = h(
-    "div",
-    { class: active ? "nav-item active" : "nav-item", dataset: { path: leaf.path }, role: "link", tabindex: "0" },
+    "a",
+    {
+      href: leaf.path,
+      class: active ? "nav-item active" : "nav-item",
+      dataset: { path: leaf.path },
+    },
     leaf.iconSvg ? icon(leaf.iconSvg, 15) : null,
     h("span", { text: leaf.label }),
   );
   if (active) el.setAttribute("aria-current", "page");
-  el.addEventListener("click", () => navigate(leaf.path));
-  el.addEventListener("keydown", (event) => {
-    if ((event as KeyboardEvent).key === "Enter" || (event as KeyboardEvent).key === " ") {
-      event.preventDefault();
-      navigate(leaf.path);
-    }
+  el.addEventListener("click", (event) => {
+    const mouse = event as MouseEvent;
+    if (mouse.metaKey || mouse.ctrlKey || mouse.shiftKey || mouse.altKey || mouse.button !== 0) return;
+    event.preventDefault();
+    navigate(leaf.path);
   });
   if (leaf.badge === "waiting") {
     navBadge = h("span", { class: "nav-badge" });
@@ -264,14 +350,43 @@ function navItem(leaf: NavLeaf, active: boolean): HTMLElement {
 
 function buildSidebar(): HTMLElement {
   sidebarNav = h("nav", { class: "nav" });
+  const navGroups = getNavGroups();
 
   for (const group of navGroups) {
-    sidebarNav.append(h("div", { class: "nav-label", text: group.label }));
+    const groupHasActive = group.items.some((leaf) => {
+      const isParentActive = group.children?.some(
+        (child) => child.parent === leaf.path && currentPath.startsWith(leaf.path),
+      );
+      const isAliasActive = leaf.aliases?.includes(currentPath) ?? false;
+      return currentPath === leaf.path || isAliasActive || Boolean(isParentActive);
+    });
+    if (group.collapsible) {
+      const open = workbenchExpanded || groupHasActive;
+      const toggleBtn = h(
+        "button",
+        {
+          class: `nav-label nav-label-toggle ${open ? "open" : ""}`.trim(),
+          type: "button",
+          "aria-expanded": open ? "true" : "false",
+        },
+        h("span", { text: group.label }),
+        icon(open ? icons.chevronDown : icons.chevronRight, 12),
+      );
+      toggleBtn.addEventListener("click", () => {
+        workbenchExpanded = !open;
+        renderRoute();
+      });
+      sidebarNav.append(toggleBtn);
+      if (!open) continue;
+    } else {
+      sidebarNav.append(h("div", { class: "nav-label", text: group.label }));
+    }
     for (const leaf of group.items) {
       const isParentActive = group.children?.some(
         (child) => child.parent === leaf.path && currentPath.startsWith(leaf.path),
       );
-      const el = navItem(leaf, currentPath === leaf.path || Boolean(isParentActive));
+      const isAliasActive = leaf.aliases?.includes(currentPath) ?? false;
+      const el = navItem(leaf, currentPath === leaf.path || isAliasActive || Boolean(isParentActive));
       el.dataset.nav = `top:${leaf.path}`;
       sidebarNav.append(el);
 
@@ -285,11 +400,18 @@ function buildSidebar(): HTMLElement {
   }
 
   sidebarStatus = h("div", { class: "sidebar-status" });
-  const settingsEl = navItem({ path: "/console/settings", label: "设置", iconSvg: icons.gear }, currentPath === "/console/settings");
+  const settingsEl = navItem(
+    { path: "/console/settings", label: t("nav.settings"), iconSvg: icons.gear },
+    currentPath === "/console/settings" || currentPath === "/console/logs" || currentPath === "/console/about",
+  );
   settingsEl.dataset.nav = "settings";
 
   const foot = h("div", { class: "sidebar-foot" }, settingsEl, sidebarStatus);
-  versionBadge = h("span", { class: "brand-ver", text: shellState.connection?.version || "", title: "本机服务版本" });
+  versionBadge = h("span", {
+    class: "brand-ver",
+    text: shellState.connection?.version || "",
+    title: loc("本机服务版本", "Local daemon version"),
+  });
 
   return h(
     "aside",
@@ -309,13 +431,25 @@ function buildSidebar(): HTMLElement {
 function paintSidebarStatus() {
   if (!sidebarStatus) return;
   clear(sidebarStatus);
+  if (shellState.authExpired) {
+    sidebarStatus.append(
+      h("span", { class: "dot dot-warn" }),
+      h(
+        "div",
+        null,
+        h("div", { text: loc("凭证已刷新", "Session refreshed") }),
+        h("div", { class: "mono", text: loc("点击顶栏刷新页面", "Reload page to re-auth") }),
+      ),
+    );
+    return;
+  }
   const online = shellState.online;
   sidebarStatus.append(
     h("span", { class: online ? "dot dot-ok" : "dot" }),
     h(
       "div",
       null,
-      h("div", { text: online ? "本机服务运行中" : "本机服务未响应" }),
+      h("div", { text: online ? t("shell.online") : t("shell.offline") }),
       h("div", { class: "mono", text: `127.0.0.1:${shellState.connection?.port || 18787}` }),
     ),
   );
@@ -337,25 +471,139 @@ function paintShellStatus() {
 function paintConnection() {
   if (!connectionSlot) return;
   clear(connectionSlot);
-  if (!shellState.online) {
-    connectionSlot.append(pill("本机服务未响应", "bad", "homingd 可能已退出"));
+  if (shellState.authExpired) {
+    const reloadPill = h(
+      "button",
+      {
+        class: "auth-expired-pill",
+        type: "button",
+        title: loc("服务可能已重启，点击重新获取本地访问凭证", "Daemon may have restarted; click to reload"),
+        onClick: () => location.reload(),
+      },
+      h("span", { class: "dot dot-warn" }),
+      h("span", { text: t("shell.authExpired") }),
+    );
+    connectionSlot.append(reloadPill);
     return;
   }
+  if (!shellState.online) {
+    connectionSlot.append(pill(t("shell.offline"), "bad", loc("homingd 可能已退出", "homingd may have exited")));
+    return;
+  }
+  const awayEnabled = Boolean(shellState.home?.away?.enabled);
+  const awayBtn = h(
+    "button",
+    {
+      class: awayEnabled ? "away-toggle-pill on" : "away-toggle-pill",
+      type: "button",
+      title: awayEnabled
+        ? loc("离席监听开启中：新消息会推送至手机并防止电脑休眠（点击关闭）", "Away monitoring is ON: new messages push to phone (click to turn off)")
+        : loc("离席监听未开启：在电脑前工作不打扰手机（离开电脑前点此开启）", "Away monitoring is OFF: click before leaving desk to forward new messages to phone"),
+      onClick: async () => {
+        const next = !awayEnabled;
+        awayBtn.setAttribute("disabled", "disabled");
+        try {
+          await endpoints.setAway(next);
+          toast(
+            next
+              ? loc("已开启离席监听：离开期间的新消息将推送至手机", "Away monitoring enabled")
+              : loc("已关闭离席监听：回到电脑前工作", "Away monitoring disabled"),
+            "ok",
+          );
+          await refreshShell();
+          renderRoute();
+        } catch (err) {
+          reportError(err, loc("切换离席监听失败", "Failed to toggle away monitoring"));
+        } finally {
+          awayBtn.removeAttribute("disabled");
+        }
+      },
+    },
+    h("span", { class: awayEnabled ? "dot dot-ok" : "dot" }),
+    h("span", {
+      text: awayEnabled
+        ? loc("离席监听中 · 点击关闭", "Monitoring ON")
+        : loc("开启离席监听", "Start Monitoring"),
+    }),
+  );
+
   const waiting = shellState.home?.counts.needs_you ?? shellState.inbox?.counts.waiting ?? 0;
   const running = shellState.home?.counts.running ?? shellState.inbox?.counts.running ?? 0;
-  const text = waiting || running
-    ? [waiting ? `${waiting} 等处理` : "", running ? `${running} 运行中` : ""].filter(Boolean).join(" · ")
-    : "已连接";
+  const text =
+    waiting || running
+      ? [
+          waiting ? loc(`${waiting} 等处理`, `${waiting} waiting`) : "",
+          running ? loc(`${running} 运行中`, `${running} running`) : "",
+        ]
+          .filter(Boolean)
+          .join(" · ")
+      : t("shell.connected");
+  const tone = waiting > 0 ? "warn" : running > 0 ? "run" : "ok";
   connectionSlot.append(
-    pill(text, "ok", `${shellState.connection?.host_name || "本机"} · 端口 ${shellState.connection?.port || 18787}`),
+    awayBtn,
+    pill(
+      text,
+      tone,
+      `${shellState.connection?.host_name || loc("本机", "Local")} · ${loc("端口", "Port")} ${shellState.connection?.port || 18787}`,
+    ),
   );
+}
+
+function crumbTargetFor(label: string): string | null {
+  if (label === t("nav.group.work")) return "/console/";
+  if (label === t("nav.group.connect")) return "/console/hub";
+  if (label === t("nav.adapters")) return "/console/adapters";
+  if (label === t("nav.settings")) return "/console/settings";
+  return null;
+}
+
+function buildNavHistoryButtons(): HTMLElement {
+  const backBtn = h(
+    "button",
+    {
+      class: "icon-btn nav-history-btn",
+      type: "button",
+      disabled: !canGoBack(),
+      title: loc("返回上一页（⌘[ / Alt+←）", "Back (⌘[ / Alt+←)"),
+      "aria-label": loc("返回上一页", "Back"),
+      onClick: () => goBack(),
+    },
+    icon(icons.arrowLeft, 14),
+  );
+  const fwdBtn = h(
+    "button",
+    {
+      class: "icon-btn nav-history-btn",
+      type: "button",
+      disabled: !canGoForward(),
+      title: loc("前进下一页（⌘] / Alt+→）", "Forward (⌘] / Alt+→)"),
+      "aria-label": loc("前进下一页", "Forward"),
+      onClick: () => goForward(),
+    },
+    icon(icons.arrowRight, 14),
+  );
+  return h("div", { class: "nav-history-group" }, backBtn, fwdBtn);
 }
 
 function buildCrumbs(route: Route): HTMLElement {
   const wrap = h("div", { class: "crumbs" });
-  route.crumbs.forEach((part, index) => {
+  const parts = route.crumbs();
+  parts.forEach((part, index) => {
     if (index > 0) wrap.append(h("span", { class: "sep" }, icon(icons.chevronRight, 12)));
-    wrap.append(h("span", { class: index === route.crumbs.length - 1 ? "here" : "", text: part }));
+    const isLast = index === parts.length - 1;
+    const target = !isLast ? crumbTargetFor(part) : null;
+    if (target) {
+      wrap.append(
+        h("button", {
+          class: "crumb-link",
+          type: "button",
+          text: part,
+          onClick: () => navigate(target),
+        }),
+      );
+    } else {
+      wrap.append(h("span", { class: isLast ? "here" : "", text: part }));
+    }
   });
   return wrap;
 }
@@ -367,22 +615,28 @@ async function refreshShell() {
     shellState.connection = connection;
     if (versionBadge) versionBadge.textContent = connection.version;
     shellState.online = true;
-  } catch {
-    shellState.online = false;
+    shellState.authExpired = false;
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) {
+      shellState.authExpired = true;
+      shellState.online = true;
+    } else {
+      shellState.online = false;
+      shellState.authExpired = false;
+    }
     paintConnection();
     paintShellStatus();
     paintSidebarStatus();
     return;
   }
 
-  // 連線本身很快，會話掃描可能還要十幾秒。先把「已連上」畫出來，避免把
-  // 正在載入誤報成服務離線。
   paintConnection();
   paintSidebarStatus();
 
   const home = await endpoints.home().catch(() => null);
   shellState.home = home;
   shellState.inbox = home ? null : await endpoints.inbox().catch(() => null);
+  paintConnection();
   paintShellStatus();
 }
 
@@ -390,7 +644,24 @@ async function refreshShell() {
 
 function buildTopbar(route: Route, refreshBtn: HTMLButtonElement): HTMLElement {
   connectionSlot = h("div", { class: "connection-slot" });
-  return h("header", { class: "topbar" }, buildCrumbs(route), h("div", { class: "spacer" }), connectionSlot, refreshBtn);
+  const langBtn = h("button", {
+    class: "lang-btn",
+    type: "button",
+    text: getLocale() === "en" ? "中文" : "EN",
+    title: loc("切换界面语言（简体中文 / English）", "Switch language (English / 简体中文)"),
+    "aria-label": loc("切换语言", "Switch language"),
+  });
+  langBtn.addEventListener("click", () => toggleLocale());
+  return h(
+    "header",
+    { class: "topbar" },
+    buildNavHistoryButtons(),
+    buildCrumbs(route),
+    h("div", { class: "spacer" }),
+    connectionSlot,
+    langBtn,
+    refreshBtn,
+  );
 }
 
 function renderRoute() {
@@ -409,10 +680,22 @@ function renderRoute() {
 
   if (!route) {
     currentPath = path;
-    const fake: Route = { path, crumbs: ["找不到页面"], iconSvg: icons.warn, render: () => ({ el: h("div") }) };
+    const fake: Route = {
+      path,
+      crumbs: () => [loc("找不到页面", "Not found")],
+      iconSvg: icons.warn,
+      render: () => ({ el: h("div") }),
+    };
     clear(appRoot);
     content = h("div", { class: "content" });
-    appRoot.append(h("div", { class: "shell" }, buildSidebar(), h("div", { class: "main" }, h("header", { class: "topbar" }, buildCrumbs(fake)), content)));
+    appRoot.append(
+      h(
+        "div",
+        { class: "shell" },
+        buildSidebar(),
+        h("div", { class: "main" }, h("header", { class: "topbar" }, buildNavHistoryButtons(), buildCrumbs(fake)), content),
+      ),
+    );
     content.append(notFoundWithNav({ navigate, refreshShell, refreshPage: renderRoute }).el);
     paintSidebarStatus();
     return;
@@ -421,7 +704,6 @@ function renderRoute() {
   currentPath = route.path;
 
   if (path === "/console/tray") {
-    // 托盤面板由 Wails 以 360px 寬的獨立視窗載入，不能套主控制台側欄。
     const result = renderTray({ navigate, refreshShell, refreshPage: renderRoute });
     clear(appRoot);
     document.body.classList.add("tray-mode");
@@ -433,18 +715,21 @@ function renderRoute() {
   document.body.classList.remove("tray-mode");
 
   if (path === "/console/setup") {
-    // 向导不套侧栏：首次打开时只做一件事
     const result = route.render({ navigate, refreshShell, refreshPage: renderRoute }, query);
     clear(appRoot);
     appRoot.append(result.el);
     currentDispose = result.dispose || null;
-    void refreshShell();
     return;
   }
 
   const result = route.render({ navigate, refreshShell, refreshPage: renderRoute }, query);
 
-  const refreshBtn = h("button", { class: "icon-btn", type: "button", title: "刷新（⌘R）", "aria-label": "刷新" });
+  const refreshBtn = h("button", {
+    class: "icon-btn",
+    type: "button",
+    title: loc("刷新（⌘R）", "Refresh (⌘R)"),
+    "aria-label": t("common.refresh"),
+  });
   refreshBtn.append(icon(icons.refresh, 15));
   refreshBtn.addEventListener("click", () => {
     refreshBtn.classList.add("spinning");
@@ -458,6 +743,7 @@ function renderRoute() {
       ? "content content-workbench"
       : route.path === "/console/" ||
           route.path === "/console/overview" ||
+          route.path === "/console/hub" ||
           route.path === "/console/flow" ||
           route.path === "/console/agents" ||
           route.path === "/console/library" ||
@@ -465,11 +751,7 @@ function renderRoute() {
           route.path === "/console/collab"
         ? "content content-wide"
         : "content";
-  content = h(
-    "div",
-    { class: contentClass },
-    result.el,
-  );
+  content = h("div", { class: contentClass }, result.el);
 
   clear(appRoot);
   appRoot.append(
@@ -495,15 +777,46 @@ function renderRoute() {
   void refreshShell();
 
   if (!shellPoll) {
-    shellPoll = poll(refreshShell, 8000);
+    shellPoll = poll(refreshShell, 10_000);
   }
 }
 
 // ---------------------------------------------------------------- 启动
 
 function boot() {
+  captureDesktopVersionFromURL();
+  const initial = fullLocationPath();
+  navHistory.length = 0;
+  navHistory.push(initial);
+  navIndex = 0;
+  try {
+    history.replaceState({ homingNavIdx: 0 }, "", initial);
+  } catch {
+    /* ignore */
+  }
   appRoot = document.getElementById("app") || document.body.appendChild(h("div", { id: "app" }));
-  window.addEventListener("popstate", renderRoute);
+  window.addEventListener("popstate", () => {
+    syncNavStackOnPopState();
+    renderRoute();
+  });
+  window.addEventListener("keydown", (event) => {
+    const target = event.target as HTMLElement | null;
+    const isEditing =
+      target &&
+      (target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.tagName === "SELECT" ||
+        target.isContentEditable);
+    if (isEditing) return;
+    if ((event.metaKey && event.key === "[") || (event.altKey && event.key === "ArrowLeft")) {
+      event.preventDefault();
+      goBack();
+    } else if ((event.metaKey && event.key === "]") || (event.altKey && event.key === "ArrowRight")) {
+      event.preventDefault();
+      goForward();
+    }
+  });
+  onLocaleChange(() => renderRoute());
   document.addEventListener("click", (event) => {
     const anchor = (event.target as HTMLElement)?.closest?.("a[data-link]") as HTMLAnchorElement | null;
     if (!anchor) return;
@@ -513,8 +826,6 @@ function boot() {
     navigate(href);
   });
 
-  // 首页就是「Agent」：检测、接入、装手机端、配对都在那一页完成，
-  // 不再先把人送进单独的设置向导。
   renderRoute();
 }
 

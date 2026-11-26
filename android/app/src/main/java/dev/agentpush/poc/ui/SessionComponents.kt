@@ -43,6 +43,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalDensity
@@ -71,26 +72,34 @@ fun AgentGlyph(
     modifier: Modifier = Modifier,
     tint: Color = MaterialTheme.colorScheme.onSurface,
 ) {
-    if (agentLogoSpec(source) != null) {
+    val effectiveSource = when {
+        hasAgentLogo(source) -> source
+        hasAgentLogo(brand.wire) -> brand.wire
+        else -> ""
+    }
+    if (effectiveSource.isNotBlank()) {
         AgentLogoMark(
-            source = source,
+            source = effectiveSource,
             size = size,
             modifier = modifier,
         )
         return
     }
-    val icon = when (brand) {
-        AgentBrand.CODEX -> Icons.Outlined.Terminal
-        AgentBrand.CLAUDE -> Icons.Outlined.AutoAwesome
-        AgentBrand.WORKBUDDY -> Icons.Outlined.SmartToy
-        AgentBrand.UNKNOWN -> Icons.Outlined.Person
+    val fallbackColor = agentFallbackColor(source)
+    Box(
+        modifier = modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(fallbackColor.copy(alpha = 0.2f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = agentFallbackInitials(source),
+            color = fallbackColor,
+            fontSize = (size.value * 0.42f).sp,
+            fontWeight = FontWeight.Bold,
+        )
     }
-    Icon(
-        imageVector = icon,
-        contentDescription = brand.displayName,
-        modifier = modifier.size(size),
-        tint = tint,
-    )
 }
 
 @Composable

@@ -53,11 +53,11 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         safeScope.launch {
-            runCatching { store.refreshAll() }
-                .onFailure { showMessage(it.message ?: "同步失败") }
-            val current = store.state.value
-            if (current.mobileInbox.enabled != current.away) {
-                runCatching { store.setAway(current.mobileInbox.enabled) }
+            val hasTarget = store.state.value.settings.token.isNotBlank() ||
+                dev.agentpush.poc.protocol.PairedComputerStore(application).load().isNotEmpty()
+            if (hasTarget) {
+                runCatching { store.refreshAll() }
+                    .onFailure { showMessage(it.message ?: "同步失败") }
             }
         }
         safeScope.launch {
@@ -121,6 +121,73 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
     fun hideSessionsOnPhone(sessions: List<SessionSummary>) = store.hideSessionsOnPhone(sessions)
     fun undoPhoneCleanup() = store.undoPhoneCleanup()
     fun restorePhoneSessions() = store.restorePhoneSessions()
+
+    fun quickClearWorkspaceSessions(candidates: List<SessionSummary>): Int {
+        return store.quickClearWorkspaceSessions(candidates)
+    }
+
+    suspend fun readProjectFile(path: String, cwd: String): dev.agentpush.poc.ui.RemoteTextFile =
+        AgentApi.readProjectFile(store.state.value.settings, path, cwd)
+
+    suspend fun readAttachmentText(attachment: Attachment): String {
+        val bytes = AgentApi.downloadAttachmentBytes(store.state.value.settings, attachment)
+        val limited = if (bytes.size > 1_048_576) bytes.copyOf(1_048_576) else bytes
+        if (limited.take(8192).any { it.toInt() == 0 }) {
+            throw java.io.IOException("二进制文件无法以文本方式查看")
+        }
+        return String(limited, Charsets.UTF_8)
+    }
+
+    fun dismissWorkspaceSession(session: SessionSummary): Boolean {
+        return store.dismissWorkspaceSession(session)
+    }
+
+    fun undoWorkspaceCleanup(): Boolean {
+        return store.undoWorkspaceCleanup()
+    }
+
+    fun wakeAgent(
+        agentId: String,
+        onResult: (Result<WakeAgentResult>) -> Unit = {},
+    ) {
+        safeScope.launch {
+            val result = runCatching { store.wakeAgent(agentId) }
+            result.onSuccess { res ->
+                if (res.message.isNotBlank()) showMessage(res.message)
+            }.onFailure { err ->
+                showMessage("唤醒失败：${err.message ?: err.javaClass.simpleName}")
+            }
+            onResult(result)
+        }
+    }
+
+    fun restoreHistoricalSessions(
+        sessionIds: List<String>,
+        itemLimit: Int = 10,
+        onCompleted: (String?) -> Unit = {},
+    ) {
+        val clean = sessionIds.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+        if (clean.isEmpty()) return
+        val firstId = clean.first()
+        safeScope.launch {
+            runCatching {
+                store.restoreHistoricalSessions(clean, itemLimit = itemLimit)
+            }.onSuccess { count ->
+                _pendingNavigationSession.value = firstId
+                onCompleted(firstId)
+                showMessage(
+                    if (count == 1) {
+                        "已恢复会话及最近 $itemLimit 条记录"
+                    } else {
+                        "已恢复 $count 个会话（各载入最近 $itemLimit 条记录）"
+                    },
+                )
+            }.onFailure { err ->
+                showMessage("恢复会话失败：${err.message ?: err.javaClass.simpleName}")
+                onCompleted(null)
+            }
+        }
+    }
     fun loadEarlierContext(sessionId: String) {
         safeScope.launch { store.loadEarlierContext(sessionId) }
     }
@@ -358,11 +425,24 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setInboxMode(enabled: Boolean) {
+        toggleAwayMonitoring(enabled)
+    }
+
+    fun toggleAwayMonitoring(enabled: Boolean) {
         store.setInboxMode(enabled)
         safeScope.launch {
             runCatching { store.setAway(enabled) }
+                .onSuccess { actual ->
+                    showMessage(
+                        if (actual) {
+                            "已开启离席监听：仅接收开启后的新消息"
+                        } else {
+                            "已关闭离席监听：在电脑前工作不打扰手机"
+                        },
+                    )
+                }
                 .onFailure {
-                    showMessage("收件箱已在本机切换，电脑端同步失败：${it.message}")
+                    showMessage("切换离席监听失败：${it.message}")
                 }
         }
     }

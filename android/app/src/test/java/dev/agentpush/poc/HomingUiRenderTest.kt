@@ -302,8 +302,80 @@ class HomingUiRenderTest {
             useUnmergedTree = true,
         ).assertTextEquals("需先打开 WorkBuddy")
         compose.onNodeWithText(
-            "2 个 Agent 可启动。Codex、Claude Code 由电脑在后台用命令行启动，不需要打开它们的桌面端",
+            "2 个已唤醒的 Agent 可直接新建任务；未唤醒的 Agent 点击卡片即可远程唤醒",
         ).assertExists()
+    }
+
+    @Test
+    fun newSessionAgentPickerShowsWokenWorkBuddyContinueOnlyAndUnwokenClaudeNeedsWake() {
+        var wokenTarget = ""
+        var continueTarget = ""
+        val agents = listOf(
+            AgentProfile(
+                source = "codex",
+                installed = true,
+                available = true,
+                processRunning = true,
+                activeOnline = true,
+                capabilities = AgentCapabilities(newSession = true),
+            ),
+            AgentProfile(
+                source = "workbuddy",
+                installed = true,
+                available = false,
+                processRunning = true,
+                activeOnline = true,
+                capabilities = AgentCapabilities(newSession = false),
+            ),
+            AgentProfile(
+                source = "claude",
+                installed = true,
+                available = true,
+                processRunning = false,
+                activeOnline = false,
+                canWake = true,
+                capabilities = AgentCapabilities(newSession = true),
+            ),
+        )
+        compose.setContent {
+            AgentInboxTheme {
+                Column {
+                    NewSessionAgentPicker(
+                        agents = agents,
+                        selectedAgent = "codex",
+                        onlineCount = 1,
+                        loading = false,
+                        directoryAvailable = true,
+                        error = null,
+                        onSelect = {},
+                        onRefresh = {},
+                        agentState = { profile ->
+                            when (profile.source) {
+                                "codex" -> dev.agentpush.poc.ui.screens.NewSessionAgentState.READY
+                                "workbuddy" -> dev.agentpush.poc.ui.screens.NewSessionAgentState.CONTINUE_ONLY
+                                else -> dev.agentpush.poc.ui.screens.NewSessionAgentState.NEEDS_WAKE
+                            }
+                        },
+                        onWake = { wokenTarget = it },
+                        onContinueOnly = { continueTarget = it.source },
+                    )
+                }
+            }
+        }
+
+        compose.onNodeWithTag("new-session-agent-status-codex", useUnmergedTree = true)
+            .assertTextEquals("可后台启动")
+        compose.onNodeWithTag("new-session-agent-status-workbuddy", useUnmergedTree = true)
+            .assertTextEquals("已在线 · 仅可续聊")
+        compose.onNodeWithTag("new-session-agent-workbuddy").performClick()
+        org.junit.Assert.assertEquals("workbuddy", continueTarget)
+
+        compose.onNodeWithTag("new-session-agent-list")
+            .performScrollToNode(hasTestTag("new-session-agent-claude"))
+        compose.onNodeWithTag("new-session-agent-status-claude", useUnmergedTree = true)
+            .assertTextEquals("未唤醒 · 点击唤醒")
+        compose.onNodeWithTag("new-session-agent-claude").performClick()
+        org.junit.Assert.assertEquals("claude", wokenTarget)
     }
 
     private fun installState(state: AgentUiState) {

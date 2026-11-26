@@ -79,7 +79,7 @@ func probeDesktopService(ctx context.Context, baseURL, token string, client *htt
 		Impl string `json:"impl"`
 	}
 	if err := get("/health", false, &health); err != nil {
-		if errors.Is(err, syscall.ECONNREFUSED) {
+		if isConnectionRefused(err) {
 			return false, nil
 		}
 		return false, err
@@ -206,4 +206,18 @@ func sameDesktopDataDir(a, b string) bool {
 		return filepath.Clean(p)
 	}
 	return canonical(a) == canonical(b)
+}
+
+const winsockECONNREFUSED = syscall.Errno(10061)
+
+func isConnectionRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, winsockECONNREFUSED) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "actively refused it")
 }

@@ -83,6 +83,9 @@ func handleAgentHook(ctx context.Context, d *api.Deps, source string, body map[s
 	switch name {
 	case "Stop":
 		text := stringField(body, "last_assistant_message")
+		if source == "codex" && scanlib.IsInternalTitlePayload(text) {
+			return map[string]any{"ok": true, "ignored": "title_generator"}, nil
+		}
 		event, err := ingestEvent(d, source, "reply", sessionID, cwd,
 			label+" 回复", text)
 		if err != nil {
@@ -103,6 +106,7 @@ func handleAgentHook(ctx context.Context, d *api.Deps, source string, body map[s
 		} else {
 			text = firstNonEmpty(stringField(body, "message"), stringField(body, "reason"), "需要授权")
 		}
+		text = scanlib.NormalizeHookSourceBranding(source, text)
 		event, err := ingestEvent(d, source, "permission", sessionID, cwd,
 			label+" 请求授权", text)
 		if err != nil {
@@ -113,10 +117,15 @@ func handleAgentHook(ctx context.Context, d *api.Deps, source string, body map[s
 		return holdApproval(ctx, event), nil
 
 	case "Notification":
+		notifType := stringField(body, "notification_type")
 		text := stringField(body, "message")
+		if scanlib.IsIdlePromptNotification(notifType, text) {
+			return map[string]any{"ok": true, "ignored": "idle_prompt"}, nil
+		}
+		text = scanlib.NormalizeHookSourceBranding(source, text)
 		kind := "needs_input"
 		title := label + " 等待输入"
-		if stringField(body, "notification_type") == "permission_prompt" {
+		if notifType == "permission_prompt" {
 			kind = "permission"
 			title = label + " 请求权限"
 		}
@@ -144,8 +153,12 @@ func handleCodexHook(ctx context.Context, d *api.Deps, body map[string]any) (map
 	if sessionID == "" {
 		return map[string]any{}, nil
 	}
+	lastMsg := stringField(body, "last-assistant-message")
+	if scanlib.IsInternalTitlePayload(lastMsg) {
+		return map[string]any{"ok": true, "ignored": "title_generator"}, nil
+	}
 	event, err := ingestEvent(d, "codex", "reply", sessionID, stringField(body, "cwd"),
-		"Codex 回复", stringField(body, "last-assistant-message"))
+		"Codex 回复", lastMsg)
 	if err != nil {
 		return nil, err
 	}
@@ -200,6 +213,14 @@ func handleGenericHook(r *http.Request, d *api.Deps, body map[string]any) (map[s
 		stringField(body, "last-assistant-message"),
 		stringField(body, "output"),
 	)
+	if (kind == "needs_input" || kind == "needs_reply") &&
+		scanlib.IsIdlePromptNotification(stringField(body, "notification_type"), text) {
+		return map[string]any{"ok": true, "ignored": "idle_prompt"}, nil
+	}
+	if kind == "needs_input" || kind == "needs_reply" || kind == "permission" || kind == "approval" {
+		title = scanlib.NormalizeHookSourceBranding(source, title)
+		text = scanlib.NormalizeHookSourceBranding(source, text)
+	}
 	event, err := ingestEvent(d, source, kind, sessionID, cwd, title, text)
 	if err != nil {
 		return nil, err

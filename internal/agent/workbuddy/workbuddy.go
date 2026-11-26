@@ -243,23 +243,35 @@ func (Agent) IsEmptySession(sessionID string) bool {
 	return !claude.ReadFileMeta(path).HasConversation
 }
 
-// TranscriptPath finds a WorkBuddy transcript by session id (projects/<dir>/<id>.jsonl).
+// TranscriptPath finds a WorkBuddy transcript by session id (projects/<dir>/<id>.jsonl
+// or nested workspace sub-paths).
 func TranscriptPath(sessionID string) string {
+	if sessionID == "" {
+		return ""
+	}
 	if recorded, ok := scanlib.TranscriptPath(sessionID); ok {
 		return recorded
 	}
-	projects := filepath.Join(home(), "projects")
-	dirs, err := os.ReadDir(projects)
-	if err != nil {
-		return ""
-	}
-	for _, dir := range dirs {
-		if !dir.IsDir() {
-			continue
+	root := home()
+	projects := filepath.Join(root, "projects")
+	if dirs, err := os.ReadDir(projects); err == nil {
+		for _, dir := range dirs {
+			if !dir.IsDir() {
+				continue
+			}
+			candidate := filepath.Join(projects, dir.Name(), sessionID+".jsonl")
+			if stat, err := os.Stat(candidate); err == nil && !stat.IsDir() {
+				return candidate
+			}
 		}
-		candidate := filepath.Join(projects, dir.Name(), sessionID+".jsonl")
-		if stat, err := os.Stat(candidate); err == nil && !stat.IsDir() {
-			return candidate
+	}
+	for _, pattern := range []string{
+		filepath.Join(projects, "*", "*", sessionID+".jsonl"),
+		filepath.Join(projects, "*", "*", "*", sessionID+".jsonl"),
+		filepath.Join(root, "*", "sessions", "*", "*", sessionID+".jsonl"),
+	} {
+		if matches, err := filepath.Glob(pattern); err == nil && len(matches) > 0 {
+			return matches[0]
 		}
 	}
 	return ""

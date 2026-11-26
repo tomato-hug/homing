@@ -51,7 +51,9 @@ func autostartInfoForHome(home string) AutostartState {
 		return AutostartState{Enabled: false, Backend: "launchagent", Target: &target}
 	case "windows":
 		key := WindowsAutostartKey
-		out, err := exec.Command("reg", "query", key, "/v", WindowsAutostartValue).Output()
+		cmd := exec.Command("reg", "query", key, "/v", WindowsAutostartValue)
+		HideChildWindow(cmd)
+		out, err := cmd.Output()
 		if err == nil {
 			target := key
 			for _, line := range strings.Split(string(out), "\n") {
@@ -101,14 +103,22 @@ func SetAutostart(enabled bool, execPath, dataDir string, port int) (AutostartSt
 		}
 		return autostartInfoForHome(home), nil
 	case "windows":
-		command := `"` + execPath + `" serve --addr 0.0.0.0:` + strconv.Itoa(port)
+		baseLower := strings.ToLower(filepath.Base(execPath))
+		var command string
+		if strings.Contains(baseLower, "cli") || strings.Contains(baseLower, "serve") {
+			command = `"` + execPath + `" serve --addr 0.0.0.0:` + strconv.Itoa(port)
+		} else {
+			command = `"` + execPath + `" --background --addr 0.0.0.0:` + strconv.Itoa(port)
+		}
 		var args []string
 		if enabled {
 			args = []string{"add", WindowsAutostartKey, "/v", WindowsAutostartValue, "/t", "REG_SZ", "/d", command, "/f"}
 		} else {
 			args = []string{"delete", WindowsAutostartKey, "/v", WindowsAutostartValue, "/f"}
 		}
-		if out, err := exec.Command("reg", args...).CombinedOutput(); err != nil {
+		regCmd := exec.Command("reg", args...)
+		HideChildWindow(regCmd)
+		if out, err := regCmd.CombinedOutput(); err != nil {
 			if !enabled {
 				return autostartInfoForHome(home), nil
 			}

@@ -43,10 +43,22 @@ type connectionInfo struct {
 // connector. It is additive so clients written against the LAN-only server
 // continue to work unchanged.
 type CloudStatus struct {
-	Configured bool   `json:"configured"`
-	Connected  bool   `json:"connected"`
-	Server     string `json:"server"`
-	Peers      int    `json:"peers"`
+	Configured         bool   `json:"configured"`
+	Connected          bool   `json:"connected"`
+	Server             string `json:"server"`
+	Peers              int    `json:"peers"`
+	DirectDial         bool   `json:"direct_dial"`
+	LatencyMs          int64  `json:"latency_ms,omitempty"`
+	ProxyEnvDetected   bool   `json:"proxy_env_detected,omitempty"`
+	TunFakeIPDetected  bool   `json:"tun_fake_ip_detected,omitempty"`
+	TunFakeIPBypassed  bool   `json:"tun_fake_ip_bypassed,omitempty"`
+	ResolvedIP         string `json:"resolved_ip,omitempty"`
+	RelayKeyConfigured bool   `json:"relay_key_configured,omitempty"`
+	RelayKeyHint       string `json:"relay_key_hint,omitempty"`
+	LastError          string `json:"last_error,omitempty"`
+	// RelayNotice is the latest policy message from the relay (quota, key,
+	// account status) even while the socket stays connected.
+	RelayNotice string `json:"relay_notice,omitempty"`
 }
 
 type connectionSecurity struct {

@@ -109,6 +109,9 @@ func (s *codexItems) row(row map[string]any) []agent.Item {
 		if role == "user" && codexNoise(text) {
 			return nil
 		}
+		if role == "assistant" && IsInternalTitleGeneratorPayload(text) {
+			return nil
+		}
 		id, seq := s.next()
 		return []agent.Item{{TS: at, ID: id, Seq: seq, Type: role, Role: role, Text: clip(text, 4000), Model: model}}
 

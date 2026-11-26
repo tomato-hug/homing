@@ -14,10 +14,11 @@ var ErrHeadlessBuild = errors.New("this build has no desktop UI; use `homing ser
 // should display. The shell never owns session data; it is another client of
 // the same /api and /console endpoints as the browser.
 type Options struct {
-	URL     string
-	DataDir string
-	Version string
-	Log     *slog.Logger
+	URL         string
+	DataDir     string
+	Version     string
+	StartHidden bool
+	Log         *slog.Logger
 }
 
 // Available reports whether this build contains the desktop shell.

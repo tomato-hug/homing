@@ -3,6 +3,9 @@
 import { append, h, icon, type Child } from "./dom";
 import { icons } from "./icons";
 import { AGENT_INITIALS } from "./format";
+import { agentLogo } from "./agent-icons";
+import { endpoints } from "./api";
+import { localizeApiError, t } from "../i18n";
 
 export function card(head: string | null, ...children: Child[]): HTMLElement {
   const el = h("div", { class: "card" });
@@ -47,22 +50,46 @@ export function statCard(options: {
   );
 }
 
-export function pill(text: string, tone: "ok" | "warn" | "bad" | "mute" = "mute", title?: string): HTMLElement {
-  const dotClass = tone === "ok" ? "dot dot-ok" : tone === "warn" ? "dot dot-warn" : tone === "bad" ? "dot dot-bad" : "dot";
+export function pill(text: string, tone: "ok" | "run" | "warn" | "bad" | "mute" = "mute", title?: string): HTMLElement {
+  const dotClass =
+    tone === "ok"
+      ? "dot dot-ok"
+      : tone === "run"
+        ? "dot dot-run"
+        : tone === "warn"
+          ? "dot dot-warn"
+          : tone === "bad"
+            ? "dot dot-bad"
+            : "dot";
   return h("span", { class: "pill", title: title || "" }, h("span", { class: dotClass }), h("span", { text }));
 }
 
-export function tag(text: string, tone: "ok" | "warn" | "bad" | "mute" | "plain" = "plain", title?: string): HTMLElement {
+export function tag(text: string, tone: "ok" | "run" | "warn" | "bad" | "mute" | "plain" = "plain", title?: string): HTMLElement {
   const cls = tone === "plain" ? "tag" : `tag tag-${tone}`;
   return h("span", { class: cls, title: title || "" }, h("span", { text }));
 }
 
 export function agentSquare(source: string, small = false): HTMLElement {
-  return h("span", {
+  const logo = agentLogo(source);
+  if (logo) {
+    const cls = ["agent-square", "logo", small ? "sm" : "", logo.mono ? "mono" : ""]
+      .filter(Boolean)
+      .join(" ");
+    const el = h("span", { class: cls, title: source });
+    if (logo.color) el.style.color = logo.color;
+    el.append(icon(logo.svg, small ? 18 : 20));
+    return el;
+  }
+  let hash = 0;
+  for (const ch of source || "agent") hash = (hash * 31 + ch.charCodeAt(0)) % 360;
+  const el = h("span", {
     class: small ? "agent-square sm" : "agent-square",
-    text: AGENT_INITIALS[source] || (source || "?").slice(0, 1).toUpperCase(),
+    text: AGENT_INITIALS[source] || (source || "?").slice(0, 2).toUpperCase(),
     title: source,
   });
+  el.style.background = `hsl(${hash} 42% 18%)`;
+  el.style.color = `hsl(${hash} 78% 76%)`;
+  return el;
 }
 
 export function button(
@@ -222,10 +249,14 @@ let toastWrap: HTMLElement | null = null;
 
 export function toast(message: string, tone: "ok" | "bad" | "plain" = "plain", ttl = 4200) {
   if (!toastWrap) {
-    toastWrap = h("div", { class: "toast-wrap" });
+    toastWrap = h("div", { class: "toast-wrap", role: "region", "aria-live": "polite" });
     document.body.append(toastWrap);
   }
-  const el = h("div", { class: `toast ${tone === "ok" ? "ok" : tone === "bad" ? "bad" : ""}`.trim(), text: message });
+  const el = h("div", {
+    class: `toast ${tone === "ok" ? "ok" : tone === "bad" ? "bad" : ""}`.trim(),
+    role: tone === "bad" ? "alert" : "status",
+    text: message,
+  });
   toastWrap.append(el);
   window.setTimeout(() => {
     el.style.opacity = "0";
@@ -234,12 +265,86 @@ export function toast(message: string, tone: "ok" | "bad" | "plain" = "plain", t
   }, ttl);
 }
 
-/** 统一把接口错误变成一句人话 */
-export function reportError(err: unknown, prefix = "操作失败") {
-  const message = err instanceof Error ? err.message : String(err);
-  if (/401|Unauthorized/i.test(message)) {
-    toast("控制台会话已失效，请刷新页面重新载入", "bad", 6000);
+/** 带操作按钮的轻量提示（例如 5 秒撤销归档） */
+export function toastWithAction(
+  message: string,
+  actionLabel: string,
+  onAction: () => void | Promise<void>,
+  tone: "ok" | "bad" | "plain" = "plain",
+  ttl = 5500,
+) {
+  if (!toastWrap) {
+    toastWrap = h("div", { class: "toast-wrap", role: "region", "aria-live": "polite" });
+    document.body.append(toastWrap);
+  }
+  const actBtn = h("button", { class: "toast-action", type: "button", text: actionLabel });
+  const el = h(
+    "div",
+    {
+      class: `toast toast-with-action ${tone === "ok" ? "ok" : tone === "bad" ? "bad" : ""}`.trim(),
+      role: "status",
+    },
+    h("span", { text: message }),
+    actBtn,
+  );
+  let dismissed = false;
+  const dismiss = () => {
+    if (dismissed) return;
+    dismissed = true;
+    el.style.opacity = "0";
+    el.style.transition = "opacity .2s ease";
+    window.setTimeout(() => el.remove(), 220);
+  };
+  actBtn.addEventListener("click", () => {
+    dismiss();
+    void onAction();
+  });
+  toastWrap.append(el);
+  window.setTimeout(dismiss, ttl);
+}
+
+/** 统一把接口错误变成一句可本地化的人话 */
+export function reportError(err: unknown, prefix?: string) {
+  const message = localizeApiError(err);
+  const resolvedPrefix = prefix || t("common.actionFailed");
+  const status = (err as { status?: number } | null)?.status;
+  if (status === 401 || /401|Unauthorized/i.test(message)) {
+    toast(t("err.unauthorized"), "bad", 6000);
     return;
   }
-  toast(`${prefix}：${message}`, "bad", 6000);
+  toast(`${resolvedPrefix}: ${message}`, "bad", 6000);
+}
+
+/**
+ * 在系统默认浏览器中打开外部链接（兼容 macOS WKWebView 与 Windows WebView2）。
+ * Wails 原生窗口内直接调用 window.open("_blank") 会被 macOS WKWebView 静默拦截，
+ * 因此优先走本机回环 /api/desktop/open-external 调起系统真实浏览器。
+ */
+export async function openExternalUrl(rawUrl: string): Promise<void> {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return;
+  let target = trimmed;
+  try {
+    target = new URL(trimmed, location.origin).toString();
+  } catch {
+    toast("链接格式无效", "bad");
+    return;
+  }
+  try {
+    const res = await endpoints.openExternal(target);
+    if (res?.opened) {
+      return;
+    }
+  } catch {
+    // 浏览器访问旧版或远程服务时降级到 window.open
+  }
+  const opened = window.open(target, "_blank", "noopener,noreferrer");
+  if (!opened) {
+    try {
+      await navigator.clipboard.writeText(target);
+      toast(`已复制链接，请在浏览器打开：${target}`, "plain", 5500);
+    } catch {
+      toast(`请在浏览器中打开：${target}`, "plain", 5500);
+    }
+  }
 }

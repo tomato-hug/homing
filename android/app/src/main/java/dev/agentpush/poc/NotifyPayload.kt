@@ -36,6 +36,8 @@ data class NotifyPayload(
     val merged: Boolean,
     val count: Int,
     val sessions: List<NotifySession>,
+    val previewText: String = "",
+    val previewTruncated: Boolean = false,
 ) {
     val brand: AgentBrand
         get() = AgentBrand.fromWire(source)
@@ -80,6 +82,8 @@ data class NotifyPayload(
                 merged = json.optBoolean("merged", false),
                 count = json.optInt("count", 1).coerceAtLeast(1),
                 sessions = sessions,
+                previewText = json.optString("preview_text"),
+                previewTruncated = json.optBoolean("preview_truncated", false),
             )
         }
     }

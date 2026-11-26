@@ -538,8 +538,8 @@ internal fun SessionComposer(
                 maxLines = 6,
                 shape = RoundedCornerShape(18.dp),
                 textStyle = MaterialTheme.typography.bodyLarge,
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                keyboardActions = KeyboardActions(onSend = { if (canSend) onSend() }),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
+                keyboardActions = KeyboardActions(),
                 colors = TextFieldDefaults.colors(
                     focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f),
                     unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.32f),

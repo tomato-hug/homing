@@ -4,6 +4,7 @@
 import { clear, h } from "../lib/dom";
 import { endpoints, poll, type DispatchRecord, type SessionSummary } from "../lib/api";
 import { AGENT_LABELS, duration, timeAgo, truncate } from "../lib/format";
+import { isContainerBusy } from "../lib/guard";
 import {
   agentSquare,
   button,
@@ -15,28 +16,32 @@ import {
   tag,
   toast,
 } from "../lib/ui";
+import { loc, t } from "../i18n";
 import type { PageContext, PageResult } from "../main";
 
-const STATUS: Record<string, { label: string; tone: "ok" | "warn" | "bad" | "mute" }> = {
-  starting: { label: "準備啟動", tone: "warn" },
-  waiting_session: { label: "等待綁定", tone: "warn" },
-  started: { label: "已啟動", tone: "warn" },
-  running: { label: "運行中", tone: "warn" },
-  needs_you: { label: "等你處理", tone: "warn" },
-  completed: { label: "完成", tone: "ok" },
-  failed: { label: "失敗", tone: "bad" },
-  cancelled: { label: "已取消", tone: "mute" },
-};
+function statusOf(record: DispatchRecord): { label: string; tone: "ok" | "run" | "warn" | "bad" | "mute" } {
+  const map: Record<string, { label: string; tone: "ok" | "run" | "warn" | "bad" | "mute" }> = {
+    starting: { label: loc("准备启动", "Starting"), tone: "run" },
+    waiting_session: { label: loc("等待绑定", "Binding"), tone: "warn" },
+    started: { label: loc("已启动", "Started"), tone: "run" },
+    running: { label: loc("运行中", "Running"), tone: "run" },
+    needs_you: { label: loc("等你处理", "Needs You"), tone: "warn" },
+    completed: { label: loc("已完成", "Completed"), tone: "ok" },
+    failed: { label: loc("失败", "Failed"), tone: "bad" },
+    cancelled: { label: loc("已取消", "Cancelled"), tone: "mute" },
+  };
+  return map[record.status] || { label: record.status || t("common.unknown"), tone: "mute" };
+}
 
-const PRESET: Record<string, string> = {
-  ask: "諮詢",
-  do: "動手",
-  review: "審查",
-  handoff: "交棒",
-};
-
-function statusOf(record: DispatchRecord): { label: string; tone: "ok" | "warn" | "bad" | "mute" } {
-  return STATUS[record.status] || { label: record.status || "未知", tone: "mute" };
+function presetLabel(preset?: string): string {
+  const map: Record<string, [string, string]> = {
+    ask: ["咨询", "Ask"],
+    do: ["动手", "Do"],
+    review: ["审查", "Review"],
+    handoff: ["交棒", "Handoff"],
+  };
+  const pair = map[preset || "ask"];
+  return pair ? loc(pair[0], pair[1]) : preset || loc("咨询", "Ask");
 }
 
 function parentKey(record: DispatchRecord): string {
@@ -50,7 +55,7 @@ export function renderCollab(ctx: PageContext, query: URLSearchParams): PageResu
   let sessions = new Map<string, SessionSummary>();
   let filter: "all" | "running" | "needs_you" | "completed" | "failed" = "all";
   let parentFilter = query.get("parent") || "";
-  let reply: { id: string; kind: "reply" | "forward"; text: string } | null = null;
+  let reply: { id: string; kind: "reply" | "forward"; text: string; needsFocus: boolean } | null = null;
   let loading = false;
   let titlesLoading = false;
 
@@ -70,7 +75,7 @@ export function renderCollab(ctx: PageContext, query: URLSearchParams): PageResu
   }
 
   async function startReply(record: DispatchRecord, kind: "reply" | "forward") {
-    reply = { id: record.dispatch_id, kind, text: "" };
+    reply = { id: record.dispatch_id, kind, text: "", needsFocus: true };
     paint();
   }
 
@@ -113,17 +118,31 @@ export function renderCollab(ctx: PageContext, query: URLSearchParams): PageResu
     const input = h("textarea", {
       class: "input collab-reply-input",
       rows: "3",
-      placeholder: reply.kind === "reply" ? `追問 ${AGENT_LABELS[record.target_agent] || record.target_agent}…` : "編輯要轉交給父會話的文字…",
+      placeholder:
+        reply.kind === "reply"
+          ? loc(`追问 ${AGENT_LABELS[record.target_agent] || record.target_agent}（⌘Enter 发送）…`, `Follow up with ${AGENT_LABELS[record.target_agent] || record.target_agent} (⌘Enter)…`)
+          : loc("编辑要转交给父会话的文字（⌘Enter 发送）…", "Edit text to forward to parent session (⌘Enter)…"),
     }) as HTMLTextAreaElement;
     input.value =
       reply.text ||
       (reply.kind === "forward" && record.result?.text
-        ? `【@${record.target_agent} 的結論】\n${record.result.text}`
+        ? `【@${record.target_agent}】\n${record.result.text}`
         : "");
     input.addEventListener("input", () => {
       if (reply) reply.text = input.value;
     });
-    window.setTimeout(() => input.focus(), 20);
+    input.addEventListener("keydown", (event) => {
+      const ke = event as KeyboardEvent;
+      if (ke.isComposing) return;
+      if (ke.key === "Enter" && (ke.metaKey || ke.ctrlKey)) {
+        ke.preventDefault();
+        void sendReply(record);
+      }
+    });
+    if (reply.needsFocus) {
+      reply.needsFocus = false;
+      window.setTimeout(() => input.focus(), 20);
+    }
     return h(
       "div",
       { class: "collab-reply" },
@@ -131,8 +150,8 @@ export function renderCollab(ctx: PageContext, query: URLSearchParams): PageResu
       h(
         "div",
         { class: "collab-reply-actions" },
-        button("取消", { small: true, variant: "quiet", onClick: closeReply }),
-        button(reply.kind === "reply" ? "送出追問" : "確認轉交", {
+        button(t("common.cancel"), { small: true, variant: "quiet", onClick: closeReply }),
+        button(reply.kind === "reply" ? loc("送出追问", "Send Follow-up") : loc("确认转交", "Forward"), {
           small: true,
           variant: "primary",
           onClick: () => void sendReply(record),
@@ -194,7 +213,7 @@ export function renderCollab(ctx: PageContext, query: URLSearchParams): PageResu
             "div",
             { class: "collab-lane-name" },
             h("strong", { text: AGENT_LABELS[record.target_agent] || record.target_agent }),
-            h("span", { text: `${PRESET[record.preset || "ask"] || record.preset || "諮詢"} · ${truncate(record.text, 44)}` }),
+            h("span", { text: `${presetLabel(record.preset)} · ${truncate(record.text, 44)}` }),
           ),
           laneBar(record, base, span),
           tag(statusOf(record).label, statusOf(record).tone),
@@ -246,7 +265,7 @@ export function renderCollab(ctx: PageContext, query: URLSearchParams): PageResu
         null,
         h("span", { class: "collab-agent-cell" }, agentSquare(record.target_agent, true), AGENT_LABELS[record.target_agent] || record.target_agent),
       ),
-      h("td", null, tag(PRESET[record.preset || "ask"] || record.preset || "諮詢", "plain")),
+      h("td", null, tag(presetLabel(record.preset), "plain")),
       h("td", null, tag(status.label, status.tone)),
       h("td", { class: "mono", text: timeAgo(record.created_at) }),
       h("td", { class: "mono", text: duration(record.updated_at || record.created_at) }),
@@ -411,8 +430,9 @@ export function renderCollab(ctx: PageContext, query: URLSearchParams): PageResu
     }
   }
 
-  async function load() {
+  async function load(fromPoll = false) {
     if (loading) return;
+    if (fromPoll && (isContainerBusy(root) || reply !== null)) return;
     loading = true;
     try {
       const dispatchPayload = await endpoints.dispatches();
@@ -422,13 +442,14 @@ export function renderCollab(ctx: PageContext, query: URLSearchParams): PageResu
       void loadTitles();
     } catch (err) {
       if (disposed) return;
+      if (records.length > 0) return;
       clear(lanesHost);
       clear(tableHost);
       lanesHost.append(
         h(
           "div",
           { class: "list-card" },
-          h("div", { class: "empty" }, h("div", { text: "讀取協作記錄失敗" }), h("div", { class: "note", text: (err as Error).message })),
+          h("div", { class: "empty" }, h("div", { text: loc("读取协作记录失败", "Failed to load dispatches") }), h("div", { class: "note", text: (err as Error).message })),
         ),
       );
     } finally {
@@ -440,11 +461,11 @@ export function renderCollab(ctx: PageContext, query: URLSearchParams): PageResu
     h(
       "div",
       { class: "list-card", style: "padding:18px" },
-      h("div", { style: "display:flex;gap:9px;align-items:center" }, spinner(), h("span", { class: "muted", text: "正在整理協作線…" })),
+      h("div", { style: "display:flex;gap:9px;align-items:center" }, spinner(), h("span", { class: "muted", text: t("common.loading") })),
     ),
   );
-  void load();
-  const stop = poll(load, 6000);
+  void load(false);
+  const stop = poll(() => load(true), 6000);
 
   return {
     el: root,

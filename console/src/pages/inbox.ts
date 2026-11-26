@@ -4,7 +4,9 @@ import { h, clear } from "../lib/dom";
 import { icons } from "../lib/icons";
 import { endpoints, poll, type Inbox, type InboxItem } from "../lib/api";
 import { AGENT_LABELS, AGENT_INITIALS, kindLabel, timeAgo, projectOf } from "../lib/format";
+import { isContainerBusy } from "../lib/guard";
 import { button, groupHead, listCard, reportError, toast, emptyState, spinner } from "../lib/ui";
+import { loc, t } from "../i18n";
 import type { PageContext, PageResult } from "../main";
 
 function agentChip(source: string): HTMLElement {
@@ -84,27 +86,45 @@ export function renderInbox(ctx: PageContext): PageResult {
     }
   }
 
+  const drafts = new Map<string, string>();
+  let focusDraftKey: string | null = null;
+
   function replyBox(item: InboxItem, placeholder: string): HTMLElement {
+    const k = key(item);
     const input = h("textarea", {
       class: "input",
       rows: "3",
       placeholder,
       style: "height:auto;padding:9px 11px;resize:vertical;line-height:1.6",
+    }) as HTMLTextAreaElement;
+    input.value = drafts.get(k) || "";
+    input.addEventListener("input", () => drafts.set(k, input.value));
+    input.addEventListener("keydown", (event) => {
+      const ke = event as KeyboardEvent;
+      if (ke.isComposing) return;
+      if (ke.key === "Enter" && (ke.metaKey || ke.ctrlKey)) {
+        ke.preventDefault();
+        void sendReply(item, input.value).then(() => drafts.delete(k));
+      }
     });
-    const send = button("发送", {
+    const send = button(t("common.send"), {
       variant: "primary",
       small: true,
-      onClick: () => void sendReply(item, (input as HTMLTextAreaElement).value),
+      onClick: () => void sendReply(item, input.value).then(() => drafts.delete(k)),
     });
-    const cancel = button("取消", {
+    const cancel = button(t("common.cancel"), {
       variant: "quiet",
       small: true,
       onClick: () => {
-        expanded.delete(key(item));
+        drafts.delete(k);
+        expanded.delete(k);
         paint();
       },
     });
-    window.setTimeout(() => (input as HTMLTextAreaElement).focus(), 30);
+    if (focusDraftKey === k) {
+      focusDraftKey = null;
+      window.setTimeout(() => input.focus(), 20);
+    }
     return h(
       "div",
       { style: "padding:0 15px 13px 15px;display:flex;flex-direction:column;gap:8px" },
@@ -262,29 +282,32 @@ export function renderInbox(ctx: PageContext): PageResult {
     );
   }
 
-  async function load() {
+  async function load(fromPoll = false) {
     try {
-      inbox = await endpoints.inbox();
+      const next = await endpoints.inbox();
       if (disposed) return;
+      inbox = next;
+      if (fromPoll && (isContainerBusy(root) || drafts.size > 0)) return;
       paint();
       ctx.refreshShell();
     } catch (err) {
       if (disposed) return;
+      if (inbox) return;
       clear(root);
       root.append(
         h(
           "div",
           { class: "list-card" },
-          h("div", { class: "empty" }, h("div", { text: "读取收件箱失败" }), h("div", { class: "note", text: (err as Error).message })),
+          h("div", { class: "empty" }, h("div", { text: loc("读取收件箱失败", "Failed to load inbox") }), h("div", { class: "note", text: (err as Error).message })),
         ),
       );
     }
   }
 
   clear(root);
-  root.append(h("div", { class: "list-card", style: "padding:18px" }, h("div", { style: "display:flex;gap:9px;align-items:center" }, spinner(), h("span", { class: "muted", text: "正在读收件箱…" }))));
-  void load();
-  const stop = poll(load, 5000);
+  root.append(h("div", { class: "list-card", style: "padding:18px" }, h("div", { style: "display:flex;gap:9px;align-items:center" }, spinner(), h("span", { class: "muted", text: t("common.loading") }))));
+  void load(false);
+  const stop = poll(() => load(true), 5000);
 
   return {
     el: root,

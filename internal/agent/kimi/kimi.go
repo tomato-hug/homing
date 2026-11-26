@@ -46,12 +46,20 @@ func (Agent) Capabilities() agent.Capabilities {
 }
 func (Agent) Meta(sessionID, cwdHint string) agent.Meta { return metaFor(sessionID, cwdHint) }
 
-// Home is KIMI_CODE_HOME, or ~/.kimi-code.
+// Home is KIMI_CODE_HOME, or ~/.kimi-code (falling back to ~/.kimi when present).
 func Home() string {
 	if root := strings.TrimSpace(os.Getenv("KIMI_CODE_HOME")); root != "" {
 		return root
 	}
-	return filepath.Join(platform.Home(), ".kimi-code")
+	primary := filepath.Join(platform.Home(), ".kimi-code")
+	if dirExists(primary) {
+		return primary
+	}
+	alt := filepath.Join(platform.Home(), ".kimi")
+	if dirExists(alt) {
+		return alt
+	}
+	return primary
 }
 
 func (Agent) Detect(context.Context) agent.Detection {

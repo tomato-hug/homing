@@ -42,3 +42,7 @@ relay/*.bak-*
 /output/
 /.agent-inbox/
 /.verify/
+/.harness/
+/plans/
+__pycache__/
+*.pyc

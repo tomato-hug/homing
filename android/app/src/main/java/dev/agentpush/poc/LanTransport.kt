@@ -35,8 +35,8 @@ class LanTransport(
         body: JSONObject?,
     ): TransportResponse = withContext(Dispatchers.IO) {
         val settings = settingsProvider()
-        if (settings.token.isBlank()) {
-            throw AgentApiException(0, "Token 不能为空")
+        if (settings.baseUrl.isBlank() || settings.token.isBlank()) {
+            throw AgentApiException(0, "尚未配置局域网服务器或 Token")
         }
         val normalizedMethod = method.trim().uppercase().ifBlank { "GET" }
         val request = Request.Builder()
@@ -70,7 +70,7 @@ class LanTransport(
             var lastEventId = ""
             while (isActive) {
                 val settings = settingsProvider()
-                if (settings.token.isBlank()) {
+                if (settings.baseUrl.isBlank() || settings.token.isBlank()) {
                     delay(backoffMillis)
                     backoffMillis = nextBackoff(backoffMillis)
                     continue
@@ -210,7 +210,7 @@ class LanTransport(
     suspend fun probeHealth(): Boolean = withContext(Dispatchers.IO) {
         val settings = settingsProvider()
         // E2E-only pairing uses encrypted RPC, not legacy HTTP bearer auth.
-        if (settings.token.isBlank()) return@withContext false
+        if (settings.baseUrl.isBlank() || settings.token.isBlank()) return@withContext false
         val request = Request.Builder()
             .url(settings.baseUrl.trimEnd('/') + "/health")
             .get()

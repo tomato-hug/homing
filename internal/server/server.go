@@ -31,11 +31,23 @@ const (
 
 // Config configures a homing-server instance.
 type Config struct {
-	Addr           string
-	DBPath         string
-	Logger         *slog.Logger
-	Waker          Waker
-	TrustedProxies []string
+	Addr             string
+	DBPath           string
+	Logger           *slog.Logger
+	Waker            Waker
+	TrustedProxies   []string
+	AuthMode         string // "open" (default) | "managed"
+	RegistrationMode string // "open" (default) | "invite" | "closed"
+	AdminToken       string
+	SMTP             SMTPConfig
+	EmailSender      EmailSender
+	GitHubOAuth      GitHubOAuthConfig
+	// FreeWeeklyMinutes / SponsorWeeklyMinutes cap how many minutes per week a
+	// paired phone may actively send traffic through a managed relay.
+	// 0 means unlimited. cmd/homing-server defaults free accounts to
+	// DefaultFreeWeeklyMinutes.
+	FreeWeeklyMinutes    int
+	SponsorWeeklyMinutes int
 	// Now is for tests; nil means time.Now.
 	Now func() time.Time
 }
@@ -43,11 +55,12 @@ type Config struct {
 // Server is the cloud relay: it authenticates devices, pairs them, forwards
 // encrypted envelopes and queues them while the recipient is offline.
 type Server struct {
-	cfg   Config
-	log   *slog.Logger
-	db    *DB
-	waker Waker
-	now   func() time.Time
+	cfg         Config
+	log         *slog.Logger
+	db          *DB
+	waker       Waker
+	emailSender EmailSender
+	now         func() time.Time
 
 	httpServer *http.Server
 	listener   net.Listener
@@ -63,6 +76,12 @@ type Server struct {
 	codeIndex    map[string]string
 	pendingPairs map[string]*pendingPair
 	pairAttempts map[string]*codeAttempt
+
+	usageMu      sync.Mutex
+	activeMinute map[string]int64 // account id -> last counted unix minute
+
+	rateMu sync.Mutex
+	rates  map[string]*codeAttempt // "admin:<ip>", "mail:<ip>" -> window
 }
 
 type pairToken struct {
@@ -99,9 +118,28 @@ type clientConn struct {
 
 	// Set once during hello, before the connection joins the registry and is
 	// visible to other goroutines.
-	deviceID string
-	pub      string
-	nonce    string
+	deviceID        string
+	pub             string
+	nonce           string
+	initialRelayKey string
+
+	// The managed-relay account can change after hello (a phone is bound by
+	// the host's pair.accept), so it is guarded separately.
+	accountMu   sync.Mutex
+	accountID   string
+	accountRole string
+}
+
+func (c *clientConn) account() (id, role string) {
+	c.accountMu.Lock()
+	defer c.accountMu.Unlock()
+	return c.accountID, c.accountRole
+}
+
+func (c *clientConn) setAccount(id, role string) {
+	c.accountMu.Lock()
+	c.accountID, c.accountRole = id, role
+	c.accountMu.Unlock()
 }
 
 // New opens the database and prepares a server. Call Start to listen.
@@ -134,6 +172,7 @@ func New(cfg Config) (*Server, error) {
 		log:          log,
 		db:           db,
 		waker:        waker,
+		emailSender:  cfg.EmailSender,
 		now:          now,
 		ctx:          ctx,
 		cancel:       cancel,
@@ -143,6 +182,8 @@ func New(cfg Config) (*Server, error) {
 		codeIndex:    make(map[string]string),
 		pendingPairs: make(map[string]*pendingPair),
 		pairAttempts: make(map[string]*codeAttempt),
+		activeMinute: make(map[string]int64),
+		rates:        make(map[string]*codeAttempt),
 	}
 	s.httpServer = &http.Server{
 		Addr:              cfg.Addr,
@@ -231,11 +272,14 @@ func (s *Server) Close() error {
 func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet && r.URL.Path == "/health" {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true,"service":"homing-server","version":1}`))
+		_, _ = fmt.Fprintf(w, `{"ok":true,"service":"homing-server","version":1,"auth_mode":%q}`, s.effectiveAuthMode())
 		return
 	}
 	if r.URL.Path == "/v1/ws" {
 		s.handleWS(w, r)
+		return
+	}
+	if s.handleManagedHTTP(w, r) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -244,6 +288,10 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+	initialKey := extractBearerToken(r)
+	if initialKey == "" {
+		initialKey = strings.TrimSpace(r.URL.Query().Get("access_key"))
+	}
 	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{})
 	if err != nil {
 		s.log.Warn("websocket accept failed", "err", err)
@@ -256,10 +304,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conn := &clientConn{
-		ws:    ws,
-		srv:   s,
-		addr:  s.clientAddress(r),
-		nonce: protocol.ToBase64(rawNonce),
+		ws:              ws,
+		srv:             s,
+		addr:            s.clientAddress(r),
+		nonce:           protocol.ToBase64(rawNonce),
+		initialRelayKey: initialKey,
 	}
 	s.wg.Add(1)
 	go func() {
@@ -479,6 +528,10 @@ func (s *Server) handleHello(conn *clientConn, message map[string]any) error {
 	}
 	conn.deviceID = deviceID
 	conn.pub = pubBase64
+	allowHello, flushOffline := s.authorizeManagedHello(conn, message, deviceID)
+	if !allowHello {
+		return nil
+	}
 	conn.authed.Store(true)
 	s.addConnection(conn)
 	conn.send(s.ctx, map[string]any{
@@ -486,11 +539,16 @@ func (s *Server) handleHello(conn *clientConn, message map[string]any) error {
 		"device_id":   deviceID,
 		"fingerprint": protocol.Fingerprint(pub),
 	})
-	s.flushQueue(conn)
+	if flushOffline {
+		s.flushQueue(conn)
+	}
 	return nil
 }
 
 func (s *Server) handlePairStart(conn *clientConn) error {
+	if !s.checkManagedPairStart(conn) {
+		return nil
+	}
 	s.mu.Lock()
 	s.prunePairTokensLocked()
 	token, err := protocol.RandomPairToken()
@@ -703,6 +761,9 @@ func (s *Server) handlePairDecision(conn *clientConn, message map[string]any, ac
 		return nil
 	}
 	if accept {
+		if !s.bindManagedPairedClient(conn, pending.clientID, pending.name) {
+			return nil
+		}
 		if err := s.db.CreatePairing(s.ctx, pending.hostID, pending.clientID, s.now()); err != nil {
 			return err
 		}
@@ -747,6 +808,15 @@ func (s *Server) handleRevoke(conn *clientConn, message map[string]any) error {
 	if err := s.db.RevokePairing(s.ctx, conn.deviceID, peerID); err != nil {
 		return err
 	}
+	if s.isManagedMode() {
+		for _, devID := range []string{peerID, conn.deviceID} {
+			if _, role, ok, _ := s.db.GetDeviceAccount(s.ctx, devID); ok && role == "client" {
+				if rem, err := s.db.CountPairingsForDevice(s.ctx, devID); err == nil && rem == 0 {
+					_ = s.db.UnbindDevice(s.ctx, devID)
+				}
+			}
+		}
+	}
 	s.sendTo(peerID, map[string]any{"t": "pair.revoked", "peer_id": conn.deviceID})
 	conn.send(s.ctx, map[string]any{"t": "pair.revoked.ok", "peer_id": peerID})
 	return nil
@@ -783,6 +853,9 @@ func (s *Server) handleEnvelope(conn *clientConn, message map[string]any) error 
 	raw, err := json.Marshal(message)
 	if err != nil {
 		return err
+	}
+	if !s.checkManagedEnvelopeQuota(conn, int64(len(raw))) {
+		return nil
 	}
 	if s.sendRawTo(to, raw) > 0 {
 		return nil
@@ -969,6 +1042,7 @@ func (s *Server) cleanupLoop() {
 				}
 			}
 			s.mu.Unlock()
+			s.pruneRates(now)
 		}
 	}
 }

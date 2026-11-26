@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -62,6 +64,7 @@ import dev.agentpush.poc.protocol.ProtocolPairingClient
 import dev.agentpush.poc.PushService
 import dev.agentpush.poc.ui.HomingCard
 import dev.agentpush.poc.ui.HomingPigeonScene
+import dev.agentpush.poc.ui.LocalHomingStrings
 import dev.agentpush.poc.ui.PigeonCrop
 import dev.agentpush.poc.ui.PigeonScene
 import dev.agentpush.poc.ui.theme.HomingMono
@@ -87,6 +90,7 @@ fun AddComputerScreen(
     initialInvite: String? = null,
     onInviteConsumed: () -> Unit = {},
 ) {
+    val strings = LocalHomingStrings.current
     val context = LocalContext.current
     val preferences = remember {
         context.getSharedPreferences("homing_cloud_pairing", Context.MODE_PRIVATE)
@@ -104,7 +108,8 @@ fun AddComputerScreen(
     var server by rememberSaveable {
         mutableStateOf(
             preferences.getString("server", null)
-                ?: "wss://your-homing-server/v1/ws",
+                ?.takeIf { it.isNotBlank() && it != "wss://your-homing-server/v1/ws" }
+                ?: "wss://homing.douqu.online/v1/ws",
         )
     }
     var code by rememberSaveable { mutableStateOf("") }
@@ -192,6 +197,8 @@ fun AddComputerScreen(
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding()
+            .navigationBarsPadding()
+            .imePadding()
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 16.dp),
     ) {
@@ -209,7 +216,7 @@ fun AddComputerScreen(
                 )
             }
             Text(
-                text = "添加电脑",
+                text = strings.addComputer,
                 style = MaterialTheme.typography.titleLarge.copy(
                     fontSize = 20.sp,
                     fontWeight = FontWeight.SemiBold,
@@ -218,7 +225,7 @@ fun AddComputerScreen(
             )
         }
         Text(
-            text = "电脑端启动 homingd 后，用二维码或 6 位配对码建立端到端加密连接。",
+            text = strings.addComputerDesc,
             modifier = Modifier.padding(top = 4.dp, bottom = 14.dp),
             style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 22.sp),
             color = HomingPalette.Muted,
@@ -227,13 +234,13 @@ fun AddComputerScreen(
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             PairingModeChip(
                 selected = mode == 0,
-                label = "扫码",
+                label = strings.scanQrTab,
                 icon = { Icon(Icons.Outlined.QrCodeScanner, null, Modifier.size(17.dp)) },
                 onClick = { mode = 0 },
             )
             PairingModeChip(
                 selected = mode == 1,
-                label = "配对码",
+                label = strings.pairCodeTab,
                 icon = { Icon(Icons.Outlined.Key, null, Modifier.size(17.dp)) },
                 onClick = { mode = 1 },
             )
@@ -253,13 +260,13 @@ fun AddComputerScreen(
                         modifier = Modifier.size(54.dp),
                     )
                     Text(
-                        text = "扫描电脑上的配对二维码",
+                        text = strings.scanQrTitle,
                         modifier = Modifier.padding(top = 10.dp),
                         style = MaterialTheme.typography.titleMedium,
                         color = HomingPalette.Text,
                     )
                     Text(
-                        text = "二维码只包含服务器、配对 token、电脑 ID 和指纹。",
+                        text = strings.scanQrDesc,
                         modifier = Modifier.padding(top = 4.dp),
                         style = MaterialTheme.typography.labelSmall.copy(lineHeight = 18.sp),
                         color = HomingPalette.Muted,
@@ -269,7 +276,7 @@ fun AddComputerScreen(
                         onClick = {
                             scanner.launch(
                                 ScanOptions()
-                                    .setPrompt("扫描电脑上的 Homing 配对二维码")
+                                    .setPrompt(strings.scanQrTitle)
                                     .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
                                     .setBeepEnabled(false)
                                     .setOrientationLocked(false),
@@ -281,7 +288,7 @@ fun AddComputerScreen(
                             .height(48.dp),
                         shape = RoundedCornerShape(10.dp),
                     ) {
-                        Text("打开相机扫码")
+                        Text(strings.openCameraScan)
                     }
                 }
             }
@@ -289,7 +296,7 @@ fun AddComputerScreen(
             HomingCard {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(
-                        text = "服务器",
+                        text = strings.relayServerLabel,
                         style = MaterialTheme.typography.labelLarge,
                         color = HomingPalette.Text,
                     )

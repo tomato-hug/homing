@@ -14,7 +14,8 @@ import { agentLogo } from "../lib/agent-icons";
 import { createPigeon, type PigeonPlayer } from "../lib/pigeon";
 import { createPairCard } from "../lib/pair-card";
 import { endpoints, type AgentCatalogEntry, type SetupJob } from "../lib/api";
-import { button, reportError, tag, toast } from "../lib/ui";
+import { button, openExternalUrl, reportError, tag, toast } from "../lib/ui";
+import { loc } from "../i18n";
 import type { PageContext, PageResult } from "../main";
 
 type Bucket = "connected" | "ready" | "install" | "more";
@@ -34,6 +35,7 @@ export function renderHub(ctx: PageContext): PageResult {
   const busy = new Set<string>();
   const jobs = new Map<string, SetupJob>();
   let jobTimer: number | null = null;
+  let activeModalClose: (() => void) | null = null;
 
   const hero = h("section", { class: "hub-hero" });
   const steps = h("div", { class: "hub-steps" });
@@ -82,7 +84,14 @@ export function renderHub(ctx: PageContext): PageResult {
       stepChip(3, "配对手机", phoneDone ? `已配对 ${Math.max(pairedCount, 1)} 台` : "电脑上核对四个词", phoneDone, false, () =>
         side.scrollIntoView({ behavior: "smooth", block: "start" }),
       ),
-      stepChip(4, "在手机上管理会话", phoneDone ? "去手机上看看" : "配好后自动开始", false, phoneDone, () => ctx.navigate("/console/flow")),
+      stepChip(
+        4,
+        loc("发起或管理会话", "Manage Sessions"),
+        phoneDone ? loc("去新建第一个会话", "Start a session") : loc("配好后自动开始", "Ready after pairing"),
+        false,
+        phoneDone,
+        () => ctx.navigate("/console/sessions?new=1"),
+      ),
     );
   }
 
@@ -97,7 +106,9 @@ export function renderHub(ctx: PageContext): PageResult {
       ]);
       if (disposed) return;
       catalog = catalogPayload.agents;
-      pairedCount = (devices?.count || 0) + (info?.cloud?.peers || 0);
+      // /api/devices already merges legacy token devices and cloud E2E peers;
+      // fall back to info.cloud.peers only if /api/devices failed.
+      pairedCount = devices ? devices.count : (info?.cloud?.peers || 0);
       paint();
       void endpoints
         .sessions(500)
@@ -128,16 +139,24 @@ export function renderHub(ctx: PageContext): PageResult {
     busy.add(entry.id);
     paintMain();
     try {
+      let hookChanged = false;
       if (entry.readiness === "builtin") {
         await endpoints.patchAgent(entry.id, { connected: true, push_to_phone: true });
         if (entry.hook_install === "auto" && !entry.hook_installed) {
           const result = await endpoints.installHooks(entry.id).catch(() => null);
-          if (result && !result.ok) toast(result.error || result.message || "钩子需要手动添加，见全部 Agent 页", "plain", 7000);
+          if (result && result.ok && result.changed) hookChanged = true;
+          else if (result && !result.ok) toast(result.error || result.message || loc("钩子需要手动添加，见 Agent 页", "Hooks require manual setup"), "plain", 7000);
         }
       } else {
         await endpoints.quickConnectCatalogAgent(entry.id);
       }
-      toast(`${entry.name} 已接入，新消息会推到手机`, "ok");
+      toast(
+        hookChanged
+          ? loc(`${entry.name} 已接入并装好钩子，请重启该 Agent 进程使推送生效`, `${entry.name} connected with hooks; restart the agent to activate push`)
+          : loc(`${entry.name} 已接入，新消息会推到手机`, `${entry.name} connected; new messages will push to your phone`),
+        "ok",
+        hookChanged ? 7000 : 4200,
+      );
       heroPigeon.play("recv");
       ctx.refreshShell();
     } catch (err) {
@@ -168,7 +187,17 @@ export function renderHub(ctx: PageContext): PageResult {
     const runnable = commands.map((command, index) => ({ command, index })).filter((item) => item.command.runnable);
     let chosen = runnable[0]?.index ?? -1;
     const overlay = h("div", { class: "hub-modal-backdrop" });
-    const close = () => overlay.remove();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    const close = () => {
+      window.removeEventListener("keydown", onKeyDown);
+      overlay.remove();
+      if (activeModalClose === close) activeModalClose = null;
+    };
+    activeModalClose?.();
+    activeModalClose = close;
+    window.addEventListener("keydown", onKeyDown);
     overlay.addEventListener("click", (event) => {
       if (event.target === overlay) close();
     });
@@ -229,7 +258,7 @@ export function renderHub(ctx: PageContext): PageResult {
             ? "安装过程的输出会显示在卡片上；需要登录的 Agent，装好后在终端运行一次完成登录。"
             : "这台电脑缺少 curl / Homebrew / npm，暂时没法一键安装。复制命令到终端，或先装好 Node.js。",
         ),
-        h("div", { class: "hub-modal-foot" }, entry.homepage ? button("官网", { variant: "quiet", onClick: () => window.open(entry.homepage, "_blank", "noopener") }) : null, h("div", { class: "spacer" }), copyBtn, runBtn),
+        h("div", { class: "hub-modal-foot" }, entry.homepage ? button("官网", { variant: "quiet", onClick: () => void openExternalUrl(entry.homepage || "") }) : null, h("div", { class: "spacer" }), copyBtn, runBtn),
       ),
     );
     document.body.append(overlay);
@@ -334,7 +363,7 @@ export function renderHub(ctx: PageContext): PageResult {
       if (entry.can_setup) {
         actions.append(button(running ? "安装中…" : "一键安装", { variant: "primary", iconSvg: icons.download, disabled: running, onClick: () => openInstall(entry) }));
       } else if (entry.download_url) {
-        actions.append(button("去官网下载", { variant: "primary", iconSvg: icons.download, onClick: () => window.open(entry.download_url, "_blank", "noopener") }));
+        actions.append(button("去官网下载", { variant: "primary", iconSvg: icons.download, onClick: () => void openExternalUrl(entry.download_url || "") }));
       } else {
         actions.append(button("查看安装命令", { onClick: () => openInstall(entry) }));
       }
@@ -499,6 +528,7 @@ export function renderHub(ctx: PageContext): PageResult {
     el: root,
     dispose: () => {
       disposed = true;
+      activeModalClose?.();
       heroPigeon.destroy();
       pairCard.dispose();
       if (jobTimer) window.clearInterval(jobTimer);

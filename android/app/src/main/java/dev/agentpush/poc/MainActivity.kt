@@ -33,7 +33,11 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         NotificationHelper.createChannels(this)
-        pendingSessionId = intent.getStringExtra(NotificationHelper.EXTRA_SESSION_ID)
+        val initialSessionId = intent.getStringExtra(NotificationHelper.EXTRA_SESSION_ID)
+        if (savedInstanceState == null) {
+            AgentStore.get(this).onAppOpened(requestedSessionId = initialSessionId)
+        }
+        pendingSessionId = initialSessionId
         pendingPairLink = if (savedInstanceState == null) {
             pairLinkOf(intent)
         } else {
@@ -57,15 +61,31 @@ class MainActivity : ComponentActivity() {
         requestNotificationsAndStart()
     }
 
+    override fun onStart() {
+        super.onStart()
+        viewModel.refresh()
+    }
+
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString(STATE_PENDING_PAIR_LINK, pendingPairLink)
         super.onSaveInstanceState(outState)
     }
 
+    override fun onDestroy() {
+        if (isFinishing && !isChangingConfigurations) {
+            AgentStore.get(this).markAppClosedForWorkspaceReset()
+        }
+        super.onDestroy()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        pendingSessionId = intent.getStringExtra(NotificationHelper.EXTRA_SESSION_ID)
+        val initialSessionId = intent.getStringExtra(NotificationHelper.EXTRA_SESSION_ID)
+        if (!initialSessionId.isNullOrBlank()) {
+            AgentStore.get(this).markLiveWorkspaceSession(initialSessionId)
+        }
+        pendingSessionId = initialSessionId
         pairLinkOf(intent)?.let { pendingPairLink = it }
     }
 
@@ -77,6 +97,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestNotificationsAndStart() {
+        val settings = AppSettings.load(this)
+        val hasPairedComputer = PairedComputerStore(this).load().isNotEmpty()
+        if (settings.token.isBlank() && !hasPairedComputer) {
+            // Defer notification permission prompt until the user pairs a computer.
+            return
+        }
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED

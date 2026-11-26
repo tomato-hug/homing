@@ -8,13 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/tomato-hug/homing/internal/platform"
 )
 
 const (
@@ -125,17 +126,15 @@ func Start(ctx context.Context, spec Spec, cwd string, onUpdate func(Update), on
 	if strings.TrimSpace(cwd) == "" {
 		return nil, errors.New("ACP 工作目录为空")
 	}
-	binary, err := exec.LookPath(spec.Command[0])
-	if err != nil {
+	binary := platform.ResolveBinary(spec.Command[0])
+	if binary == "" {
 		return nil, fmt.Errorf("找不到 %s 命令", spec.Command[0])
 	}
 	args := append([]string(nil), spec.Command[1:]...)
 	cmd := exec.Command(binary, args...)
 	cmd.Dir = cwd
-	cmd.Env = os.Environ()
-	for key, value := range spec.Env {
-		cmd.Env = append(cmd.Env, key+"="+value)
-	}
+	cmd.Env = platform.EnvWithAugmentedPATH(spec.Env)
+	platform.HideChildWindow(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err

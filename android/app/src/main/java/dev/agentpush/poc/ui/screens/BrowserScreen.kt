@@ -76,7 +76,7 @@ fun BrowserScreen(
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     val focusManager = LocalFocusManager.current
-    var address by remember(url) { mutableStateOf(url) }
+    var address by remember(url) { mutableStateOf(if (url == "about:blank") "" else url) }
     var pageTitle by remember(url) { mutableStateOf(title.ifBlank { "网页" }) }
     var progress by remember { mutableIntStateOf(0) }
     var canGoBack by remember { mutableStateOf(false) }
@@ -254,6 +254,9 @@ fun BrowserScreen(
                             value = address,
                             onValueChange = { address = it },
                             modifier = Modifier.weight(1f).testTag("browser-address"),
+                            placeholder = {
+                                Text("输入网址，回车打开…", style = MaterialTheme.typography.bodySmall)
+                            },
                             singleLine = true,
                             textStyle = MaterialTheme.typography.bodySmall,
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
@@ -409,7 +412,11 @@ fun BrowserScreen(
                             }
                         }
                         webViewRef = this
-                        loadAddress(url)
+                        if (url.isNotBlank() && url != "about:blank") {
+                            loadAddress(url)
+                        } else {
+                            progress = 100
+                        }
                     }
                 },
                 update = { webViewRef = it },

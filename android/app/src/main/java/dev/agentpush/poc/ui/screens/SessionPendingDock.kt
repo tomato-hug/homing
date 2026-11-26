@@ -60,8 +60,8 @@ internal fun SessionPendingDock(
     val options = if (permission) {
         event.approvalOptions.ifEmpty {
             listOf(
-                ApprovalOption("allow_once", "允许一次", "allow"),
                 ApprovalOption("reject_once", "拒绝", "deny"),
+                ApprovalOption("allow_once", "允许一次", "allow"),
             )
         }
     } else {

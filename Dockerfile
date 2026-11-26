@@ -7,10 +7,11 @@ RUN cd console && npm ci
 COPY console ./console
 COPY web/console ./web/console
 RUN cd console && npm run build \
-    && rm -rf ../web/console/assets \
+    && rm -rf ../web/console/assets ../web/console/sponsor \
     && mkdir -p ../web/console \
     && cp dist/index.html dist/favicon.svg ../web/console/ \
-    && cp -R dist/assets ../web/console/
+    && cp -R dist/assets ../web/console/ \
+    && if [ -d dist/sponsor ]; then cp -R dist/sponsor ../web/console/; fi
 
 FROM golang:1.26-bookworm AS build
 WORKDIR /src

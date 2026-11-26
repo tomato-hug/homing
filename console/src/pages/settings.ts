@@ -12,7 +12,9 @@ import {
   type HomeSettings,
   type SearchIndexStatus,
 } from "../lib/api";
-import { button, groupHead, listCard, reportError, tag, toast, toggle } from "../lib/ui";
+import { button, groupHead, listCard, reportError, segmented, tag, toast, toggle } from "../lib/ui";
+import { confirmDialog } from "../lib/dialog";
+import { getLocale, loc, setLocale, t, type Locale } from "../i18n";
 import type { PageContext, PageResult } from "../main";
 
 /** 一行：左边标题 + 说明，右边控件 */
@@ -69,10 +71,15 @@ export function renderSettings(ctx: PageContext): PageResult {
     try {
       await endpoints.setAutoAwaySettings({ enabled, idle_minutes: minutes });
       autoAway = { ...autoAway, enabled, idle_minutes: minutes };
-      toast(enabled ? `已開啟自動離開（閒置 ${minutes} 分鐘）` : "已關閉自動離開", "ok");
+      toast(
+        enabled
+          ? loc(`已开启自动离开（闲置 ${minutes} 分钟）`, `Auto-away enabled (${minutes}m idle)`)
+          : loc("已关闭自动离开", "Auto-away disabled"),
+        "ok",
+      );
       await load();
     } catch (err) {
-      reportError(err, "設定自動離開失敗");
+      reportError(err, loc("设置自动离开失败", "Failed to update auto-away"));
       await load();
     }
   }
@@ -85,13 +92,13 @@ export function renderSettings(ctx: PageContext): PageResult {
       homeSettings = result.settings;
       toast(
         enabled
-          ? "已開啟：子 Agent 完成後會自動把結論送回父會話"
-          : "已關閉自動轉交，子任務結果只以卡片顯示",
+          ? loc("已开启：子 Agent 完成后会自动把结论送回父会话", "Enabled: child results auto-forward to parent session")
+          : loc("已关闭自动转交，子任务结果仅以卡片显示", "Disabled auto-forward; child results stay as cards"),
         "ok",
       );
       await load();
     } catch (err) {
-      reportError(err, "設定跨 Agent 結果轉交失敗");
+      reportError(err, loc("设置跨 Agent 结果转交失败", "Failed to update dispatch return setting"));
       await load();
     }
   }
@@ -100,11 +107,15 @@ export function renderSettings(ctx: PageContext): PageResult {
     if (searchBusy) return;
     searchBusy = true;
     if (action === "delete") {
-      const ok = window.confirm(
-        "删除并关闭正文索引？\n\n" +
-          "只会移除可重建的 index.db，不会删除任何会话原文。" +
-          "正文搜索会同时关闭；以后可在同一张卡片重新开启并建立索引。",
-      );
+      const ok = await confirmDialog({
+        title: loc("删除并关闭正文索引？", "Delete & Disable Full-Text Index?"),
+        message: loc(
+          "只会移除可重建的 index.db，不会删除任何会话原文。正文搜索会同时关闭；以后可在同一张卡片重新开启并建立索引。",
+          "Only removes the rebuildable index.db without touching any session transcripts. Full-text search will be disabled until re-enabled.",
+        ),
+        confirmLabel: t("common.delete"),
+        danger: true,
+      });
       if (!ok) {
         searchBusy = false;
         return;
@@ -151,34 +162,48 @@ export function renderSettings(ctx: PageContext): PageResult {
     const autostartOn = payload.autostart.enabled;
     const autostartCard = listCard(
       row({
-        title: "开机自启",
+        title: t("settings.language"),
+        sub: t("settings.languageSub"),
+        right: [
+          segmented<Locale>(
+            [
+              { value: "zh-CN", label: "简体中文" },
+              { value: "en", label: "English" },
+            ],
+            getLocale(),
+            (next) => setLocale(next),
+          ),
+        ],
+      }),
+      row({
+        title: loc("开机自启", "Launch at Login"),
         sub: h(
           "span",
           null,
-          "登录后自动把本机服务拉起来，不用每次手动开。",
+          loc("登录后自动把本机服务拉起来，不用每次手动开。", "Start the local Homing service automatically when you log in."),
           payload.autostart.legacy
-            ? h("span", { style: "color:var(--amber)", text: " 检测到已有 launchd 服务，两者不会重复启动。" })
+            ? h("span", { style: "color:var(--amber)", text: loc(" 检测到已有 launchd 服务，两者不会重复启动。", " Existing launchd service detected; duplicates are prevented.") })
             : null,
         ),
         right: [
-          tag(autostartOn ? "已开启" : "未开启", autostartOn ? "ok" : "mute"),
+          tag(autostartOn ? loc("已开启", "Enabled") : loc("未开启", "Disabled"), autostartOn ? "ok" : "mute"),
           toggle({
             on: autostartOn,
-            title: "开机自启",
+            title: loc("开机自启", "Launch at Login"),
             onChange: async (next) => {
               try {
                 const result = await api.post<{ ok: boolean; note?: string; error?: string }>("/api/autostart", {
                   enabled: next,
                 });
                 if (!result.ok) {
-                  toast(result.error || "设置失败", "bad");
+                  toast(result.error || loc("设置失败", "Failed to save"), "bad");
                   await load();
                   return;
                 }
-                toast(result.note || (next ? "已开启开机自启" : "已关闭开机自启"), "ok");
+                toast(result.note || (next ? loc("已开启开机自启", "Autostart enabled") : loc("已关闭开机自启", "Autostart disabled")), "ok");
                 await load();
               } catch (err) {
-                reportError(err, "设置开机自启失败");
+                reportError(err, loc("设置开机自启失败", "Failed to update autostart"));
                 await load();
               }
             },
@@ -186,44 +211,44 @@ export function renderSettings(ctx: PageContext): PageResult {
         ],
       }),
       row({
-        title: "首次设置向导",
-        sub: "重新选一遍要接入的 agent 和连接方式，不影响已经配好的设备。",
-        right: [linkButton("重新走一遍", icons.key, () => ctx.navigate("/console/setup"))],
+        title: loc("接入与手机配对", "Agent Setup & Phone Pairing"),
+        sub: loc("接入新 Agent 或重新扫描端到端加密二维码配对手机。", "Connect new agents or pair a phone via encrypted QR code."),
+        right: [linkButton(loc("打开向导", "Open Setup"), icons.key, () => ctx.navigate("/console/hub"))],
       }),
       row({
-        title: "自動離開",
+        title: loc("自动离开", "Auto-Away"),
         sub: autoAway.available
-          ? "鎖屏或鍵盤滑鼠閒置超過指定分鐘後，自動開啟離開時段；解鎖後自動結束。"
-          : "目前平台尚未提供鎖屏與閒置探測。",
+          ? loc("锁屏或键盘鼠标闲置超过指定分钟后，自动开启离开时段；解锁后自动结束。", "Automatically enable Away Mode after screen lock or idle timeout.")
+          : loc("当前平台尚未提供锁屏与闲置探测。", "Idle / lock-screen detection is not available on this platform."),
         right: [
           minutesInput,
-          h("span", { class: "note", text: "分鐘" }),
+          h("span", { class: "note", text: loc("分钟", "min") }),
           toggle({
             on: autoAway.enabled,
-            title: "自動離開",
+            title: loc("自动离开", "Auto-Away"),
             disabled: !autoAway.available,
             onChange: (next) => void saveAutoAway(next, autoAway.idle_minutes),
           }),
         ],
       }),
       row({
-        title: "自動轉交子 Agent 結論",
+        title: loc("自动转交子 Agent 结论", "Auto-Forward Child Results"),
         sub: h(
           "span",
           null,
-          "開啟後，跨 Agent 子任務完成時會把結論直接送入父會話；預設關閉，避免未經確認的提示詞注入。",
+          loc("开启后，跨 Agent 子任务完成时会把结论直接送入父会话；默认关闭，避免未经确认的提示词注入。", "Automatically inject completed @agent child results into the parent session. Off by default for safety."),
           homeSettings.collab_return === "inject"
-            ? h("span", { style: "color:var(--amber)", text: " 目前開啟，請只對可信的 Agent 使用。" })
+            ? h("span", { style: "color:var(--amber)", text: loc(" 当前已开启，请仅对可信的 Agent 使用。", " Currently enabled; use with trusted agents only.") })
             : null,
         ),
         right: [
           tag(
-            homeSettings.collab_return === "inject" ? "自動轉交" : "僅顯示卡片",
+            homeSettings.collab_return === "inject" ? loc("自动转交", "Auto-Forward") : loc("仅显示卡片", "Card Only"),
             homeSettings.collab_return === "inject" ? "warn" : "mute",
           ),
           toggle({
             on: homeSettings.collab_return === "inject",
-            title: "自動轉交子 Agent 結論",
+            title: loc("自动转交子 Agent 结论", "Auto-Forward Child Results"),
             onChange: (next) => void saveCollabReturn(next),
           }),
         ],
@@ -366,6 +391,11 @@ export function renderSettings(ctx: PageContext): PageResult {
           `v${payload.version} · ${payload.runtime === "go" ? "单文件 homing（Go）" : payload.packaged ? "单文件 homingd" : "node relay/server.mjs"} · 已运行 ${uptime(payload.uptime_s)}`,
         ),
         right: [linkButton("关于 Homing", icons.info, () => ctx.navigate("/console/about"))],
+      }),
+      row({
+        title: loc("致谢与打赏支持 ☕", "Acknowledgments & Sponsor ☕"),
+        sub: loc("查看开源生态致谢、Apache-2.0 许可声明，或扫码支持公网中继服务器带宽。", "Open-source credits, Apache-2.0 notices, and WeChat / Alipay tip QR codes."),
+        right: [linkButton(loc("致谢与打赏", "Credits & Tip"), icons.info, () => ctx.navigate("/console/about"))],
       }),
       row({
         title: "运行环境",

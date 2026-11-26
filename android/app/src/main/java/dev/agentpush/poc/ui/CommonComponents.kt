@@ -54,24 +54,33 @@ fun AgentAvatar(
     source: String = brand.wire,
     modifier: Modifier = Modifier,
 ) {
-    val accent = agentLogoColor(source) ?: brand.accentColor()
+    val effectiveSource = if (hasAgentLogo(source)) source else brand.wire
+    val hasLogo = hasAgentLogo(effectiveSource)
+    val hasTile = agentLogoDrawable(effectiveSource) != null
+    val accent = agentLogoColor(effectiveSource)
+        ?: if (brand != AgentBrand.UNKNOWN) brand.accentColor() else agentFallbackColor(source)
     Box(
         modifier = modifier
             .size(size)
             .clip(CircleShape)
-            .background(accent.copy(alpha = 0.16f)),
+            .background(accent.copy(alpha = if (hasTile) 0.10f else 0.16f)),
         contentAlignment = Alignment.Center,
     ) {
-        if (agentLogoSpec(source) != null) {
+        if (hasLogo) {
             AgentLogoMark(
-                source = source,
+                source = effectiveSource,
                 size = size * if (size <= 24.dp) 0.78f else 0.68f,
             )
         } else {
+            val initials = if (brand != AgentBrand.UNKNOWN) {
+                brand.initial
+            } else {
+                agentFallbackInitials(source)
+            }
             Text(
-                text = brand.initial,
+                text = initials,
                 color = accent,
-                fontSize = (size.value * 0.38f).sp,
+                fontSize = (size.value * if (initials.length > 1) 0.32f else 0.38f).sp,
                 fontWeight = FontWeight.Bold,
             )
         }

@@ -1,0 +1,38 @@
+version: "2"
+
+run:
+  timeout: 3m
+  tests: true
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - contextcheck
+    - errorlint
+    - exhaustive
+    - fatcontext
+    - forbidigo
+    - nilerr
+    - noctx
+    - nolintlint
+    - rowserrcheck
+    - sqlclosecheck
+  settings:
+    errcheck:
+      check-blank: true
+      check-type-assertions: true
+    exhaustive:
+      default-signifies-exhaustive: false
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: ^testing\.T\.Skip$
+          msg: "Do not skip tests to force green builds; fix root cause or stop and report."
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+
+formatters:
+  enable:
+    - gofmt

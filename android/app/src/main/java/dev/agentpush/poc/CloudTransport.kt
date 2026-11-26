@@ -91,7 +91,7 @@ class CloudTransport(
         name: String,
     ): JSONObject {
         if (bytes.size > CLOUD_FILE_LIMIT_BYTES) {
-            throw CloudRpcException("單文件上限 20 MB")
+            throw CloudRpcException("单文件上限 20 MB")
         }
         val computer = link.preferredComputer()
             ?: throw CloudRpcException("尚未配對可用的電腦")
@@ -144,7 +144,7 @@ class CloudTransport(
             throw CloudRpcException("附件地址無效")
         }
         if (!path.startsWith("/f/")) {
-            throw CloudRpcException("雲端附件下載只允許能力連結")
+            throw CloudRpcException("云端附件下载只允许能力链接")
         }
         val computer = link.preferredComputer()
             ?: throw CloudRpcException("尚未配對可用的電腦")

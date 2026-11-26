@@ -51,7 +51,23 @@ object CrashReporter {
     private const val TAG = "AgentCrash"
     private const val PREFS = "agent_push_crash"
     private const val KEY_LAST_SESSION = "last_session_id"
+    private const val KEY_ENABLED = "crash_reporting_enabled"
     private val recording = AtomicBoolean(false)
+
+    fun isEnabled(context: android.content.Context): Boolean {
+        return context.applicationContext
+            .getSharedPreferences(PREFS, Application.MODE_PRIVATE)
+            .getBoolean(KEY_ENABLED, true)
+    }
+
+    fun setEnabled(context: android.content.Context, enabled: Boolean) {
+        context.applicationContext
+            .getSharedPreferences(PREFS, Application.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_ENABLED, enabled)
+            .apply()
+        if (!enabled) clearLastReport()
+    }
 
     @Volatile
     private var application: Application? = null
@@ -104,6 +120,7 @@ object CrashReporter {
         if (!recording.compareAndSet(false, true)) return
         try {
             val app = application ?: return
+            if (!isEnabled(app)) return
             val report = CrashReport(
                 appVersion = appVersion(app),
                 ts = Instant.now().toString(),
@@ -142,6 +159,7 @@ object CrashReporter {
     suspend fun uploadPending(settings: AppSettings) {
         if (settings.token.isBlank()) return
         val app = application ?: return
+        if (!isEnabled(app)) return
         val file = crashFile(app)
         if (!file.isFile) return
         val report = runCatching {

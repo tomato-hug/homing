@@ -143,7 +143,9 @@ internal fun buildSessionTimeline(
     val matchedReplies = mutableSetOf<Long>()
     var order = 0
     if (structuredItems.isNotEmpty()) {
-        structuredItems.forEach { item ->
+        structuredItems
+            .filterNot { it.type == SessionItemType.ASSISTANT && isInternalTitleJsonPayload(it.text) }
+            .forEach { item ->
             val itemTime = timelineMillis(item.ts)
             val duplicate = if (item.type == SessionItemType.USER) replies.filter { reply ->
                 val replyTime = timelineMillis(reply.ts)
@@ -157,12 +159,18 @@ internal fun buildSessionTimeline(
                 rows += TimelineItem.Item(item, order++)
             }
         }
-        session?.events.orEmpty().filterNot { representedByNativeItem(it, structuredItems) }
+        session?.events.orEmpty()
+            .filterNot { dev.agentpush.poc.isIdlePromptNoiseEvent(it.kind, it.text) }
+            .filterNot { representedByNativeItem(it, structuredItems) }
             .forEach { extras += TimelineItem.Event(it, order++) }
     } else {
         val messages = session?.transcript?.messages.orEmpty()
+            .filterNot { it.isAssistant && isInternalTitleJsonPayload(it.text) }
         messages.forEach { rows += TimelineItem.Message(it, order++) }
-        session?.events.orEmpty().filter { messages.isEmpty() || it.isPending }
+        session?.events.orEmpty()
+            .filterNot { isInternalTitleJsonPayload(it.text) }
+            .filterNot { dev.agentpush.poc.isIdlePromptNoiseEvent(it.kind, it.text) }
+            .filter { messages.isEmpty() || it.isPending }
             .forEach { extras += TimelineItem.Event(it, order++) }
     }
     replies.filterNot { it.id in matchedReplies }.forEach { extras += TimelineItem.Reply(it, order++) }
@@ -186,6 +194,22 @@ internal fun buildSessionTimeline(
 }
 
 private fun timelineMillis(value: String): Long? = runCatching { Instant.parse(value).toEpochMilli() }.getOrNull()
+
+internal fun isInternalTitleJsonPayload(text: String): Boolean {
+    val trimmed = text.trim()
+    if (trimmed.length !in 12..800 || !trimmed.startsWith("{") || !trimmed.endsWith("}")) {
+        return false
+    }
+    return runCatching {
+        val obj = org.json.JSONObject(trimmed)
+        val keys = obj.keys().asSequence().toList()
+        keys.isNotEmpty() &&
+            keys.size <= 3 &&
+            "title" in keys &&
+            keys.all { it in setOf("title", "description", "subtitle") } &&
+            obj.optString("title").isNotBlank()
+    }.getOrDefault(false)
+}
 
 private fun representedByNativeItem(event: AgentEvent, items: List<SessionItem>): Boolean {
     if (items.any { it.eventId == event.id }) return true
@@ -872,8 +896,8 @@ internal fun AgentEventCard(
                         Spacer(Modifier.height(13.dp))
                         val options = event.approvalOptions.ifEmpty {
                             listOf(
-                                ApprovalOption("allow_once", "允许", "allow"),
                                 ApprovalOption("reject_once", "拒绝", "deny"),
+                                ApprovalOption("allow_once", "允许", "allow"),
                             )
                         }
                         if (options.size <= 2) {

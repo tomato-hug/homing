@@ -98,6 +98,7 @@ import kotlinx.coroutines.launch
 fun RoomsScreen(
     viewModel: AgentViewModel,
     onOpenRoom: (String) -> Unit,
+    onBack: (() -> Unit)? = null,
 ) {
     val state = viewModel.state.collectAsStateWithLifecycle().value
     var rooms by remember { mutableStateOf<List<Room>>(emptyList()) }
@@ -136,6 +137,11 @@ fun RoomsScreen(
     ) {
         item(key = "header") {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                if (onBack != null) {
+                    IconButton(onClick = onBack, modifier = Modifier.padding(end = 4.dp)) {
+                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
+                    }
+                }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "会议室",
@@ -560,9 +566,17 @@ fun RoomScreen(
     }
     val messageCount = room?.messages?.size ?: 0
     val speaking = room?.speakingParticipant
+    var roomPositioned by remember(roomId) { mutableStateOf(false) }
     LaunchedEffect(messageCount, speaking?.agent) {
-        val total = listState.layoutInfo.totalItemsCount
-        if (total > 0) listState.animateScrollToItem(total - 1)
+        val info = listState.layoutInfo
+        val total = info.totalItemsCount
+        if (total <= 0) return@LaunchedEffect
+        val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+        val nearBottom = !roomPositioned || lastVisible >= total - 2
+        if (nearBottom) {
+            listState.animateScrollToItem(total - 1)
+            roomPositioned = true
+        }
     }
 
     fun act(afterSuccess: () -> Unit = {}, block: suspend () -> Room) {

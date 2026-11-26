@@ -8,7 +8,7 @@ import QRCode from "qrcode";
 import { h, clear } from "./dom";
 import { icons } from "./icons";
 import { endpoints, type CloudPairInvite, type CloudPairRequest, type ConnectionInfo } from "./api";
-import { button, reportError, toast } from "./ui";
+import { button, openExternalUrl, reportError, toast } from "./ui";
 
 export interface PairCardOptions {
   /** 有手机在等核对校验词时 true，核对完 false */
@@ -163,7 +163,7 @@ export function createPairCard(options: PairCardOptions = {}): PairCard {
       h(
         "div",
         { class: "hub-phone-foot" },
-        button("下载安卓安装包", { small: true, variant: "quiet", iconSvg: icons.download, onClick: () => window.open("/apk", "_blank", "noopener") }),
+        button("下载安卓安装包", { small: true, variant: "quiet", iconSvg: icons.download, onClick: () => void openExternalUrl("/apk") }),
         button("换一个", { small: true, variant: "quiet", iconSvg: icons.refresh, onClick: () => void start() }),
       ),
       h("div", {

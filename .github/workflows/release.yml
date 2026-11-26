@@ -26,7 +26,7 @@ jobs:
             goarch: arm64
             gui: true
           - name: macOS amd64
-            os: macos-13
+            os: macos-14
             goos: darwin
             goarch: amd64
             gui: true
@@ -34,6 +34,11 @@ jobs:
             os: windows-latest
             goos: windows
             goarch: amd64
+            gui: true
+          - name: Windows arm64
+            os: windows-latest
+            goos: windows
+            goarch: arm64
             gui: true
           - name: Linux amd64
             os: ubuntu-latest
@@ -73,20 +78,72 @@ jobs:
           [ "$GOOS" = "windows" ] && ext=".exe"
           tags=()
           [ "$GUI" != "true" ] && tags=(-tags headless)
-          go build "${tags[@]}" -trimpath \
+          if [ "$GOOS" = "windows" ]; then
+            python scripts/package-windows.py \
+              --version "${VERSION#v}" \
+              --arch "$GOARCH" \
+              --skip-console-build \
+              --commit "$GITHUB_SHA" \
+              --output dist/win-pkg
+            cp dist/win-pkg/*.zip dist/
+            cp dist/win-pkg/homing_windows_${GOARCH}.exe dist/
+            rm -rf dist/win-pkg
+          elif [ "$GOOS" = "darwin" ]; then
+            clang_arch="arm64"
+            [ "$GOARCH" = "amd64" ] && clang_arch="x86_64"
+            CGO_ENABLED=1 CGO_CFLAGS="-arch ${clang_arch} -mmacosx-version-min=13.0" \
+              CGO_LDFLAGS="-arch ${clang_arch} -mmacosx-version-min=13.0" \
+              go build -trimpath \
+              -ldflags "-s -w -X main.version=${VERSION#v} -extldflags '-arch ${clang_arch} -mmacosx-version-min=13.0'" \
+              -o "dist/homing_${GOOS}_${GOARCH}${ext}" ./cmd/homing
+            python3 scripts/package-macos.py \
+              --version "${VERSION#v}" \
+              --arch "$GOARCH" \
+              --skip-console-build \
+              --commit "$GITHUB_SHA" \
+              --output dist/macos-pkg
+            cp dist/macos-pkg/*.zip dist/
+            rm -rf dist/macos-pkg
+          else
+            CGO_ENABLED=0 go build "${tags[@]}" -trimpath \
+              -ldflags "-s -w -X main.version=${VERSION#v}" \
+              -o "dist/homing_${GOOS}_${GOARCH}${ext}" ./cmd/homing
+          fi
+          CGO_ENABLED=0 go build -tags headless -trimpath \
             -ldflags "-s -w -X main.version=${VERSION#v}" \
-            -o "dist/homing_${GOOS}_${GOARCH}${ext}" ./cmd/homing
-          go build -tags headless -trimpath \
-            -ldflags "-s -w" \
             -o "dist/homing-server_${GOOS}_${GOARCH}${ext}" ./cmd/homing-server
       - uses: actions/upload-artifact@v4
         with:
           name: homing-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/homing_* 
+          path: |
+            dist/homing*
+            dist/Homing*
+          if-no-files-found: error
+
+  android:
+    name: Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+      - name: Build Android APK
+        working-directory: android
+        run: |
+          ./gradlew :app:assembleDebug --no-daemon
+          mkdir -p ../dist
+          cp app/build/outputs/apk/debug/app-debug.apk ../dist/homing-android.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: homing-android
+          path: dist/homing-android.apk
           if-no-files-found: error
 
   release:
-    needs: binaries
+    needs: [binaries, android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -98,7 +155,7 @@ jobs:
         shell: bash
         run: |
           cd artifacts
-          sha256sum homing_* > checksums.txt
+          sha256sum homing* Homing* 2>/dev/null > checksums.txt
           cat checksums.txt
       - name: Publish GitHub release
         shell: bash

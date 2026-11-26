@@ -64,6 +64,7 @@ type SessionSpec struct {
 	DB            string         `yaml:"db"`
 	DBGlob        string         `yaml:"db_glob"` // 目录里每个 .db 一条会话（antigravity）
 	Query         string         `yaml:"query"`
+	ItemsQuery    string         `yaml:"items_query"`
 	URL           string         `yaml:"url"`
 	Format        string         `yaml:"format"`
 	FormatOptions map[string]any `yaml:"format_options"`

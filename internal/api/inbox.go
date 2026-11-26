@@ -73,6 +73,9 @@ func (d *Deps) buildInbox(r *http.Request) Inbox {
 		if event.SessionID == "" {
 			continue
 		}
+		if event.Kind == "needs_input" && scanlib.IsIdlePromptNotification("", event.Text) {
+			continue
+		}
 		latest[event.Source+":"+event.SessionID] = event
 	}
 

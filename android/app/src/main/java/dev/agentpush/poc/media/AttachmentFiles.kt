@@ -33,30 +33,15 @@ object AttachmentFiles {
         if (target.exists() && (attachment.size <= 0 || target.length() == attachment.size)) {
             return@withContext target
         }
-        val url = AgentApi.attachmentUrl(settings, attachment)
-        val connection = URL(url).openConnection() as HttpURLConnection
-        try {
-            connection.connectTimeout = 10_000
-            connection.readTimeout = 90_000
-            connection.instanceFollowRedirects = true
-            connection.setRequestProperty("Accept", "*/*")
-            val code = connection.responseCode
-            if (code !in 200..299) {
-                throw java.io.IOException("下载失败 HTTP $code")
-            }
-            val temp = File(dir, "${target.name}.part")
-            connection.inputStream.use { input ->
-                temp.outputStream().use { output -> input.copyTo(output) }
-            }
-            if (target.exists()) target.delete()
-            if (!temp.renameTo(target)) {
-                temp.copyTo(target, overwrite = true)
-                temp.delete()
-            }
-            target
-        } finally {
-            connection.disconnect()
+        val bytes = AgentApi.downloadAttachmentBytes(settings, attachment)
+        val temp = File(dir, "${target.name}.part")
+        temp.writeBytes(bytes)
+        if (target.exists()) target.delete()
+        if (!temp.renameTo(target)) {
+            temp.copyTo(target, overwrite = true)
+            temp.delete()
         }
+        target
     }
 
     fun fileUri(context: Context, file: File): Uri {

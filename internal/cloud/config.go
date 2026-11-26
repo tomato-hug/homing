@@ -22,11 +22,44 @@ func ConfigureServer(
 	handler http.Handler,
 	log *slog.Logger,
 ) (api.CloudStatus, error) {
+	return ConfigureServerWithOptions(dataDir, rawServer, nil, hub, handler, log)
+}
+
+func ConfigureServerWithOptions(
+	dataDir string,
+	rawServer string,
+	useSystemProxy *bool,
+	hub *Hub,
+	handler http.Handler,
+	log *slog.Logger,
+) (api.CloudStatus, error) {
+	return ConfigureServerWithAuth(dataDir, rawServer, nil, useSystemProxy, hub, handler, log)
+}
+
+func ConfigureServerWithAuth(
+	dataDir string,
+	rawServer string,
+	relayKey *string,
+	useSystemProxy *bool,
+	hub *Hub,
+	handler http.Handler,
+	log *slog.Logger,
+) (api.CloudStatus, error) {
 	if hub == nil {
 		return api.CloudStatus{}, fmt.Errorf("cloud: hub is unavailable")
 	}
 	if log == nil {
 		log = slog.Default()
+	}
+	if relayKey != nil {
+		if err := hub.Peers().SetRelayKey(strings.TrimSpace(*relayKey)); err != nil {
+			return StatusFor(dataDir, hub), err
+		}
+	}
+	if useSystemProxy != nil {
+		if err := hub.Peers().SetUseSystemProxy(*useSystemProxy); err != nil {
+			return StatusFor(dataDir, hub), err
+		}
 	}
 	server := strings.TrimSpace(rawServer)
 	if server == "" {
@@ -43,11 +76,13 @@ func ConfigureServer(
 		return StatusFor(dataDir, hub), err
 	}
 	next, err := NewConnector(ConnectorConfig{
-		ServerURL: normalized,
-		Identity:  hub.Identity(),
-		Peers:     hub.Peers(),
-		Handler:   handler,
-		Logger:    log,
+		ServerURL:      normalized,
+		RelayKey:       hub.Peers().RelayKey(),
+		Identity:       hub.Identity(),
+		Peers:          hub.Peers(),
+		Handler:        handler,
+		Logger:         log,
+		UseSystemProxy: hub.Peers().UseSystemProxy(),
 	})
 	if err != nil {
 		return StatusFor(dataDir, hub), err
@@ -72,13 +107,19 @@ func mountConfig(mux *http.ServeMux, dataDir string, hub *Hub, deps *api.Deps) {
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 		var body struct {
-			Server string `json:"server"`
+			Server         *string `json:"server"`
+			RelayKey       *string `json:"relay_key"`
+			UseSystemProxy *bool   `json:"use_system_proxy"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			api.WriteJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_json"})
 			return
 		}
-		status, err := ConfigureServer(dataDir, body.Server, hub, mux, deps.Log)
+		targetServer := hub.Peers().Server()
+		if body.Server != nil {
+			targetServer = *body.Server
+		}
+		status, err := ConfigureServerWithAuth(dataDir, targetServer, body.RelayKey, body.UseSystemProxy, hub, mux, deps.Log)
 		if err != nil {
 			api.WriteJSON(w, http.StatusBadRequest, map[string]any{
 				"ok":    false,

@@ -404,3 +404,74 @@ func TempCwd(cwd string) bool {
 	}
 	return strings.Contains(strings.ToLower(p), "/appdata/local/temp")
 }
+
+var codeBuddyWordPattern = regexp.MustCompile(`(?i)\bcodebuddy(\s+code)?\b`)
+
+// IsIdlePromptNotification reports whether a Claude/WorkBuddy/CodeBuddy hook
+// Notification represents an idle input prompt after a turn already completed
+// (e.g. notification_type="idle_prompt" or "<Agent> is waiting for your input")
+// rather than an actionable question or permission request.
+func IsIdlePromptNotification(notificationType, text string) bool {
+	nt := strings.ToLower(strings.TrimSpace(notificationType))
+	switch nt {
+	case "idle_prompt", "auth_success":
+		return true
+	case "permission_prompt", "elicitation_dialog":
+		return false
+	}
+	cleaned := strings.ToLower(strings.TrimSpace(text))
+	cleaned = strings.TrimRight(cleaned, ".!。！ ")
+	if cleaned == "" {
+		return false
+	}
+	if cleaned == "waiting for your input" {
+		return true
+	}
+	const suffix = " is waiting for your input"
+	if strings.HasSuffix(cleaned, suffix) {
+		prefix := strings.TrimSpace(strings.TrimSuffix(cleaned, suffix))
+		if prefix != "" && len(strings.Fields(prefix)) <= 4 {
+			return true
+		}
+	}
+	return false
+}
+
+// NormalizeHookSourceBranding rewrites engine-level brand strings leaked by
+// underlying runtimes (for example WorkBuddy Desktop emitting "CodeBuddy" in
+// hook system prompts) so user-facing prompts match the actual session agent.
+func NormalizeHookSourceBranding(source, text string) string {
+	if !strings.EqualFold(strings.TrimSpace(source), "workbuddy") || strings.TrimSpace(text) == "" {
+		return text
+	}
+	return codeBuddyWordPattern.ReplaceAllString(text, "WorkBuddy")
+}
+
+// IsInternalTitlePayload detects background thread-title helper JSON responses
+// (such as Codex Desktop's `{"title":"...","description":"..."}`) so they do not
+// spawn duplicate untitled project-named sessions or raw JSON bubbles.
+func IsInternalTitlePayload(text string) bool {
+	s := strings.TrimSpace(text)
+	if len(s) < 12 || len(s) > 800 || s[0] != '{' || s[len(s)-1] != '}' {
+		return false
+	}
+	var obj map[string]any
+	if json.Unmarshal([]byte(s), &obj) != nil || len(obj) == 0 || len(obj) > 3 {
+		return false
+	}
+	title, ok := obj["title"].(string)
+	if !ok || strings.TrimSpace(title) == "" {
+		return false
+	}
+	for k, v := range obj {
+		switch k {
+		case "title", "description", "subtitle":
+			if _, isStr := v.(string); !isStr {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}

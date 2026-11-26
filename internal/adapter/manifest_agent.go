@@ -16,6 +16,7 @@ import (
 
 	"github.com/tomato-hug/homing/internal/agent"
 	"github.com/tomato-hug/homing/internal/driver"
+	"github.com/tomato-hug/homing/internal/platform"
 	_ "modernc.org/sqlite"
 )
 
@@ -193,7 +194,7 @@ func (a *ManifestAgent) Detect(ctx context.Context) agent.Detection {
 	}
 	if !installed {
 		for _, bin := range a.m.Detect.Bin {
-			if p, err := exec.LookPath(bin); err == nil {
+			if p := platform.ResolveBinary(bin); p != "" {
 				installed = true
 				bits = append(bits, p)
 				break
@@ -211,7 +212,7 @@ func (a *ManifestAgent) Detect(ctx context.Context) agent.Detection {
 			if strings.TrimSpace(bin) == "" {
 				continue
 			}
-			if path, err := exec.LookPath(bin); err == nil {
+			if path := platform.ResolveBinary(bin); path != "" {
 				installed = true
 				bits = append(bits, path)
 			}
@@ -257,6 +258,24 @@ func (a *ManifestAgent) ListSessions(ctx context.Context, limit int) ([]agent.Se
 }
 
 func (a *ManifestAgent) Meta(sessionID, cwdHint string) agent.Meta {
+	if a.m.Sessions.Source == "sqlite" {
+		rows, _ := a.sqliteSessions(500)
+		for _, row := range rows {
+			if row.SessionID == sessionID {
+				cwd := cwdHint
+				if cwd == "" {
+					cwd = row.Cwd
+				}
+				return agent.Meta{
+					Cwd:         cwd,
+					NativeTitle: row.Title,
+					TitleSource: "agent",
+					Model:       row.Model,
+				}
+			}
+		}
+		return agent.Meta{Cwd: cwdHint, TitleSource: "agent"}
+	}
 	r := a.find(sessionID)
 	if r == nil {
 		return agent.Meta{Cwd: cwdHint, TitleSource: "first_prompt"}
@@ -275,6 +294,9 @@ func (a *ManifestAgent) Meta(sessionID, cwdHint string) agent.Meta {
 }
 
 func (a *ManifestAgent) ReadItems(ctx context.Context, sessionID string, limit int) ([]agent.Item, error) {
+	if a.m.Sessions.Source == "sqlite" {
+		return a.sqliteItems(sessionID, limit), nil
+	}
 	r := a.find(sessionID)
 	if r == nil {
 		return nil, nil
@@ -295,6 +317,12 @@ func (a *ManifestAgent) ReadItems(ctx context.Context, sessionID string, limit i
 }
 
 func (a *ManifestAgent) IsEmptySession(sessionID string) bool {
+	if a.m.Sessions.Source == "sqlite" {
+		if strings.TrimSpace(a.m.Sessions.ItemsQuery) != "" {
+			return len(a.sqliteItems(sessionID, 1)) == 0
+		}
+		return false
+	}
 	r := a.find(sessionID)
 	if r == nil {
 		return false
@@ -315,8 +343,114 @@ func (a *ManifestAgent) Models(ctx context.Context) ([]agent.Model, string, erro
 
 // ---- sqlite --------------------------------------------------------------
 
+// openDB opens SQLite in read-only mode WITHOUT `immutable=1` first so WAL-mode
+// databases (e.g. Hermes state.db-wal) remain fully visible; falls back to
+// `immutable=1` only when the parent directory does not permit WAL/SHM reads.
 func (a *ManifestAgent) openDB(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(2000)")
+	if err == nil {
+		db.SetMaxOpenConns(1)
+		if pingErr := db.Ping(); pingErr == nil {
+			return db, nil
+		}
+		_ = db.Close()
+	}
 	return sql.Open("sqlite", "file:"+path+"?mode=ro&immutable=1")
+}
+
+func (a *ManifestAgent) sqliteItems(sessionID string, limit int) []agent.Item {
+	query := strings.TrimSpace(a.m.Sessions.ItemsQuery)
+	if query == "" || sessionID == "" {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	var paths []string
+	if a.m.Sessions.DBGlob != "" {
+		matches, _ := filepath.Glob(expandHome(a.m.Sessions.DBGlob))
+		paths = matches
+	} else if a.m.Sessions.DB != "" {
+		p := expandHome(a.m.Sessions.DB)
+		if _, err := os.Stat(p); err == nil {
+			paths = []string{p}
+		}
+	}
+	for _, dbPath := range paths {
+		db, err := a.openDB(dbPath)
+		if err != nil {
+			continue
+		}
+		qCount := strings.Count(query, "?")
+		var args []any
+		switch {
+		case qCount >= 2:
+			args = []any{sessionID, limit}
+		case qCount == 1:
+			args = []any{sessionID}
+		}
+		rows, err := db.Query(query, args...)
+		if err != nil {
+			_ = db.Close()
+			continue
+		}
+		cols, cErr := rows.Columns()
+		if cErr != nil {
+			rows.Close()
+			_ = db.Close()
+			continue
+		}
+		var out []agent.Item
+		for rows.Next() {
+			vals := make([]any, len(cols))
+			ptrs := make([]any, len(cols))
+			for i := range vals {
+				ptrs[i] = &vals[i]
+			}
+			if rows.Scan(ptrs...) != nil {
+				continue
+			}
+			get := func(name string) string {
+				for i, c := range cols {
+					if strings.EqualFold(c, name) {
+						return dbValue(vals[i])
+					}
+				}
+				return ""
+			}
+			role := strings.ToLower(firstNonEmpty(get("role"), get("type"), "assistant"))
+			text := firstNonEmpty(get("text"), get("content"))
+			if strings.TrimSpace(text) == "" {
+				continue
+			}
+			itemID := firstNonEmpty(get("id"), fmt.Sprintf("%s-%d", sessionID, len(out)+1))
+			out = append(out, agent.Item{
+				ID:   itemID,
+				Role: role,
+				Type: role,
+				Seq:  len(out) + 1,
+				TS:   isoFromAny(firstNonEmpty(get("ts"), get("timestamp"), get("created_at"))),
+				Text: text,
+			})
+			if len(out) >= limit {
+				break
+			}
+		}
+		rows.Close()
+		_ = db.Close()
+		if len(out) > 0 {
+			if strings.Contains(strings.ToLower(query), "desc") {
+				for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+					out[i], out[j] = out[j], out[i]
+				}
+				for i := range out {
+					out[i].Seq = i + 1
+				}
+			}
+			return out
+		}
+	}
+	return nil
 }
 
 func (a *ManifestAgent) sqliteSessions(limit int) ([]agent.Session, error) {
@@ -455,7 +589,12 @@ func (a *ManifestAgent) Reply(ctx context.Context, sessionID, text string, opts 
 	cctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Millisecond)
 	defer cancel()
 
-	cmd := exec.CommandContext(cctx, args[0], args[1:]...)
+	binPath := platform.ResolveBinary(args[0])
+	if binPath == "" {
+		binPath = args[0]
+	}
+	cmd := exec.CommandContext(cctx, binPath, args[1:]...)
+	cmd.Env = platform.EnvWithAugmentedPATH(nil)
 	if wd, err := substitute(a.m.Reply.Cwd, vars); err == nil && wd != "" {
 		if st, serr := os.Stat(wd); serr == nil && st.IsDir() {
 			cmd.Dir = wd

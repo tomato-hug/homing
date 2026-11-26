@@ -16,6 +16,8 @@ object NotificationHelper {
     const val ACTION_REPLY = "dev.agentpush.poc.action.REPLY"
     const val ACTION_READ = "dev.agentpush.poc.action.READ"
     const val ACTION_FORWARD = "dev.agentpush.poc.action.FORWARD"
+    const val ACTION_APPROVE = "dev.agentpush.poc.action.APPROVE"
+    const val ACTION_DENY = "dev.agentpush.poc.action.DENY"
     const val EXTRA_SESSION_ID = "session_id"
     const val EXTRA_EVENT_ID = "event_id"
     const val EXTRA_NOTIFICATION_ID = "notification_id"
@@ -85,20 +87,20 @@ object NotificationHelper {
         }
         val waitingChannel = NotificationChannel(
             WAITING_CHANNEL_ID,
-            "Homing · 等你處理",
+            "Homing · 等你处理",
             NotificationManager.IMPORTANCE_HIGH,
         ).apply {
-            description = "授權、提問與需要你決定的任務"
+            description = "授权、提问与需要你决定的任务"
             enableVibration(true)
             vibrationPattern = longArrayOf(0, 180, 100, 180)
             lockscreenVisibility = Notification.VISIBILITY_PRIVATE
         }
         val collabChannel = NotificationChannel(
             COLLAB_CHANNEL_ID,
-            "Homing · 協作結果",
+            "Homing · 协作结果",
             NotificationManager.IMPORTANCE_DEFAULT,
         ).apply {
-            description = "跨 Agent 子任務完成後的結論"
+            description = "跨 Agent 子任务完成后的结论"
             enableVibration(true)
             lockscreenVisibility = Notification.VISIBILITY_PRIVATE
         }
@@ -107,16 +109,16 @@ object NotificationHelper {
             "Homing · 已完成",
             NotificationManager.IMPORTANCE_LOW,
         ).apply {
-            description = "任務完成摘要，不打断当前操作"
+            description = "任务完成摘要，不打断当前操作"
             setShowBadge(true)
             lockscreenVisibility = Notification.VISIBILITY_PRIVATE
         }
         val errorChannel = NotificationChannel(
             ERROR_CHANNEL_ID,
-            "Homing · 運行異常",
+            "Homing · 运行异常",
             NotificationManager.IMPORTANCE_HIGH,
         ).apply {
-            description = "Agent 執行失敗或中斷"
+            description = "Agent 执行失败或中断"
             enableVibration(true)
             vibrationPattern = longArrayOf(0, 220, 120, 220)
             lockscreenVisibility = Notification.VISIBILITY_PRIVATE
@@ -210,8 +212,53 @@ object NotificationHelper {
             builder.addAction(
                 Notification.Action.Builder(
                     Icon.createWithResource(context, android.R.drawable.ic_menu_share),
-                    "轉交",
+                    "转交",
                     forwardPendingIntent,
+                ).build(),
+            )
+        }
+        if ((payload.kind.equals("approval", ignoreCase = true) ||
+                payload.kind.equals("permission", ignoreCase = true)) &&
+            payload.eventId > 0
+        ) {
+            val denyIntent = Intent(context, ReplyActionReceiver::class.java).apply {
+                action = ACTION_DENY
+                putExtra(EXTRA_SESSION_ID, payload.sessionId)
+                putExtra(EXTRA_EVENT_ID, payload.eventId)
+                putExtra(EXTRA_NOTIFICATION_ID, notificationId)
+                putExtra(EXTRA_TITLE, title)
+            }
+            val denyPending = PendingIntent.getBroadcast(
+                context,
+                notificationId xor 0x30000000,
+                denyIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            val allowIntent = Intent(context, ReplyActionReceiver::class.java).apply {
+                action = ACTION_APPROVE
+                putExtra(EXTRA_SESSION_ID, payload.sessionId)
+                putExtra(EXTRA_EVENT_ID, payload.eventId)
+                putExtra(EXTRA_NOTIFICATION_ID, notificationId)
+                putExtra(EXTRA_TITLE, title)
+            }
+            val allowPending = PendingIntent.getBroadcast(
+                context,
+                notificationId xor 0x40000000,
+                allowIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            builder.addAction(
+                Notification.Action.Builder(
+                    Icon.createWithResource(context, android.R.drawable.ic_menu_close_clear_cancel),
+                    "拒绝",
+                    denyPending,
+                ).build(),
+            )
+            builder.addAction(
+                Notification.Action.Builder(
+                    Icon.createWithResource(context, android.R.drawable.ic_menu_send),
+                    "允许",
+                    allowPending,
                 ).build(),
             )
         }

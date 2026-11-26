@@ -166,6 +166,7 @@ import dev.agentpush.poc.ui.SessionTagStrip
 import dev.agentpush.poc.ui.SystemItemRow
 import dev.agentpush.poc.ui.ToolCallItemCard
 import dev.agentpush.poc.ui.UserItemBubble
+import dev.agentpush.poc.ui.DocumentViewerScope
 import dev.agentpush.poc.ui.accentColor
 import dev.agentpush.poc.ui.rewriteMarkdownImageUrls
 import dev.agentpush.poc.ui.theme.HomingMono
@@ -245,6 +246,7 @@ internal data class SessionDetailActions(
     ) -> Unit = { _, _, _, _, _, _, _ -> },
     val saveDraft: (sessionId: String, text: String) -> Unit = { _, _ -> },
     val clearDraft: (sessionId: String) -> Unit = {},
+    val toggleAway: (Boolean) -> Unit = {},
     val loadCommands: suspend (sessionId: String) -> List<SessionCommand> = { emptyList() },
     val completeFiles: suspend (cwd: String, prefix: String) -> List<CompletedPath> =
         { _, _ -> emptyList() },
@@ -258,14 +260,36 @@ fun SessionScreen(
     onBack: () -> Unit,
     onOpenBrowser: (url: String, title: String) -> Unit,
     onOpenSession: (String) -> Unit = {},
+    navigationAsDrawer: Boolean = false,
+    otherUrgentCount: Int = 0,
+    onJumpUrgent: (() -> Unit)? = null,
+    returnToSessionTitle: String? = null,
+    onReturnPreviousSession: (() -> Unit)? = null,
+    onQuickClear: (() -> Unit)? = null,
+    projectSiblings: List<SessionSummary> = emptyList(),
+    projectHistoryIds: Set<String> = emptySet(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val sessionCwd = state.sessionMeta[sessionId]?.cwd.orEmpty()
+    DocumentViewerScope(
+        loadPath = { path -> viewModel.readProjectFile(path, sessionCwd) },
+        loadAttachment = { attachment -> viewModel.readAttachmentText(attachment) },
+        onOpenUrl = { url -> onOpenBrowser(url, "网页") },
+    ) {
     SessionDetailContent(
         state = state,
         sessionId = sessionId,
         snackbarHostState = snackbarHostState,
         onBack = onBack,
         onOpenBrowser = onOpenBrowser,
+        navigationAsDrawer = navigationAsDrawer,
+        otherUrgentCount = otherUrgentCount,
+        onJumpUrgent = onJumpUrgent,
+        returnToSessionTitle = returnToSessionTitle,
+        onReturnPreviousSession = onReturnPreviousSession,
+        onQuickClear = onQuickClear,
+        projectSiblings = projectSiblings,
+        projectHistoryIds = projectHistoryIds,
         actions = SessionDetailActions(
             openSession = { viewModel.openSession(sessionId) },
             closeSession = { viewModel.closeSessionStream() },
@@ -325,6 +349,7 @@ fun SessionScreen(
             setArchived = viewModel::setArchived,
             setRemindOnDone = viewModel::setRemindOnDone,
             renameSession = viewModel::renameSession,
+            toggleAway = viewModel::toggleAwayMonitoring,
             cancelQueuedReplies = viewModel::cancelQueuedReplies,
             cancelQueuedReply = viewModel::cancelQueuedReply,
             uploadAttachment = { eventId, cwd, file, name, mime, onProgress, onResult ->
@@ -344,6 +369,7 @@ fun SessionScreen(
             completeFiles = viewModel::completeFiles,
         ),
     )
+    }
 }
 @Composable
 internal fun SessionDetailContent(
@@ -353,6 +379,14 @@ internal fun SessionDetailContent(
     onBack: () -> Unit,
     onOpenBrowser: (url: String, title: String) -> Unit,
     actions: SessionDetailActions = SessionDetailActions(),
+    navigationAsDrawer: Boolean = false,
+    otherUrgentCount: Int = 0,
+    onJumpUrgent: (() -> Unit)? = null,
+    returnToSessionTitle: String? = null,
+    onReturnPreviousSession: (() -> Unit)? = null,
+    onQuickClear: (() -> Unit)? = null,
+    projectSiblings: List<SessionSummary> = emptyList(),
+    projectHistoryIds: Set<String> = emptySet(),
 ) {
     val session = remember(
         state.events,
@@ -610,6 +644,32 @@ internal fun SessionDetailContent(
             addPending(PendingFiles.cameraAttachment(file))
         }
     }
+    fun launchCameraNow() {
+        val file = PendingFiles.newCameraFile(context)
+        cameraFile = file
+        runCatching {
+            cameraLauncher.launch(AttachmentFiles.fileUri(context, file))
+        }.onFailure {
+            Toast.makeText(context, "无法打开相机", Toast.LENGTH_SHORT).show()
+        }
+    }
+    val cameraPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) launchCameraNow()
+        else Toast.makeText(context, "需要相机权限才能拍照", Toast.LENGTH_SHORT).show()
+    }
+    fun requestCamera() {
+        if (ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.CAMERA,
+            ) == PackageManager.PERMISSION_GRANTED
+        ) {
+            launchCameraNow()
+        } else {
+            cameraPermission.launch(Manifest.permission.CAMERA)
+        }
+    }
 
     val speechLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
@@ -708,7 +768,8 @@ internal fun SessionDetailContent(
     var previousHistoryRevision by rememberSaveable(sessionId, state.activeComputerKey) {
         mutableStateOf(history.revision)
     }
-    LaunchedEffect(sessionId, timeline.size, timeline.lastOrNull()?.key, firstUnseenIndex, timelineHeaderCount, history.revision) {
+    val lastTimelineItem = timeline.lastOrNull()
+    LaunchedEffect(sessionId, timeline.size, lastTimelineItem, firstUnseenIndex, timelineHeaderCount, history.revision) {
         if (timeline.isEmpty()) {
             previousTimelineSize = 0
             previousLastKey = null
@@ -720,7 +781,7 @@ internal fun SessionDetailContent(
             // LazyColumn retains the visible stable key while older rows are prepended.
             // Earlier context is not new activity and must not trigger a jump to the bottom.
             previousTimelineSize = timeline.size
-            previousLastKey = timeline.lastOrNull()?.key
+            previousLastKey = lastTimelineItem?.key
             return@LaunchedEffect
         }
         if (!positionedTimeline) {
@@ -728,7 +789,7 @@ internal fun SessionDetailContent(
             listState.scrollToItem(firstUnseenIndex?.let { timelineHeaderCount + it } ?: lastTimelineListIndex)
             positionedTimeline = true
             showNewContent = false
-        } else if (timeline.size != previousTimelineSize || timeline.lastOrNull()?.key != previousLastKey) {
+        } else if (timeline.size != previousTimelineSize || lastTimelineItem?.key != previousLastKey) {
             delay(80)
             if (nearBottom) {
                 listState.animateScrollToItem(lastTimelineListIndex)
@@ -736,9 +797,11 @@ internal fun SessionDetailContent(
             } else if (timeline.size > previousTimelineSize) {
                 showNewContent = true
             }
+        } else if (nearBottom && session?.running == true) {
+            listState.scrollToItem(lastTimelineListIndex)
         }
         previousTimelineSize = timeline.size
-        previousLastKey = timeline.lastOrNull()?.key
+        previousLastKey = lastTimelineItem?.key
     }
 
     val eventForReply = session?.replyEventId
@@ -927,6 +990,17 @@ internal fun SessionDetailContent(
                         actions.setRemindOnDone(it.sessionId, !it.remindOnDone)
                     }
                 },
+                navigationAsDrawer = navigationAsDrawer,
+                otherUrgentCount = otherUrgentCount,
+                onJumpUrgent = onJumpUrgent,
+                returnToSessionTitle = returnToSessionTitle,
+                onReturnPreviousSession = onReturnPreviousSession,
+                onQuickClear = onQuickClear,
+                projectSiblings = projectSiblings,
+                projectHistoryIds = projectHistoryIds,
+                onOpenSibling = actions.openSessionById,
+                awayEnabled = state.away,
+                onToggleAway = { actions.toggleAway(!state.away) },
             )
         },
         bottomBar = {
@@ -1047,15 +1121,7 @@ internal fun SessionDetailContent(
                             Toast.makeText(context, "无法打开相册", Toast.LENGTH_SHORT).show()
                         }
                     },
-                    onCamera = {
-                        val file = PendingFiles.newCameraFile(context)
-                        cameraFile = file
-                        runCatching {
-                            cameraLauncher.launch(AttachmentFiles.fileUri(context, file))
-                        }.onFailure {
-                            Toast.makeText(context, "无法打开相机", Toast.LENGTH_SHORT).show()
-                        }
-                    },
+                    onCamera = { requestCamera() },
                     onFilePicker = { documentPicker.launch(arrayOf("*/*")) },
                     onSpeech = { requestSpeech() },
                     running = session.running,
@@ -1147,8 +1213,8 @@ internal fun SessionDetailContent(
                             )
                         }
                     }
-                    items(timeline.size, key = { timeline[it].key }) { index ->
-                        Column(modifier = Modifier.animateItem()) {
+                    items(timeline.size, key = { "${session.sessionId}:${timeline[it].key}" }) { index ->
+                        Column {
                             if (index == firstUnseenIndex) {
                                 NewContentDivider()
                             }

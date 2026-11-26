@@ -6,6 +6,7 @@ import { h } from "./dom";
 import { icons } from "./icons";
 import type { HomeApproval } from "./api";
 import { button } from "./ui";
+import { loc, t } from "../i18n";
 
 export interface ApprovalChoice {
   id: string;
@@ -24,15 +25,15 @@ export function approvalChoices(approval?: HomeApproval): ApprovalChoice[] {
         : "allow";
       return {
         id,
-        label: String(option.label || option.name || option.kind || id || `选项 ${index + 1}`),
+        label: String(option.label || option.name || option.kind || id || loc(`选项 ${index + 1}`, `Option ${index + 1}`)),
         decision: decision as ApprovalChoice["decision"],
       };
     })
     .filter((option) => option.label);
   if (supplied.length) return supplied;
   return [
-    { id: "allow_once", label: "允許", decision: "allow" },
-    { id: "reject_once", label: "拒絕", decision: "deny" },
+    { id: "reject_once", label: t("common.deny"), decision: "deny" },
+    { id: "allow_once", label: t("common.allow"), decision: "allow" },
   ];
 }
 

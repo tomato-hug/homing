@@ -16,9 +16,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tomato-hug/homing/internal/agent/scanlib"
 )
+
+const maxNotifyPreviewBytes = 8 * 1024
 
 // Merge windows, same as the Node relay.
 const (
@@ -63,20 +66,22 @@ type Event struct {
 
 // Payload is one push body, ready for the transport.
 type Payload struct {
-	Type       string           `json:"type"`
-	Level      string           `json:"level"`
-	Kind       string           `json:"kind,omitempty"`
-	Source     string           `json:"source,omitempty"`
-	SessionID  string           `json:"session_id,omitempty"`
-	DispatchID string           `json:"dispatch_id,omitempty"`
-	EventID    int64            `json:"event_id,omitempty"`
-	Title      string           `json:"title"`
-	Summary    string           `json:"summary,omitempty"`
-	At         string           `json:"at"`
-	Temp       bool             `json:"temp"`
-	Merged     bool             `json:"merged"`
-	Count      int              `json:"count"`
-	Sessions   []PayloadSession `json:"sessions,omitempty"`
+	Type             string           `json:"type"`
+	Level            string           `json:"level"`
+	Kind             string           `json:"kind,omitempty"`
+	Source           string           `json:"source,omitempty"`
+	SessionID        string           `json:"session_id,omitempty"`
+	DispatchID       string           `json:"dispatch_id,omitempty"`
+	EventID          int64            `json:"event_id,omitempty"`
+	Title            string           `json:"title"`
+	Summary          string           `json:"summary,omitempty"`
+	PreviewText      string           `json:"preview_text,omitempty"`
+	PreviewTruncated bool             `json:"preview_truncated,omitempty"`
+	At               string           `json:"at"`
+	Temp             bool             `json:"temp"`
+	Merged           bool             `json:"merged"`
+	Count            int              `json:"count"`
+	Sessions         []PayloadSession `json:"sessions,omitempty"`
 }
 
 // PayloadSession is one line of a merged P2 summary.
@@ -295,19 +300,33 @@ func basePayload(event Event, level string) Payload {
 	if at == "" {
 		at = time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
 	}
+	previewText, previewTruncated := truncateUTF8Bytes(strings.TrimSpace(event.Text), maxNotifyPreviewBytes)
 	return Payload{
-		Type:       "notify",
-		Level:      level,
-		Kind:       event.Kind,
-		Source:     event.Source,
-		SessionID:  event.SessionID,
-		DispatchID: event.DispatchID,
-		EventID:    event.ID,
-		Title:      title,
-		Summary:    scanlib.Truncate(collapse(event.Text), 160),
-		At:         at,
-		Temp:       scanlib.TempCwd(event.Cwd),
+		Type:             "notify",
+		Level:            level,
+		Kind:             event.Kind,
+		Source:           event.Source,
+		SessionID:        event.SessionID,
+		DispatchID:       event.DispatchID,
+		EventID:          event.ID,
+		Title:            title,
+		Summary:          scanlib.Truncate(collapse(event.Text), 160),
+		PreviewText:      previewText,
+		PreviewTruncated: previewTruncated,
+		At:               at,
+		Temp:             scanlib.TempCwd(event.Cwd),
 	}
+}
+
+func truncateUTF8Bytes(text string, limit int) (string, bool) {
+	if limit <= 0 || len(text) <= limit {
+		return text, false
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return strings.TrimRight(text[:cut], " \t\r\n"), true
 }
 
 var spaceRun = regexp.MustCompile(`\s+`)

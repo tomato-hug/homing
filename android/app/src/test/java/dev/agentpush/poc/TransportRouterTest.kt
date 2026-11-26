@@ -163,6 +163,66 @@ class TransportRouterTest {
         assertEquals(0, cloud.requestCount)
     }
 
+    @Test
+    fun skipsLanProbeCompletelyWhenNotOnLocalNetwork() = runBlocking {
+        val lan = FakeTransport(TransportKind.LAN)
+        val cloud = FakeTransport(TransportKind.CLOUD)
+        var probeCount = 0
+        val router = TransportRouter(
+            lan = lan,
+            cloud = cloud,
+            probeLan = {
+                probeCount += 1
+                true
+            },
+            cloudAvailable = { true },
+            canUseLan = { false },
+        )
+
+        router.ensureRoute()
+        router.request("GET", "/api/home")
+        router.request("GET", "/api/sessions")
+
+        assertEquals(TransportKind.CLOUD, router.kind.value)
+        assertEquals(0, probeCount)
+        assertEquals(2, cloud.requestCount)
+    }
+
+    @Test
+    fun backsOffRepeatedFailedLanProbesUntilInvalidated() = runBlocking {
+        val lan = FakeTransport(TransportKind.LAN)
+        val cloud = FakeTransport(TransportKind.CLOUD)
+        var now = 1_000L
+        var probeCount = 0
+        val router = TransportRouter(
+            lan = lan,
+            cloud = cloud,
+            probeLan = {
+                probeCount += 1
+                false
+            },
+            cloudAvailable = { true },
+            clock = { now },
+            canUseLan = { true },
+        )
+
+        router.ensureRoute() // initial probe -> fails, backoff 3s (next allowed at 4s)
+        assertEquals(1, probeCount)
+        now += 2_000L
+        router.ensureRoute() // within 3s backoff -> skipped
+        assertEquals(1, probeCount)
+        now += 2_000L
+        router.ensureRoute() // past 3s -> probes again -> fails, backoff 10s
+        assertEquals(2, probeCount)
+        now += 8_000L
+        router.ensureRoute() // within 10s backoff -> skipped
+        assertEquals(2, probeCount)
+
+        router.invalidate() // network change resets backoff immediately
+        router.ensureRoute()
+        assertEquals(3, probeCount)
+    }
+
     private class FakeTransport(
         override val kind: TransportKind,
     ) : HomingTransport {

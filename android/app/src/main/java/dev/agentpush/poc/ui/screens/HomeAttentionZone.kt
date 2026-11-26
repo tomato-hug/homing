@@ -256,8 +256,8 @@ internal fun HomeAttentionCard(
                 item.reason == "approval" -> {
                     val options = approval?.options.orEmpty().ifEmpty {
                         listOf(
-                            ApprovalOption("allow_once", "允许", "allow"),
                             ApprovalOption("reject_once", "拒绝", "deny"),
+                            ApprovalOption("allow_once", "允许", "allow"),
                         )
                     }
                     if (options.size <= 2) {

@@ -33,6 +33,10 @@ func init() {
 		mux.HandleFunc("POST /hook/generic", hookRoute(d, ""))
 
 		mux.HandleFunc("POST /api/upload", guarded(d, uploadHandler))
+		mux.HandleFunc("GET /api/mobile/bootstrap", guarded(d, mobileBootstrapHandler(mux)))
+		mux.HandleFunc("GET /api/keepawake", guarded(d, keepAwakeGET))
+		mux.HandleFunc("POST /api/keepawake", guarded(d, keepAwakeMutate))
+		mux.HandleFunc("PATCH /api/keepawake", guarded(d, keepAwakeMutate))
 		mux.HandleFunc("GET /api/away", guarded(d, awayGET))
 		mux.HandleFunc("POST /api/away", guarded(d, awayPOST))
 		mux.HandleFunc("GET /api/away/settings", guarded(d, awaySettingsGET))

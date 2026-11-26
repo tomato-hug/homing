@@ -23,6 +23,8 @@ def main():
     parser.add_argument("--build-number", default="1")
     parser.add_argument("--commit", required=True, help="Full commit of the clean source snapshot")
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--arch", choices=("arm64", "amd64"), help="Target macOS arch; defaults to host arch")
+    parser.add_argument("--skip-console-build", action="store_true", help="Reuse prebuilt web/console assets")
     parser.add_argument("--identity", default="-", help="codesign identity; '-' is ad hoc for CI")
     args = parser.parse_args()
     if platform.system() != "Darwin":
@@ -35,7 +37,9 @@ def main():
     root = Path(__file__).resolve().parent.parent
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
-    arch = {"arm64": "arm64", "x86_64": "amd64"}[platform.machine()]
+    host_arch = {"arm64": "arm64", "x86_64": "amd64"}[platform.machine()]
+    arch = args.arch or host_arch
+    clang_arch = "arm64" if arch == "arm64" else "x86_64"
     basename = f"Homing-{args.version}-macos-{arch}"
     app_target = output / "Homing.app"
     zip_target = output / (basename + ".app.zip")
@@ -43,9 +47,12 @@ def main():
         parser.error("output already contains this app; choose an empty output directory")
     env = dict(os.environ)
     env["CGO_ENABLED"] = "1"
+    env["GOOS"] = "darwin"
+    env["GOARCH"] = arch
     for key in ("CGO_CFLAGS", "CGO_LDFLAGS"):
-        env[key] = (env.get(key, "") + " -mmacosx-version-min=13.0").strip()
-    run(["bash", "scripts/build-console.sh"], cwd=root, env=env)
+        env[key] = (env.get(key, "") + f" -arch {clang_arch} -mmacosx-version-min=13.0").strip()
+    if not args.skip_console_build:
+        run(["bash", "scripts/build-console.sh"], cwd=root, env=env)
     with tempfile.TemporaryDirectory(prefix="homing-macos-") as tmp:
         app = Path(tmp) / "Homing.app"
         contents = app / "Contents"
@@ -53,7 +60,7 @@ def main():
         binary.parent.mkdir(parents=True)
         (contents / "Resources").mkdir()
         run(["go", "build", "-buildvcs=false", "-trimpath", "-ldflags",
-             f"-s -w -X main.version={args.version} -extldflags=-mmacosx-version-min=13.0",
+             f"-s -w -X main.version={args.version} -extldflags '-arch {clang_arch} -mmacosx-version-min=13.0'",
              "-o", str(binary), "./cmd/homing"], cwd=root, env=env)
         info = {
             "CFBundleExecutable": "homing", "CFBundleIdentifier": "dev.homing.desktop",

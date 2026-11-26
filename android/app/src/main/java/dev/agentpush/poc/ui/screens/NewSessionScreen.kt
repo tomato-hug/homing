@@ -75,6 +75,7 @@ import dev.agentpush.poc.AgentProfile
 import dev.agentpush.poc.AgentViewModel
 import dev.agentpush.poc.NewSessionResult
 import dev.agentpush.poc.ProjectInfo
+import dev.agentpush.poc.isAgentActiveOnMac
 import dev.agentpush.poc.workspaceFromCwd
 import dev.agentpush.poc.media.PendingAttachment
 import dev.agentpush.poc.media.PendingFiles
@@ -113,18 +114,36 @@ fun NewSessionScreen(
     var agentRefreshError by remember { mutableStateOf<String?>(null) }
 
     val projects = state.projects
-    val creatableAgents = remember(state.agentDirectory) {
+    var wakingAgents by remember { mutableStateOf(setOf<String>()) }
+    var continueOnlyAgent by remember { mutableStateOf<AgentProfile?>(null) }
+    val agentStateOf: (AgentProfile) -> NewSessionAgentState = { profile ->
+        val active = state.isAgentActiveOnMac(profile.source)
+        when {
+            profile.source in wakingAgents -> NewSessionAgentState.WAKING
+            active && profile.supportsNewSession && profile.available -> NewSessionAgentState.READY
+            active && !profile.supportsNewSession -> NewSessionAgentState.CONTINUE_ONLY
+            !active && (profile.canWake || profile.installed) -> NewSessionAgentState.NEEDS_WAKE
+            else -> NewSessionAgentState.UNAVAILABLE
+        }
+    }
+    val creatableAgents = remember(state.agentDirectory, state.mobileWorkspace.wokenAgentIds, wakingAgents) {
         state.agentDirectory.agents.values
-            .filter { it.supportsNewSession }
+            .filter {
+                it.supportsNewSession ||
+                    it.capabilities.reply ||
+                    it.source == AgentBrand.WORKBUDDY.wire ||
+                    state.isAgentActiveOnMac(it.source)
+            }
+            .filter { it.installed || it.available || it.canWake || state.isAgentActiveOnMac(it.source) }
             .sortedWith(
-                compareByDescending<AgentProfile> { it.isOnlineForNewSession }
+                compareBy<AgentProfile> { agentStateOf(it).ordinal }
                     .thenBy(agentSortKey)
                     .thenBy { it.source },
             )
     }
     val agentProfile = state.agentDirectory.profile(agent)
-    val selectedAgentOnline = agentProfile.isOnlineForNewSession
-    val onlineAgentCount = creatableAgents.count { it.isOnlineForNewSession }
+    val selectedAgentOnline = agentStateOf(agentProfile) == NewSessionAgentState.READY
+    val onlineAgentCount = creatableAgents.count { agentStateOf(it) == NewSessionAgentState.READY }
     val modelForAgent = selectedModels[agent].orEmpty()
     val effortForAgent = selectedEfforts[agent].orEmpty()
     val permissionModes = agentProfile.capabilities.permissionModes
@@ -156,17 +175,9 @@ fun NewSessionScreen(
         }
     }
     LaunchedEffect(creatableAgents, agent) {
-        val selected = creatableAgents.firstOrNull { it.source == agent }
-        when {
-            selected == null -> {
-                val next = creatableAgents.firstOrNull { it.isOnlineForNewSession }
-                    ?: creatableAgents.firstOrNull()
-                if (next != null && next.source != agent) agent = next.source
-            }
-            !selected.isOnlineForNewSession -> {
-                creatableAgents.firstOrNull { it.isOnlineForNewSession }
-                    ?.let { agent = it.source }
-            }
+        if (agentStateOf(state.agentDirectory.profile(agent)) != NewSessionAgentState.READY) {
+            creatableAgents.firstOrNull { agentStateOf(it) == NewSessionAgentState.READY }
+                ?.let { agent = it.source }
         }
     }
     LaunchedEffect(Unit) {
@@ -275,6 +286,24 @@ fun NewSessionScreen(
                 directoryAvailable = state.agentDirectory.available,
                 error = agentRefreshError,
                 onSelect = { agent = it },
+                agentState = agentStateOf,
+                onWake = { source ->
+                    if (source !in wakingAgents) {
+                        wakingAgents = wakingAgents + source
+                        viewModel.wakeAgent(source) { result ->
+                            scope.launch {
+                                runCatching { viewModel.refreshAgentDirectory() }
+                                wakingAgents = wakingAgents - source
+                                if (result.isSuccess &&
+                                    state.agentDirectory.profile(source).supportsNewSession
+                                ) {
+                                    agent = source
+                                }
+                            }
+                        }
+                    }
+                },
+                onContinueOnly = { continueOnlyAgent = it },
                 onRefresh = {
                     if (!refreshingAgents) {
                         scope.launch {
@@ -386,8 +415,7 @@ fun NewSessionScreen(
                     value = cwd,
                     onValueChange = { cwd = it },
                     modifier = Modifier.fillMaxWidth(),
-                    label = { Text("Mac 上的项目绝对路径") },
-                    placeholder = { Text("/Users/you/Projects/example") },
+                    placeholder = { Text("Mac 上的项目绝对路径") },
                     singleLine = true,
                     shape = RoundedCornerShape(13.dp),
                     trailingIcon = {
@@ -644,7 +672,63 @@ fun NewSessionScreen(
             },
         )
     }
+
+    continueOnlyAgent?.let { profile ->
+        val latest = remember(state.sessionMeta, state.events, profile.source) {
+            state.sessions()
+                .filter { it.source.equals(profile.source, ignoreCase = true) && !it.archived && !it.isEmpty }
+                .maxByOrNull { it.lastTs }
+        }
+        AlertDialog(
+            onDismissRequest = { continueOnlyAgent = null },
+            title = { Text("${agentDisplayName(profile)} 已在线") },
+            text = {
+                Text(
+                    if (latest != null) {
+                        "${agentDisplayName(profile)} 桌面端不支持由外部新建独立会话。可以直接在它最近的会话「${latest.title}」里继续发消息，内容会注入到电脑上正在使用的会话。"
+                    } else {
+                        "${agentDisplayName(profile)} 桌面端不支持由外部新建独立会话，目前也没有可续接的会话。请先在电脑上的 ${agentDisplayName(profile)} 里开启一个会话。"
+                    },
+                )
+            },
+            confirmButton = {
+                if (latest != null) {
+                    TextButton(
+                        onClick = {
+                            continueOnlyAgent = null
+                            viewModel.restoreHistoricalSessions(listOf(latest.sessionId), itemLimit = 10) {
+                                onCreated(latest.sessionId)
+                            }
+                        },
+                        modifier = Modifier.testTag("new-session-continue-latest"),
+                    ) {
+                        Text("打开最近会话继续")
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { continueOnlyAgent = null }) { Text("取消") }
+            },
+        )
+    }
 }
+
+enum class NewSessionAgentState {
+    READY,
+    CONTINUE_ONLY,
+    WAKING,
+    NEEDS_WAKE,
+    UNAVAILABLE,
+}
+
+internal fun newSessionAgentStateLabel(source: String, state: NewSessionAgentState): String =
+    when (state) {
+        NewSessionAgentState.READY -> newSessionAvailabilityLabel(source, true)
+        NewSessionAgentState.CONTINUE_ONLY -> "已在线 · 仅可续聊"
+        NewSessionAgentState.WAKING -> "正在唤醒…"
+        NewSessionAgentState.NEEDS_WAKE -> "未唤醒 · 点击唤醒"
+        NewSessionAgentState.UNAVAILABLE -> newSessionAvailabilityLabel(source, false)
+    }
 
 @Composable
 internal fun NewSessionAgentPicker(
@@ -656,6 +740,11 @@ internal fun NewSessionAgentPicker(
     error: String?,
     onSelect: (String) -> Unit,
     onRefresh: () -> Unit,
+    agentState: (AgentProfile) -> NewSessionAgentState = { profile ->
+        if (profile.isOnlineForNewSession) NewSessionAgentState.READY else NewSessionAgentState.UNAVAILABLE
+    },
+    onWake: (String) -> Unit = {},
+    onContinueOnly: (AgentProfile) -> Unit = {},
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -687,8 +776,8 @@ internal fun NewSessionAgentPicker(
     Text(
         text = when {
             !directoryAvailable && !loading -> "正在等待电脑返回 Agent 状态…"
-            onlineCount == 0 -> "当前没有可启动的 Agent；灰色项暂时不能选择"
-            else -> "$onlineCount 个 Agent 可启动。Codex、Claude Code 由电脑在后台用命令行启动，不需要打开它们的桌面端"
+            onlineCount == 0 -> "电脑上暂无已唤醒的 Agent；点击灰色卡片即可远程唤醒"
+            else -> "$onlineCount 个已唤醒的 Agent 可直接新建任务；未唤醒的 Agent 点击卡片即可远程唤醒"
         },
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -729,10 +818,21 @@ internal fun NewSessionAgentPicker(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             items(agents, key = { it.source }) { profile ->
+                val cardState = agentState(profile)
                 NewSessionAgentCard(
                     profile = profile,
+                    cardState = cardState,
                     selected = selectedAgent == profile.source,
-                    onClick = { onSelect(profile.source) },
+                    onClick = {
+                        when (cardState) {
+                            NewSessionAgentState.READY -> onSelect(profile.source)
+                            NewSessionAgentState.NEEDS_WAKE -> onWake(profile.source)
+                            NewSessionAgentState.CONTINUE_ONLY -> onContinueOnly(profile)
+                            NewSessionAgentState.WAKING,
+                            NewSessionAgentState.UNAVAILABLE,
+                            -> Unit
+                        }
+                    },
                 )
             }
         }
@@ -742,19 +842,28 @@ internal fun NewSessionAgentPicker(
 @Composable
 private fun NewSessionAgentCard(
     profile: AgentProfile,
+    cardState: NewSessionAgentState,
     selected: Boolean,
     onClick: () -> Unit,
 ) {
-    val online = profile.isOnlineForNewSession
+    val online = cardState == NewSessionAgentState.READY
+    val clickable = cardState != NewSessionAgentState.UNAVAILABLE && cardState != NewSessionAgentState.WAKING
     val brand = profile.brand
     val accent = brand.accentColor()
     Surface(
         onClick = onClick,
-        enabled = online,
+        enabled = clickable,
         modifier = Modifier
             .width(166.dp)
             .heightIn(min = 72.dp)
-            .alpha(if (online) 1f else 0.38f)
+            .alpha(
+                when (cardState) {
+                    NewSessionAgentState.READY -> 1f
+                    NewSessionAgentState.CONTINUE_ONLY -> 0.9f
+                    NewSessionAgentState.NEEDS_WAKE, NewSessionAgentState.WAKING -> 0.72f
+                    NewSessionAgentState.UNAVAILABLE -> 0.38f
+                },
+            )
             .testTag("new-session-agent-${profile.source}"),
         shape = RoundedCornerShape(14.dp),
         color = if (selected && online) {
@@ -808,7 +917,7 @@ private fun NewSessionAgentCard(
                             ),
                     )
                     Text(
-                        text = newSessionAvailabilityLabel(profile.source, online),
+                        text = newSessionAgentStateLabel(profile.source, cardState),
                         modifier = Modifier.testTag(
                             "new-session-agent-status-${profile.source}",
                         ),
@@ -834,10 +943,8 @@ private val agentSortKey: (AgentProfile) -> Int = { profile ->
     }
 }
 
-private fun agentDisplayName(profile: AgentProfile): String {
-    val brand = AgentBrand.fromWire(profile.source)
-    return if (brand == AgentBrand.UNKNOWN) profile.source else brand.displayName
-}
+private fun agentDisplayName(profile: AgentProfile): String =
+    profile.displayName.ifBlank { dev.agentpush.poc.defaultAgentDisplayName(profile.source) }
 
 private fun permissionModeLabel(value: String): String {
     return when (value.trim().lowercase().replace('-', '_')) {

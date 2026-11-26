@@ -19,7 +19,7 @@ const demoTranscript = `{"type":"message","role":"user","sessionId":"demo-sessio
 
 func TestTranscriptFileMissingSession(t *testing.T) {
 	// 不存在的会话：不能 panic，返回空字符串即可（上层会返回空条目）
-	if got := transcriptFile("demo-session-does-not-exist"); got != "" {
+	if got := TranscriptPath("demo-session-does-not-exist"); got != "" {
 		if _, err := os.Stat(got); err == nil {
 			t.Fatalf("不存在的会话却找到了文件: %s", got)
 		}

@@ -53,14 +53,14 @@ func (Agent) ID() string   { return id }
 func (Agent) Name() string { return "OpenCode" }
 func (Agent) Icon() string { return Icon }
 func (Agent) PushSignal() agent.PushSignal {
-	if serveURL() != "" {
+	if probeServe(false) != "" {
 		return agent.PushHTTPEvents
 	}
 	return agent.PushPoll
 }
 
 func (Agent) Capabilities() agent.Capabilities {
-	return agent.Capabilities{Reply: serveURL() != "", Sessions: true, Models: true}
+	return agent.Capabilities{Reply: probeServe(false) != "", Sessions: true, Models: true}
 }
 
 func (Agent) Meta(sessionID, cwdHint string) agent.Meta { return metaFor(sessionID, cwdHint) }

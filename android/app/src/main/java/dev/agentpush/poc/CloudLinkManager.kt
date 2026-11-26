@@ -54,7 +54,22 @@ class CloudLinkManager private constructor(context: Context) : CloudLink {
                 val identity = DeviceIdentityStore(appContext).loadOrCreate()
                 val created = CloudNotificationClient(
                     identity = identity,
-                    computersProvider = { computers.load() },
+                    computersProvider = {
+                        val all = computers.load()
+                        if (isLocalLanNetworkAvailable(appContext)) {
+                            all
+                        } else {
+                            // On cellular data (no Wi-Fi/Ethernet), skip RFC1918 LAN WebSocket
+                            // candidates so OkHttp never spins 10s timeouts against 192.168.x.x.
+                            all.map { peer ->
+                                if (peer.server.isNotBlank() && !isPrivateLanAddressUrl(peer.server)) {
+                                    peer.copy(lanServers = emptyList())
+                                } else {
+                                    peer
+                                }
+                            }
+                        }
+                    },
                     listener = object : CloudNotificationClient.Listener {
                         override fun onNotification(
                             computer: PairedComputer,
@@ -157,7 +172,7 @@ class CloudLinkManager private constructor(context: Context) : CloudLink {
     ): CloudRpcResult {
         ensureStarted()
         val active = synchronized(lock) { client }
-            ?: throw CloudRpcException("雲端連線尚未建立")
+            ?: throw CloudRpcException("云端连接尚未建立")
         return active.requestRPC(
             computer = computer,
             method = method,
@@ -175,7 +190,7 @@ class CloudLinkManager private constructor(context: Context) : CloudLink {
     ): CloudRpcResult {
         ensureStarted()
         val active = synchronized(lock) { client }
-            ?: throw CloudRpcException("雲端連線尚未建立")
+            ?: throw CloudRpcException("云端连接尚未建立")
         return active.uploadFile(
             computer = computer,
             path = path,
@@ -190,7 +205,7 @@ class CloudLinkManager private constructor(context: Context) : CloudLink {
     ): ByteArray {
         ensureStarted()
         val active = synchronized(lock) { client }
-            ?: throw CloudRpcException("雲端連線尚未建立")
+            ?: throw CloudRpcException("云端连接尚未建立")
         return active.downloadFile(computer, path)
     }
 
@@ -219,4 +234,22 @@ class CloudLinkManager private constructor(context: Context) : CloudLink {
             }
         }
     }
+}
+
+internal fun isPrivateLanAddressUrl(rawUrl: String): Boolean {
+    val host = runCatching { java.net.URI(rawUrl.trim()).host.orEmpty().lowercase() }
+        .getOrDefault("")
+        .trim('[', ']')
+    if (host.isBlank()) return false
+    if (host == "localhost" || host == "127.0.0.1" || host == "::1" || host.endsWith(".local")) {
+        return true
+    }
+    if (host.startsWith("192.168.") || host.startsWith("10.") || host.startsWith("169.254.")) {
+        return true
+    }
+    if (host.startsWith("172.")) {
+        val second = host.removePrefix("172.").substringBefore('.').toIntOrNull()
+        if (second != null && second in 16..31) return true
+    }
+    return false
 }

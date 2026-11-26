@@ -121,14 +121,18 @@ const imported: Record<string, AgentLogo> = {
   openclaw: { svg: openclaw },
   codebuddy: { svg: codebuddy },
   "gemini-cli": { svg: gemini },
+  gemini: { svg: gemini },
   hermes: { svg: hermes, color: "#E2E8F0", mono: true },
   cursor: { svg: cursor, color: "#F8FAFC", mono: true },
   goose: { svg: goose, color: "#FB923C", mono: true },
   cline: { svg: cline, color: "#38BDF8", mono: true },
   "roo-code": { svg: roo, color: "#A78BFA", mono: true },
+  roo: { svg: roo, color: "#A78BFA", mono: true },
   "qwen-code": { svg: qwen },
+  qwen: { svg: qwen },
   amp: { svg: amp, color: "#F8FAFC", mono: true },
   "copilot-cli": { svg: copilot, color: "#F8FAFC", mono: true },
+  "github-copilot": { svg: copilot, color: "#F8FAFC", mono: true },
   openhands: { svg: openhands },
   antigravity: { svg: antigravity },
   trae: { svg: trae },
@@ -136,12 +140,18 @@ const imported: Record<string, AgentLogo> = {
   windsurf: { svg: windsurf, color: "#22D3EE", mono: true },
   kiro: { svg: kiro },
   kilo: { svg: kilocode, color: "#F8FAFC", mono: true },
+  kilocode: { svg: kilocode, color: "#F8FAFC", mono: true },
   junie: { svg: junie },
   "minimax-design": { svg: minimax },
+  minimax: { svg: minimax },
+  "claude-code": { svg: claude },
+  deepseek: { svg: deepseek },
+  "deepseek-harness": { svg: deepseek },
 };
 
 export const AGENT_LOGOS: Record<string, AgentLogo> = { ...imported, ...custom };
 
 export function agentLogo(id: string): AgentLogo | null {
-  return AGENT_LOGOS[id] || null;
+  const key = (id || "").trim().toLowerCase();
+  return AGENT_LOGOS[key] || null;
 }

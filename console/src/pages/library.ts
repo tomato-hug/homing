@@ -28,6 +28,8 @@ import {
   tag,
   toast,
 } from "../lib/ui";
+import { confirmDialog, promptDialog } from "../lib/dialog";
+import { loc } from "../i18n";
 import type { PageContext, PageResult } from "../main";
 
 const KIND_LABELS: Record<LibraryKind, string> = {
@@ -907,8 +909,8 @@ export function renderLibrary(_ctx: PageContext): PageResult {
               onClick: () => {
                 void navigator.clipboard
                   .writeText(checksum)
-                  .then(() => toast("checksum 已复制", "ok"))
-                  .catch(() => window.prompt("复制 checksum", checksum));
+                  .then(() => toast(loc("checksum 已复制", "Checksum copied"), "ok"))
+                  .catch(() => promptDialog({ title: loc("复制 checksum", "Copy checksum"), defaultValue: checksum, confirmLabel: loc("确定", "OK") }));
               },
             }),
           ),
@@ -1143,13 +1145,15 @@ export function renderLibrary(_ctx: PageContext): PageResult {
     const destinations = packPlan.members.flatMap((member) =>
       member.targets.map((target) => `${targetLabel(target.agent)} → ${target.destination}`),
     );
-    if (
-      !window.confirm(
+    const ok = await confirmDialog({
+      title: loc(`安装套件「${packPlan.pack.metadata.name}」`, `Install pack "${packPlan.pack.metadata.name}"`),
+      message:
         `安装「${packPlan.pack.metadata.name}」的 ${packPlan.members.length} 个资源？\n\n` +
-          `${destinations.join("\n")}\n\n` +
-          "先全部 staging，再逐项目标换入；失败会移除本次已写入的目录。",
-      )
-    ) {
+        `${destinations.join("\n")}\n\n` +
+        "先全部 staging，再逐项目标换入；失败会移除本次已写入的目录。",
+      confirmLabel: loc("确认安装", "Install"),
+    });
+    if (!ok) {
       return;
     }
     packPlanning = true;
@@ -1173,12 +1177,15 @@ export function renderLibrary(_ctx: PageContext): PageResult {
 
   async function rollbackPack(pack: LibraryPackInstallation) {
     const count = pack.members.reduce((sum, member) => sum + member.targets.length, 0);
-    if (
-      !window.confirm(
+    const ok = await confirmDialog({
+      title: loc(`回滚套件「${pack.name}」`, `Rollback pack "${pack.name}"`),
+      message:
         `把「${pack.name}」的 ${count} 个投放目录移入 ~/.homing/trash？\n\n` +
-          "只会移动这个套件创建的目录，不会清理 Agent 根目录或其他资源。",
-      )
-    ) {
+        "只会移动这个套件创建的目录，不会清理 Agent 根目录或其他资源。",
+      confirmLabel: loc("确认回滚", "Rollback"),
+      danger: true,
+    });
+    if (!ok) {
       return;
     }
     try {
@@ -1199,13 +1206,15 @@ export function renderLibrary(_ctx: PageContext): PageResult {
 
   async function rollbackInstallation(installation: LibraryInstallation) {
     const restoringPrevious = Boolean(installation.backup_path);
-    if (
-      !window.confirm(
-        restoringPrevious
-          ? `把当前版本移入 ~/.homing/trash，并恢复「${installation.name}」的上一版本？`
-          : `把「${installation.name}」移入 ~/.homing/trash，并标记为已回滚？`,
-      )
-    ) {
+    const ok = await confirmDialog({
+      title: loc(`回滚「${installation.name}」`, `Rollback "${installation.name}"`),
+      message: restoringPrevious
+        ? `把当前版本移入 ~/.homing/trash，并恢复「${installation.name}」的上一版本？`
+        : `把「${installation.name}」移入 ~/.homing/trash，并标记为已回滚？`,
+      confirmLabel: loc("确认回滚", "Rollback"),
+      danger: true,
+    });
+    if (!ok) {
       return;
     }
     try {
@@ -1233,13 +1242,15 @@ export function renderLibrary(_ctx: PageContext): PageResult {
       const to = plan.available_version ? `v${plan.available_version}` : "远端新版本";
       const before = plan.current_checksum?.slice(0, 19) || "未记录";
       const after = plan.available_checksum?.slice(0, 19) || "未记录";
-      if (
-        !window.confirm(
+      const ok = await confirmDialog({
+        title: loc(`更新「${installation.name}」`, `Update "${installation.name}"`),
+        message:
           `把「${installation.name}」从 ${from} 更新到 ${to}？\n\n` +
-            `内容校验：${before} → ${after}\n\n` +
-            "旧版会保留在 ~/.homing/library/backups；更新后可回滚恢复上一版。",
-        )
-      ) {
+          `内容校验：${before} → ${after}\n\n` +
+          "旧版会保留在 ~/.homing/library/backups；更新后可回滚恢复上一版。",
+        confirmLabel: loc("确认更新", "Update"),
+      });
+      if (!ok) {
         return;
       }
       await endpoints.applyLibraryInstallationUpdate(installation.id, plan.plan.fetch_id);
@@ -1731,32 +1742,49 @@ export function renderLibrary(_ctx: PageContext): PageResult {
   }
 
   async function removeResource(resource: LibraryResource, target?: string) {
-    const label = target ? "这个管理目录" : "该资源";
-    if (!window.confirm(`把${label}移入 ~/.homing/trash？不会删除 Agent 原生目录，也不会执行任何脚本。`)) return;
+    const label = target ? loc("这个管理目录", "this managed folder") : loc("该资源", "this resource");
+    const ok = await confirmDialog({
+      title: loc("移除资源", "Remove resource"),
+      message: loc(
+        `把${label}移入 ~/.homing/trash？不会删除 Agent 原生目录，也不会执行任何脚本。`,
+        `Move ${label} to ~/.homing/trash? Native agent directories will not be deleted.`,
+      ),
+      confirmLabel: loc("移入回收区", "Move to trash"),
+      danger: true,
+    });
+    if (!ok) return;
     try {
       await endpoints.removeLibrary(resource.id, target);
-      toast("已移入回收区，可手动恢复", "ok");
+      toast(loc("已移入回收区，可手动恢复", "Moved to trash"), "ok");
       closeDrawer();
       auditLoaded = false;
       await load();
     } catch (err) {
-      reportError(err, "移除资源失败");
+      reportError(err, loc("移除资源失败", "Failed to remove resource"));
     }
   }
 
   root.append(head, toolbar, importPanel, content);
   overlay.addEventListener("click", closeDrawer);
+  const handleEsc = (event: KeyboardEvent) => {
+    if (event.key === "Escape" && drawer.classList.contains("open")) {
+      event.preventDefault();
+      closeDrawer();
+    }
+  };
+  document.addEventListener("keydown", handleEsc);
   root.append(drawer, overlay);
 
   paintToolbar();
   clear(content);
-  content.append(h("div", { class: "list-card", style: "padding:18px" }, h("div", { class: "note", text: "正在扫描本机资源…" })));
+  content.append(h("div", { class: "list-card", style: "padding:18px" }, h("div", { class: "note", text: loc("正在扫描本机资源…", "Scanning local resources…") })));
   void load();
 
   return {
     el: root,
     dispose: () => {
       disposed = true;
+      document.removeEventListener("keydown", handleEsc);
     },
   };
 }

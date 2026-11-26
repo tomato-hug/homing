@@ -1,6 +1,4 @@
-# Hermes Agent — 官方示例清单（SQLite）
-# state.db 的 sessions 表没有 title / cwd 列，标题会回落到 session_id；
-# messages 表当前 0 行，所以实测会话数为 0。
+# Hermes Agent — 官方示例清单（SQLite，支持 WAL 模式与消息正文读取）
 id: hermes
 name: Hermes Agent
 icon: hermes
@@ -14,7 +12,10 @@ sessions:
   source: sqlite
   db: ~/.hermes/state.db
   query: >
-    select id as session_id, model, started_at as last_ts, message_count
+    select id as session_id, title, model, started_at as last_ts, message_count
     from sessions order by started_at desc
+  items_query: >
+    select id, role, content as text, timestamp as ts
+    from messages where session_id = ? order by id desc limit ?
 
 push: poll

@@ -1,6 +1,6 @@
 # Homing v3 驗收狀態
 
-> 日期：2026-11-11
+> 日期：2026-11-12
 > 這份文件不是「全部需求已完成」的宣告。它把 SPEC §10 的結果分成：
 > **本機已驗證**、**需切換手機中繼後驗證**、**受第三方依賴或憑證限制**、
 > **尚未實作**。交接時只看這一頁也能知道下一步該做什麼。
@@ -42,10 +42,10 @@ git diff --check
 - `title_source=agent` 的 `标题：`、`会话标题：`、`Title:` 與 Markdown heading
   包裝已清理；`homing`／`custom` 使用者自訂標題不改寫。
 
-本輪隔離預覽為 `127.0.0.1:18810`，內嵌資源：
-`web/console/assets/index-C-0upGxN.js`、`web/console/assets/index-BCiZyjgT.css`。
+2026-11-12 最新驗證的內嵌資源為
+`web/console/assets/index-BRWKnYVl.js`、`web/console/assets/index-BDwArKze.css`。
 Debug APK 的 SHA-256 為
-`e3673ad5c88d651afc335f9557eef7900ea3139c347390765da147b33b46701c`；
+`2cbe7cf7f2d90b2cd75fb206f7977722f97b00df5b5c8215d37e01a0c60e8d7e`；
 它只供測試，不是發佈簽名包。
 
 ## 2. 已完成並有程式／測試依據
@@ -73,20 +73,21 @@ Debug APK 的 SHA-256 為
 | 會話品牌圖標、Agent 原生標誌 | 已完成控制台與 Android 常用 Agent 覆蓋 | `console/src/lib/agent-icons.ts`、`android/.../ui/AgentLogos.kt` |
 | 思考過程預設不下發、手機按需請求 | 已完成 Go／Node 過濾與 Android opt-in | `internal/api/sessions.go`、`internal/api/events.go`、`relay/server.mjs`、Android `AgentStore` |
 | Agent 自動標題前綴清理 | 已完成 Go／Node／Android | `internal/agent/scanlib/title_test.go`、Android `SessionPresentationTest` |
+| 端到端配對手機出現在設備頁並可撤銷 | 已完成 API 與控制台，待真機複掃 | `/api/devices.transport`、`TestDevicesIncludesEndToEndPeersAndRevokesThem` |
 | 桌面殼、托盤、TUI、更新器、Docker 與 release workflow | 已落地程式 | `internal/gui`、`internal/tui`、`internal/updater`、`.github/workflows/release.yml` |
 
-## 3. 需先切換 18787 才能做的最終驗收
+## 3. 18787 切換後仍需真機完成的最終驗收
 
-目前 `127.0.0.1:18787` 仍是 Node 中繼，手機也連著它。以下項目在程式碼與隔離端口已通過，
-但尚未在手機的真實連線上驗收：
+`127.0.0.1:18787` 已由 Go 版接管，`/health` 回報 `impl=go`。以下項目在程式碼、
+隔離端口與單元測試已通過，但尚未在手機的真實連線上逐項驗收：
 
-- 手機重啟後，不改任何設定就連到 Go 版。
+- 手機重啟後，不改任何設定就連到 Go 版；舊配對資料仍可讀取會話。
+- 用控制台 `/get` 二維碼重新配對一台手機，設備頁能立即看到並可移除。
 - 在真實 Codex 會話回覆 `@claude …`，看到子任務卡、子會話與結果回到父會話。
 - 手機在局域網斷線後切到雲端，再用行動數據完成首頁、正文、回覆、授權、新建與派發。
 - 多台電腦聚合與事件去重的最終體感。
 
-切換前必須取得用戶當次確認，並先保留 Node LaunchAgent 的回滾方式；不可直接停
-`dev.agentpush.relay`。切換後再跑一次 §1 與上述四條真機檢查。
+回滾仍保留 Node LaunchAgent 的舊設定；任何再次重啟服務的操作都要先取得用戶確認。
 
 ## 4. 受第三方依賴或憑證限制
 

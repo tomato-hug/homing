@@ -6,6 +6,8 @@ import { icons } from "../lib/icons";
 import { AGENT_INITIALS } from "../lib/format";
 import { endpoints, type AdaptersPayload, type AdapterTestResult, type CustomAdapter } from "../lib/api";
 import { button, emptyState, groupHead, listCard, reportError, tag, toast } from "../lib/ui";
+import { confirmDialog } from "../lib/dialog";
+import { loc } from "../i18n";
 import type { PageContext, PageResult } from "../main";
 
 export type AdapterTab = "builtin" | "discover" | "installed" | "custom";
@@ -228,7 +230,15 @@ export function renderAdapters(ctx: PageContext, tab: AdapterTab): PageResult {
           small: true,
           variant: "quiet",
           onClick: async () => {
-            const ok = window.confirm(`删除 ${item.name || item.id} 的接入清单？文件会从 ~/.homing/agents 里删掉。`);
+            const ok = await confirmDialog({
+              title: loc("删除自定义接入", "Delete custom adapter"),
+              message: loc(
+                `删除 ${item.name || item.id} 的接入清单？文件会从 ~/.homing/agents 里删掉。`,
+                `Delete the manifest for ${item.name || item.id} from ~/.homing/agents?`,
+              ),
+              confirmLabel: loc("删除", "Delete"),
+              danger: true,
+            });
             if (!ok) return;
             try {
               await endpoints.removeAdapter(item.id);

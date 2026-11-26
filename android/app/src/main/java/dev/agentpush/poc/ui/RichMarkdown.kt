@@ -20,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.OpenInFull
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -73,25 +74,32 @@ fun RichMarkdown(
     onOpenUrl: (String) -> Unit,
 ) {
     val currentUriHandler = LocalUriHandler.current
-    val linkHandler = remember(currentUriHandler) {
+    val viewer = LocalDocumentViewer.current
+    val linkHandler = remember(currentUriHandler, viewer) {
         object : UriHandler {
             override fun openUri(uri: String) {
-                if (uri.startsWith("http://") || uri.startsWith("https://")) {
-                    onOpenUrl(uri)
-                } else {
-                    runCatching { currentUriHandler.openUri(uri) }
+                val filePath = decodeFileLink(uri)
+                    ?: uri.removePrefix("file://").takeIf {
+                        uri.startsWith("file://") || (uri.startsWith("/") && looksLikeFilePath(uri))
+                    }
+                when {
+                    filePath != null && viewer != null -> viewer.openPath(filePath)
+                    uri.startsWith("http://") || uri.startsWith("https://") -> onOpenUrl(uri)
+                    else -> runCatching { currentUriHandler.openUri(uri) }
                 }
             }
         }
     }
     var previewHtml by remember { mutableStateOf<String?>(null) }
+    var localCodeDoc by remember { mutableStateOf<CodeViewerDoc?>(null) }
     val renderLimit = 80_000
     val truncated = source.length > renderLimit
     val failedImages = remember(source) { mutableStateMapOf<String, Boolean>() }
     val failedLinks = failedImages.keys.toSet()
     val unavailableImage = stringResource(R.string.image_unavailable)
-    val renderedSource = remember(source, failedLinks, unavailableImage) {
-        markdownImageFallbacks(source.take(renderLimit), failedLinks) { String.format(unavailableImage, it) }
+    val renderedSource = remember(source, failedLinks, unavailableImage, viewer != null) {
+        val base = markdownImageFallbacks(source.take(renderLimit), failedLinks) { String.format(unavailableImage, it) }
+        if (viewer != null) linkifyFilePaths(base) else base
     }
     val images = remember(source) {
         object : ImageTransformer {
@@ -139,6 +147,14 @@ fun RichMarkdown(
                                     } else {
                                         null
                                     },
+                                    onExpand = {
+                                        val label = language?.ifBlank { null } ?: "代码"
+                                        if (viewer != null) {
+                                            viewer.openText(label, code, language.orEmpty())
+                                        } else {
+                                            localCodeDoc = CodeViewerDoc(label, code, language.orEmpty())
+                                        }
+                                    },
                                 )
                             }
                         },
@@ -159,6 +175,9 @@ fun RichMarkdown(
     previewHtml?.let { html ->
         HtmlPreviewDialog(html = html, onDismiss = { previewHtml = null })
     }
+    localCodeDoc?.let { doc ->
+        CodeViewerDialog(doc = doc, onDismiss = { localCodeDoc = null }, onOpenUrl = onOpenUrl)
+    }
 }
 
 @Composable
@@ -168,6 +187,7 @@ private fun RichCodeBlock(
     style: androidx.compose.ui.text.TextStyle,
     onCopy: () -> Unit,
     onPreview: (() -> Unit)?,
+    onExpand: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -208,6 +228,13 @@ private fun RichCodeBlock(
                         modifier = Modifier.size(18.dp),
                     )
                 }
+            }
+            IconButton(onClick = onExpand, modifier = Modifier.size(34.dp)) {
+                Icon(
+                    imageVector = Icons.Outlined.OpenInFull,
+                    contentDescription = "全屏查看代码",
+                    modifier = Modifier.size(16.dp),
+                )
             }
             IconButton(onClick = onCopy, modifier = Modifier.size(34.dp)) {
                 Icon(
@@ -265,7 +292,7 @@ fun rewriteMarkdownImageUrls(
 }
 
 @Composable
-private fun HtmlPreviewDialog(html: String, onDismiss: () -> Unit) {
+internal fun HtmlPreviewDialog(html: String, onDismiss: () -> Unit) {
     var progress by remember { mutableIntStateOf(0) }
     Dialog(
         onDismissRequest = onDismiss,

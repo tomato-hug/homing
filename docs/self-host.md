@@ -4,6 +4,9 @@
 `/v1/ws` protocol as `homing serve`; clients do not need a different mode for
 cloud and LAN.
 
+> **Deploying in Mainland China while managing proxy-equipped workstations?**
+> See the dedicated [Mainland China Public Relay & Split-Horizon Proxy Guide](china-relay-and-proxy.md) for 1C1G cloud VM sizing, ICP/TLS setup, `HTTP_PROXY` isolation, `198.18.0.0/15` TUN Fake-IP automatic bypass, and Clash / Mihomo / Surge `DIRECT` rules.
+
 ## Requirements
 
 - Go 1.26 or newer when building from source (the release binary is static and
@@ -72,6 +75,41 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 | `DB_PATH` | `./data/homing.sqlite` | SQLite file |
 | `HOMING_FCM_CREDENTIALS` | empty | Path to a Firebase service-account JSON file |
 | `HOMING_TRUSTED_PROXIES` | empty | Comma-separated reverse-proxy IPs/CIDRs; loopback is always trusted |
+| `HOMING_AUTH_MODE` | `open` | `open` (zero-registration self-host) or `managed` (official public relay requiring Relay Keys, quotas, `/account` & `/admin`) |
+| `HOMING_REGISTRATION_MODE` | `open` | Initial policy in `managed` mode: `open`, `invite` (redeem/invite code required), or `closed` |
+| `HOMING_ADMIN_TOKEN` | empty | Enables the `/admin` dashboard & `/v1/admin/*` management APIs (ban/unban, quotas, sponsor code generator) |
+| `HOMING_SMTP_HOST` / `PORT` / `USER` / `PASS` / `FROM` | empty | Enables Email 6-digit OTP registration/login on `/account` (`465` implicit TLS or `587` STARTTLS) |
+| `HOMING_GITHUB_CLIENT_ID` / `HOMING_GITHUB_CLIENT_SECRET` | empty | Enables GitHub OAuth 1-click registration/login on `/account` (`HOMING_PUBLIC_BASE_URL` optional) |
+| `HOMING_FREE_WEEKLY_MINUTES` | `1200` (20 h) | `managed` mode only: weekly remote-usage allowance for free accounts. `0` disables the limit |
+| `HOMING_SPONSOR_WEEKLY_MINUTES` | `0` (unlimited) | Same allowance for Sponsor accounts |
+
+### Free-tier limits on a managed relay
+
+| Limit | Free | Sponsor | Notes |
+| --- | --- | --- | --- |
+| Computers per account | 2 | 8 | |
+| Paired phones per account | 4 | 20 | |
+| Single encrypted message | 512 KB | 25 MB | Larger files: LAN or self-hosted relay |
+| Relayed traffic per day | 64 MB | 2 GB | Resets 00:00 UTC |
+| Remote usage per week | 20 h | unlimited | Resets Monday 00:00 China Standard Time (UTC+8) |
+
+"Remote usage" counts each minute in which a paired **phone sends** encrypted
+traffic (opening sessions, replying, approving). The desktop's idle
+connection, keep-alive pings and pushes to the phone never count, so
+notifications keep arriving after the weekly allowance is used up; only
+phone-initiated actions are refused with `weekly_time_exceeded` until the
+reset. Administrators can raise one account's allowance with
+`PATCH /v1/admin/accounts/{id}` and `{"weekly_minutes": N}` (or switch it to
+Sponsor). Failed admin logins are limited to 10 per 15 minutes per address,
+and verification e-mails to 10 per hour per address.
+
+### Dual-Mode Official Relay (`HOMING_AUTH_MODE=managed`)
+
+- **Self-hosted (`HOMING_AUTH_MODE=open`, default)**: No accounts, no login, zero lock-in.
+- **Official Public Relay (`HOMING_AUTH_MODE=managed`)**:
+  - Users visit `https://<relay-domain>/account` to sign in via **Email 6-digit OTP** or **GitHub OAuth** and obtain a computer **Relay Key (`hrk_...`)**.
+  - Only the **Computer** enters the `hrk_...` key once (in Desktop Console `连接 › 云中转设置` or `HOMING_RELAY_KEY`). **Phones require zero registration** — scanning the computer's 5-minute pairing QR automatically binds the phone under that account's device quota while keeping payloads 100% E2E encrypted (`Ed25519 + NaCl Box`).
+  - Operators visit `https://<relay-domain>/admin` (authenticated with `HOMING_ADMIN_TOKEN`) to view live online devices & daily relayed bandwidth, toggle registration mode (`open` / `invite` / `closed`), ban abusive accounts, and batch-generate `HOMING-XXXX-XXXX` **Sponsor Redeem Codes**.
 
 Forwarded client addresses are honored only when the immediate connection is
 from loopback or an explicitly trusted proxy. At a public-facing proxy, replace

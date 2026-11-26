@@ -169,7 +169,15 @@ type relayEntry struct {
 func relayIndex(events []store.Event, replies []store.Reply) map[string]*relayEntry {
 	index := map[string]*relayEntry{}
 	for _, event := range events {
-		if event.SessionID == "" {
+		if event.SessionID == "" ||
+			strings.HasPrefix(event.SessionID, "relay-selftest-") ||
+			strings.HasPrefix(event.SessionID, "meta-selftest") {
+			continue
+		}
+		if event.Source == "codex" && event.Kind == "reply" && scanlib.IsInternalTitlePayload(event.Text) {
+			continue
+		}
+		if event.Kind == "needs_input" && scanlib.IsIdlePromptNotification("", event.Text) {
 			continue
 		}
 		key := event.Source + ":" + event.SessionID
@@ -367,6 +375,13 @@ func (d *Deps) buildSummary(ctx context.Context, c candidate) (Summary, bool) {
 	if s, ok := d.store(); ok {
 		summary.Collab = collabFor(s, source, sessionID)
 	}
+	if summary.Collab == nil {
+		if a, ok := agent.Get(ctx, source); ok {
+			if aux, ok := a.(auxiliarySessionChecker); ok && aux.IsAuxiliarySession(sessionID) {
+				return Summary{}, false
+			}
+		}
+	}
 	summary.IsTemp = scanlib.TempCwd(deref(summary.Cwd))
 	summary.IsEmpty = d.isEmptySession(ctx, source, sessionID, summary)
 	return summary, true
@@ -413,6 +428,10 @@ func (d *Deps) storeState(source, sessionID string) store.State {
 // message in this session?".
 type isEmptyChecker interface {
 	IsEmptySession(sessionID string) bool
+}
+
+type auxiliarySessionChecker interface {
+	IsAuxiliarySession(sessionID string) bool
 }
 
 // isEmptySession prefers the agent's own answer; without one it falls back to
@@ -685,6 +704,9 @@ func (d *Deps) handleSessionItems(w http.ResponseWriter, r *http.Request) {
 	reader, ok := a.(agent.ItemReader)
 	if !ok {
 		items := driver.Default().Items(sessionID, limit)
+		if len(items) == 0 {
+			items = d.eventLogFallbackItems(source, sessionID, limit)
+		}
 		if len(items) > 0 {
 			items = filterItemsAfter(items, r.URL.Query().Get("after_seq"))
 			items = filterReasoningItems(items, includeReasoning)
@@ -707,6 +729,9 @@ func (d *Deps) handleSessionItems(w http.ResponseWriter, r *http.Request) {
 	items, err := reader.ReadItems(ctxOf(r), sessionID, limit)
 	if err != nil {
 		fallback := driver.Default().Items(sessionID, limit)
+		if len(fallback) == 0 {
+			fallback = d.eventLogFallbackItems(source, sessionID, limit)
+		}
 		if len(fallback) > 0 {
 			fallback = filterItemsAfter(fallback, r.URL.Query().Get("after_seq"))
 			fallback = filterReasoningItems(fallback, includeReasoning)
@@ -723,6 +748,9 @@ func (d *Deps) handleSessionItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items = mergeDriverItems(items, driver.Default().Items(sessionID, limit))
+	if len(items) == 0 {
+		items = d.eventLogFallbackItems(source, sessionID, limit)
+	}
 	items = filterItemsAfter(items, r.URL.Query().Get("after_seq"))
 	items = filterReasoningItems(items, includeReasoning)
 	if items == nil {
@@ -756,6 +784,79 @@ func mergeDriverItems(native, live []agent.Item) []agent.Item {
 			continue
 		}
 		out = append(out, item)
+	}
+	return out
+}
+
+// eventLogFallbackItems reconstructs chronological conversation items from Homing's
+// local event & reply store when a session came from a hook/ingest bridge or its
+// native rollout file was pruned from disk.
+func (d *Deps) eventLogFallbackItems(source, sessionID string, limit int) []agent.Item {
+	s, ok := d.store()
+	if !ok {
+		return nil
+	}
+	type timedItem struct {
+		ts   string
+		item agent.Item
+	}
+	var merged []timedItem
+	for _, ev := range s.Events() {
+		if ev.SessionID != sessionID || (source != "" && ev.Source != "" && ev.Source != source) {
+			continue
+		}
+		text := strings.TrimSpace(ev.Text)
+		if text == "" {
+			text = strings.TrimSpace(ev.Title)
+		}
+		if text == "" {
+			continue
+		}
+		itemType := "assistant"
+		if ev.Kind == "error" {
+			itemType = "error"
+		}
+		merged = append(merged, timedItem{
+			ts: ev.Ts,
+			item: agent.Item{
+				ID:   "event-" + strconv.FormatInt(ev.ID, 10),
+				TS:   ev.Ts,
+				Type: itemType,
+				Role: "assistant",
+				Text: text,
+			},
+		})
+	}
+	for _, rep := range s.Replies() {
+		if rep.SessionID != sessionID || rep.Status == "cancelled" {
+			continue
+		}
+		text := strings.TrimSpace(rep.Text)
+		if text == "" {
+			continue
+		}
+		merged = append(merged, timedItem{
+			ts: rep.Ts,
+			item: agent.Item{
+				ID:   "reply-" + strconv.FormatInt(rep.ID, 10),
+				TS:   rep.Ts,
+				Type: "user",
+				Role: "user",
+				Text: text,
+			},
+		})
+	}
+	if len(merged) == 0 {
+		return nil
+	}
+	sort.SliceStable(merged, func(i, j int) bool { return merged[i].ts < merged[j].ts })
+	if limit > 0 && len(merged) > limit {
+		merged = merged[len(merged)-limit:]
+	}
+	out := make([]agent.Item, len(merged))
+	for i, m := range merged {
+		m.item.Seq = i + 1
+		out[i] = m.item
 	}
 	return out
 }

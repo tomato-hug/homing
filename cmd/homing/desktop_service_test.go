@@ -162,3 +162,10 @@ func TestOwnedDesktopAdvertisesAbsoluteDataDirectory(t *testing.T) {
 		t.Fatalf("service advertises relative directory %q", info.DataDir)
 	}
 }
+
+func TestIsConnectionRefusedCoversWindowsWinsockError(t *testing.T) {
+	winErr := &os.SyscallError{Syscall: "connectex", Err: winsockECONNREFUSED}
+	if !isConnectionRefused(winErr) {
+		t.Fatalf("expected Winsock WSAECONNREFUSED (10061) to be treated as connection refused: %v", winErr)
+	}
+}

@@ -8,7 +8,7 @@ data class AppSettings(
     val previewMentions: Boolean = true,
 ) {
     companion object {
-        const val DEFAULT_BASE_URL = "http://192.168.1.3:18787"
+        const val DEFAULT_BASE_URL = ""
         private const val PREFS_NAME = "agent_push_settings"
         private const val KEY_BASE_URL = "base_url"
         private const val KEY_TOKEN = "token"
@@ -43,6 +43,7 @@ data class AppSettings(
 
         fun normalizeBaseUrl(value: String): String {
             var url = value.trim().ifBlank { DEFAULT_BASE_URL }
+            if (url.isBlank()) return ""
             if (!url.startsWith("http://", ignoreCase = true) &&
                 !url.startsWith("https://", ignoreCase = true)
             ) {

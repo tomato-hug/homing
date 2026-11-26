@@ -48,6 +48,7 @@ const usage = `homing — every coding agent, one pocket inbox
 
 func main() {
 	platform.PrepareRuntimeEnvironment()
+	platform.AttachParentConsoleIfCLI(os.Args[1:])
 	updater.SetVersion(version)
 	args := os.Args[1:]
 	cmd := ""
@@ -95,6 +96,8 @@ func desktop(args []string) error {
 	fs := flag.NewFlagSet("homing", flag.ContinueOnError)
 	addr := fs.String("addr", "0.0.0.0:18787", "listen address (all interfaces, so paired phones on the LAN can reach it)")
 	dataDir := fs.String("data-dir", "", "data directory (default: per-OS app data dir)")
+	background := fs.Bool("background", false, "start minimized in system tray / menu bar without opening the main window")
+	minimized := fs.Bool("minimized", false, "alias for --background")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -118,7 +121,11 @@ func desktop(args []string) error {
 	defer local.Close()
 	log.Info("homing desktop", "url", local.URL, "owns_service", local.owned)
 	guiErr := gui.Run(local.ctx, gui.Options{
-		URL: local.URL, DataDir: *dataDir, Version: version, Log: log,
+		URL:         local.URL,
+		DataDir:     *dataDir,
+		Version:     version,
+		StartHidden: *background || *minimized,
+		Log:         log,
 	})
 	return errors.Join(guiErr, local.Close())
 }

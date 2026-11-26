@@ -172,11 +172,11 @@ func isLoopback(remoteAddr string) bool {
 func (d *Deps) guard(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !d.authorized(r) {
-			WriteJSON(w, http.StatusUnauthorized, map[string]any{"error": "Unauthorized"})
+			WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 			return
 		}
 		if !d.HasScope(r, "read") {
-			WriteJSON(w, http.StatusForbidden, map[string]any{"error": "该设备没有 read 权限", "code": "scope_denied"})
+			WriteJSON(w, http.StatusForbidden, map[string]any{"error": "该设备没有 read 权限", "code": "scope_denied", "scope": "read"})
 			return
 		}
 		h(w, r)
@@ -205,7 +205,7 @@ func readBody(r *http.Request) map[string]any {
 
 // methodNotAllowed is the shared 405 payload.
 func methodNotAllowed(w http.ResponseWriter) {
-	WriteJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "Method Not Allowed"})
+	WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method Not Allowed")
 }
 
 // ctxOf keeps handlers readable when they need a context for agent lookups.

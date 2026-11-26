@@ -75,7 +75,9 @@ func run(ctx context.Context, args []string) error {
 		},
 	}
 	if err := app.refresh(ctx); err != nil {
-		return err
+		if *once || !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())) {
+			return err
+		}
 	}
 	if *once || !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())) {
 		fmt.Fprint(os.Stdout, app.render(0, 0))
@@ -125,10 +127,20 @@ func run(ctx context.Context, args []string) error {
 			case '3':
 				app.tab = tabEvents
 				app.selected = 0
+			case '\t', 'l':
+				app.tab = (app.tab + 1) % 3
+				app.selected = 0
+			case 'h':
+				app.tab = (app.tab + 2) % 3
+				app.selected = 0
 			case 'j':
 				app.move(1)
 			case 'k':
 				app.move(-1)
+			case 'd':
+				app.move(10)
+			case 'u':
+				app.move(-10)
 			case 'g':
 				app.selected = 0
 			case 'G':
@@ -157,11 +169,45 @@ func readToken(dataDir string) string {
 }
 
 func readKeys(r io.Reader, keys chan<- byte, failed chan<- error) {
-	buffer := make([]byte, 1)
+	buffer := make([]byte, 16)
 	for {
 		n, err := r.Read(buffer)
-		if n == 1 {
-			keys <- buffer[0]
+		if n > 0 {
+			for i := 0; i < n; i++ {
+				if buffer[i] == 0x1b && i+2 < n && (buffer[i+1] == '[' || buffer[i+1] == 'O') {
+					switch buffer[i+2] {
+					case 'A':
+						keys <- 'k'
+						i += 2
+						continue
+					case 'B':
+						keys <- 'j'
+						i += 2
+						continue
+					case 'C':
+						keys <- 'l'
+						i += 2
+						continue
+					case 'D':
+						keys <- 'h'
+						i += 2
+						continue
+					case '5':
+						if i+3 < n && buffer[i+3] == '~' {
+							keys <- 'u'
+							i += 3
+							continue
+						}
+					case '6':
+						if i+3 < n && buffer[i+3] == '~' {
+							keys <- 'd'
+							i += 3
+							continue
+						}
+					}
+				}
+				keys <- buffer[i]
+			}
 		}
 		if err != nil {
 			failed <- err
@@ -319,8 +365,9 @@ func (a *application) clampSelection() {
 }
 
 func (a *application) draw(width, height int) {
-	fmt.Fprint(os.Stdout, "\x1b[H\x1b[2J")
+	fmt.Fprint(os.Stdout, "\x1b[H")
 	fmt.Fprint(os.Stdout, a.render(width, height))
+	fmt.Fprint(os.Stdout, "\x1b[J")
 }
 
 func (a *application) render(width, height int) string {
@@ -332,8 +379,8 @@ func (a *application) render(width, height int) string {
 	}
 	var out strings.Builder
 	line := func(text string) {
-		out.WriteString(truncate(text, width))
-		out.WriteString("\x1b[K\r\n")
+		out.WriteString(ansiTruncate(text, width))
+		out.WriteString("\x1b[0m\x1b[K\r\n")
 	}
 
 	connection := "已连接"
@@ -345,16 +392,25 @@ func (a *application) render(width, height int) string {
 		away = "离开中"
 	}
 	line("\x1b[1;36mHoming TUI\x1b[0m  " + dim(a.client.baseURL) + "  " + connection + " · " + away)
+	tabLabel := func(idx int, label string) string {
+		if a.tab == idx {
+			return "\x1b[1;36m" + label + "\x1b[0m"
+		}
+		return label
+	}
 	line(fmt.Sprintf(
-		"\x1b[1m[1] 总览\x1b[0m  %d 等你 · %d 新动态  [2] 会话  %d  [3] 事件  %d",
-		a.home.Counts.NeedsYou, a.home.Counts.AwayNew, len(a.sessions), len(a.events),
+		"%s  %d 等你 · %d 新动态  %s  %d  %s  %d",
+		tabLabel(tabHome, "[1] 总览"),
+		a.home.Counts.NeedsYou, a.home.Counts.AwayNew,
+		tabLabel(tabSessions, "[2] 会话"), len(a.sessions),
+		tabLabel(tabEvents, "[3] 事件"), len(a.events),
 	))
 	if a.offline != "" {
 		line("\x1b[31m" + truncate(a.offline, width-1) + "\x1b[0m")
 	}
 	line(strings.Repeat("─", min(width, 120)))
 
-	available := height - 6
+	available := height - 7
 	if available < 4 {
 		available = 4
 	}
@@ -367,7 +423,7 @@ func (a *application) render(width, height int) string {
 		a.renderEvents(&out, width, available, line)
 	}
 	line("")
-	line("\x1b[2m1/2/3 切换 · j/k 移动 · g/G 首尾 · a 离开模式 · r 刷新 · q 退出\x1b[0m")
+	line("\x1b[2m1/2/3/Tab 切换 · ↑/↓/j/k 移动 · g/G 首尾 · a 离开模式 · r 刷新 · q 退出\x1b[0m")
 	return out.String()
 }
 
@@ -539,6 +595,37 @@ func plain(value string) string {
 	value = strings.ReplaceAll(value, "\n", " ")
 	value = strings.ReplaceAll(value, "\t", " ")
 	return strings.Join(strings.Fields(value), " ")
+}
+
+func ansiTruncate(value string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	var out strings.Builder
+	used := 0
+	runes := []rune(value)
+	for i := 0; i < len(runes); i++ {
+		if runes[i] == 0x1b && i+1 < len(runes) && runes[i+1] == '[' {
+			j := i + 2
+			for j < len(runes) && ((runes[j] >= '0' && runes[j] <= '9') || runes[j] == ';') {
+				j++
+			}
+			if j < len(runes) && ((runes[j] >= 'a' && runes[j] <= 'z') || (runes[j] >= 'A' && runes[j] <= 'Z')) {
+				for k := i; k <= j; k++ {
+					out.WriteRune(runes[k])
+				}
+				i = j
+				continue
+			}
+		}
+		charWidth := runeWidth(runes[i])
+		if used+charWidth > width {
+			break
+		}
+		out.WriteRune(runes[i])
+		used += charWidth
+	}
+	return out.String()
 }
 
 func truncate(value string, width int) string {

@@ -3,9 +3,11 @@
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  code?: string;
+  constructor(status: number, message: string, code?: string) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -42,9 +44,9 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
     }
   }
   if (!response.ok) {
-    const message =
-      (payload as { error?: string } | null)?.error || `${response.status} ${response.statusText}`;
-    throw new ApiError(response.status, message);
+    const obj = payload as { error?: string; code?: string } | null;
+    const message = obj?.error || `${response.status} ${response.statusText}`;
+    throw new ApiError(response.status, message, obj?.code);
   }
   return payload as T;
 }
@@ -648,6 +650,7 @@ export interface Device {
   last_seen_at: string | null;
   online: boolean;
   paired_via: string;
+  transport: "token" | "e2e";
   last_ip: string | null;
   scopes: string[];
 }
@@ -719,6 +722,27 @@ export interface CloudStatus {
   connected: boolean;
   server: string;
   peers: number;
+  direct_dial?: boolean;
+  latency_ms?: number;
+  proxy_env_detected?: boolean;
+  tun_fake_ip_detected?: boolean;
+  tun_fake_ip_bypassed?: boolean;
+  resolved_ip?: string;
+  relay_key_configured?: boolean;
+  relay_key_hint?: string;
+  last_error?: string;
+  relay_notice?: string;
+}
+
+export interface KeepAwakeState {
+  available: boolean;
+  active: boolean;
+  enabled: boolean;
+  auto_on_away: boolean;
+  max_minutes: number;
+  until?: string | null;
+  until_ms?: number;
+  reason?: string;
 }
 
 export interface NotifyStats {
@@ -1190,11 +1214,22 @@ export interface RoomParticipant {
 export interface RoomMessage {
   seq: number; from: string; name: string; kind: string; round: number; text: string; at: string;
 }
+export interface RoomAction {
+  id: string;
+  text: string;
+  agent?: string;
+  dispatch_id?: string;
+  status: string;
+  session_id?: string;
+  result?: string;
+  error?: string;
+  base_commit?: string;
+}
 export interface Room {
   id: string; title: string; topic: string; cwd: string; rounds: number; round: number;
   status: "running" | "paused" | "summarizing" | "ended";
   speaking?: string; next_speaker?: string; end_requested?: boolean;
-  participants: RoomParticipant[]; messages?: RoomMessage[]; minutes?: string;
+  participants: RoomParticipant[]; messages?: RoomMessage[]; actions?: RoomAction[]; minutes?: string;
   message_count?: number; preview?: string; note?: string; updated_at: string;
 }
 export interface RoomAgentChoice { id: string; name: string }
@@ -1209,6 +1244,8 @@ export const endpoints = {
   createRoom: (body: NewRoom) => api.post<{ room: Room }>("/api/rooms", body),
   sayInRoom: (id: string, text: string) => api.post<{ room: Room }>(`/api/rooms/${encodeURIComponent(id)}/messages`, { text }),
   controlRoom: (id: string, action: string, agent?: string) => api.post<{ room: Room }>(`/api/rooms/${encodeURIComponent(id)}/control`, { action, ...(agent ? { agent } : {}) }),
+  dispatchRoomAction: (id: string, actionId: string, body: { confirmed: boolean; agent: string; text: string; base_commit?: string }) =>
+    api.post<{ ok: boolean; room: Room }>(`/api/rooms/${encodeURIComponent(id)}/actions/${encodeURIComponent(actionId)}/dispatch`, body),
 
   agents: () => api.get<{ agents: Agent[]; generated_at: string }>("/api/agents"),
   agentCatalog: () => api.get<AgentCatalogPayload>("/api/agent-catalog"),
@@ -1354,8 +1391,30 @@ export const endpoints = {
   searchIndexStatus: () => api.get<SearchIndexStatus>("/api/search/status"),
   searchIndexAction: (action: "enable" | "disable" | "rebuild" | "delete") =>
     api.post<SearchIndexActionResult>("/api/search/index", { action }),
-  configureCloud: (server: string) =>
-    api.put<{ ok: boolean; cloud: CloudStatus }>("/api/cloud/config", { server }),
+  configureCloud: (server?: string, useSystemProxy?: boolean, relayKey?: string) =>
+    api.put<{ ok: boolean; cloud: CloudStatus }>("/api/cloud/config", {
+      ...(server !== undefined ? { server } : {}),
+      ...(useSystemProxy !== undefined ? { use_system_proxy: useSystemProxy } : {}),
+      ...(relayKey !== undefined ? { relay_key: relayKey } : {}),
+    }),
+  keepAwake: () => api.get<KeepAwakeState>("/api/keepawake"),
+  updateKeepAwake: (body: { enabled?: boolean; auto_on_away?: boolean; max_minutes?: number }) =>
+    api.patch<KeepAwakeState>("/api/keepawake", body),
+  openDesktopWindow: (path: string) =>
+    api.post<{ ok: boolean; handled_by_shell: boolean; path: string }>("/api/desktop/window", {
+      action: "open",
+      path,
+    }),
+  openExternal: (url: string) =>
+    api.post<{ ok: boolean; opened: boolean; url: string }>("/api/desktop/open-external", { url }),
+  relayProxy: <T = Record<string, unknown>>(body: {
+    server: string;
+    method?: string;
+    path: string;
+    admin_token?: string;
+    payload?: unknown;
+    use_system_proxy?: boolean;
+  }) => api.post<{ ok: boolean; status: number; data: T }>("/api/desktop/relay-proxy", body),
   stats: () => api.get<StatsPayload>("/api/stats"),
   logs: (limit = 200) => api.get<{ source: string | null; count: number; lines: LogLine[] }>(`/api/logs?limit=${limit}`),
   setup: () => api.get<SetupState>("/api/setup"),
@@ -1383,6 +1442,8 @@ export const endpoints = {
     api.post<{ ok: boolean }>("/api/reply", body),
   replies: (sessionId?: string) =>
     api.get<{ replies: ReplyRecord[] }>(`/api/replies${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`),
+  cancelReply: (replyId: string) =>
+    api.post<{ ok: boolean; reply_id?: string; status?: string }>(`/api/replies/${encodeURIComponent(replyId)}/cancel`, {}),
 
   // 接入设置
   agentSettings: () => api.get<{ settings: Record<string, AgentSettings>; order: string[] }>("/api/agents/settings"),

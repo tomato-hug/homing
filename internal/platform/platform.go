@@ -64,6 +64,7 @@ type Paths struct {
 	Config       string
 	Devices      string
 	Pause        string
+	KeepAwake    string
 	SessionState string
 	Events       string
 	Replies      string
@@ -86,6 +87,7 @@ func NewPaths(dataDir string) Paths {
 		Config:       filepath.Join(dataDir, "config.json"),
 		Devices:      filepath.Join(dataDir, "devices.json"),
 		Pause:        filepath.Join(dataDir, "push-pause.json"),
+		KeepAwake:    filepath.Join(dataDir, "keep-awake.json"),
 		SessionState: filepath.Join(dataDir, "session-state.json"),
 		Events:       filepath.Join(dataDir, "events.jsonl"),
 		Replies:      filepath.Join(dataDir, "replies.jsonl"),
@@ -234,8 +236,8 @@ var agentHomes = map[string]agentHome{
 	"codex":     {"Codex", []string{".codex"}, []string{".codex/session_index.jsonl", ".codex/sessions", ".codex/hooks.json"}},
 	"claude":    {"Claude Code", []string{".claude"}, []string{".claude/projects", ".claude/settings.json"}},
 	"workbuddy": {"WorkBuddy", []string{".workbuddy"}, []string{".workbuddy"}},
-	"kimi":      {"Kimi Code", []string{".kimi-code"}, []string{".kimi-code/sessions", ".kimi-code/config.toml"}},
-	"opencode":  {"OpenCode", []string{".local/share/opencode"}, []string{".local/share/opencode/opencode.db"}},
+	"kimi":      {"Kimi Code", []string{".kimi-code", ".kimi"}, []string{".kimi-code/sessions", ".kimi-code/config.toml", ".kimi/sessions", ".kimi/config.toml"}},
+	"opencode":  {"OpenCode", []string{".local/share/opencode"}, []string{".local/share/opencode/opencode.db", "AppData/Local/opencode/opencode.db"}},
 	"zcode":     {"ZCode", []string{".zcode"}, []string{".zcode/cli/db/db.sqlite"}},
 }
 

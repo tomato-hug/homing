@@ -21,6 +21,7 @@ import (
 	"github.com/tomato-hug/homing/internal/agent/scanlib"
 	_ "github.com/tomato-hug/homing/internal/agent/workbuddy"
 	"github.com/tomato-hug/homing/internal/api"
+	"github.com/tomato-hug/homing/internal/cloud"
 	filepaths "github.com/tomato-hug/homing/internal/files"
 	"github.com/tomato-hug/homing/internal/notify"
 	"github.com/tomato-hug/homing/internal/service"
@@ -587,6 +588,60 @@ func TestDevicesListHeartbeatRenameRevoke(t *testing.T) {
 	}
 }
 
+func TestDevicesIncludesEndToEndPeersAndRevokesThem(t *testing.T) {
+	relay := newTestRelay(t, nil)
+	hub, ok := cloud.HubFor(relay.deps.DataDir)
+	if !ok {
+		t.Fatal("cloud hub was not mounted")
+	}
+	const peerID = "abcdefghijklmnopqrstuvwxyz"
+	pairedAt := time.Date(2026, 11, 12, 9, 30, 0, 0, time.UTC)
+	if err := hub.Peers().Add(cloud.Peer{
+		DeviceID:  peerID,
+		PublicKey: "demo-peer-public-key",
+		Name:      "端到端示例手机",
+		Platform:  "android",
+		PairedAt:  pairedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	response, body := relay.do(t, http.MethodGet, "/api/devices", nil, true)
+	if response.StatusCode != http.StatusOK ||
+		!bytes.Contains(body, []byte(`"device_id":"`+peerID+`"`)) ||
+		!bytes.Contains(body, []byte(`"transport":"e2e"`)) ||
+		!bytes.Contains(body, []byte(`"paired_via":"e2e"`)) {
+		t.Fatalf("devices status=%d body=%s", response.StatusCode, body)
+	}
+
+	response, body = relay.do(t, http.MethodPatch, "/api/devices/"+peerID,
+		[]byte(`{"name":"改名后的手机"}`), true)
+	if response.StatusCode != http.StatusOK || !bytes.Contains(body, []byte(`"name":"改名后的手机"`)) {
+		t.Fatalf("rename status=%d body=%s", response.StatusCode, body)
+	}
+	if peer, found := hub.Peers().Get(peerID); !found || peer.Name != "改名后的手机" {
+		t.Fatalf("peer name was not persisted: %#v found=%v", peer, found)
+	}
+
+	response, body = relay.do(t, http.MethodPatch, "/api/devices/"+peerID,
+		[]byte(`{"scopes":["read"]}`), true)
+	if response.StatusCode != http.StatusBadRequest || !bytes.Contains(body, []byte(`"ok":false`)) {
+		t.Fatalf("e2e scopes status=%d body=%s", response.StatusCode, body)
+	}
+
+	response, body = relay.do(t, http.MethodDelete, "/api/devices/"+peerID, nil, true)
+	if response.StatusCode != http.StatusOK || !bytes.Contains(body, []byte(`"transport":"e2e"`)) {
+		t.Fatalf("revoke status=%d body=%s", response.StatusCode, body)
+	}
+	if _, found := hub.Peers().Get(peerID); found {
+		t.Fatal("revoked e2e peer is still paired")
+	}
+	response, body = relay.do(t, http.MethodGet, "/api/devices", nil, true)
+	if response.StatusCode != http.StatusOK || bytes.Contains(body, []byte(peerID)) {
+		t.Fatalf("revoked peer still listed: status=%d body=%s", response.StatusCode, body)
+	}
+}
+
 func TestDeviceScopesBlockDriveButAllowReply(t *testing.T) {
 	relay := newTestRelay(t, nil)
 	deviceToken := "hm_demo-scoped-device"
@@ -769,4 +824,67 @@ func jsonInt(value int64) string {
 func jsonString(value string) string {
 	raw, _ := json.Marshal(value)
 	return string(raw)
+}
+
+func TestWorkBuddyIdleNotificationIgnoredAndBrandNormalized(t *testing.T) {
+	relay := newTestRelay(t, nil)
+	cwd := demoCwd(t)
+
+	// 1. WorkBuddy finishes a turn normally via Stop hook.
+	stopBody := `{"hook_event_name":"Stop","session_id":"demo-wb-idle","cwd":` + jsonString(cwd) + `,"last_assistant_message":"示例任务已完成，打印机队列已清空。"}`
+	resp, _ := relay.do(t, http.MethodPost, "/hook/workbuddy", []byte(stopBody), false)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Stop status=%d", resp.StatusCode)
+	}
+
+	// 2. WorkBuddy's underlying CodeBuddy engine emits idle_prompt Notification (both with and without notification_type).
+	for _, idlePayload := range []string{
+		`{"hook_event_name":"Notification","notification_type":"idle_prompt","session_id":"demo-wb-idle","cwd":` + jsonString(cwd) + `,"message":"CodeBuddy is waiting for your input"}`,
+		`{"hook_event_name":"Notification","session_id":"demo-wb-idle","cwd":` + jsonString(cwd) + `,"message":"CodeBuddy is waiting for your input"}`,
+		`{"hook_event_name":"Notification","session_id":"demo-wb-idle","cwd":` + jsonString(cwd) + `,"message":"Claude is waiting for your input."}`,
+	} {
+		idleResp, raw := relay.do(t, http.MethodPost, "/hook/workbuddy", []byte(idlePayload), false)
+		if idleResp.StatusCode != http.StatusOK {
+			t.Fatalf("idle Notification status=%d body=%s", idleResp.StatusCode, raw)
+		}
+		if !strings.Contains(string(raw), `"ignored":"idle_prompt"`) {
+			t.Fatalf("expected idle_prompt ignored response, got %s", raw)
+		}
+	}
+
+	// Verify only the single reply event was recorded (session NOT flipped to needs_input).
+	evResp, evBody := relay.do(t, http.MethodGet, "/api/events?since=0", nil, true)
+	if evResp.StatusCode != http.StatusOK {
+		t.Fatalf("events status=%d", evResp.StatusCode)
+	}
+	var events []store.Event
+	if err := json.Unmarshal(evBody, &events); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Kind != "reply" {
+		t.Fatalf("expected 1 reply event, got %+v", events)
+	}
+
+	// 3. Real elicitation question from WorkBuddy mentioning CodeBuddy is kept AND rebranded to WorkBuddy.
+	questionBody := `{"hook_event_name":"Notification","notification_type":"elicitation_dialog","session_id":"demo-wb-ask","cwd":` + jsonString(cwd) + `,"message":"CodeBuddy asks: 请确认使用双面还是单面？"}`
+	qResp, _ := relay.do(t, http.MethodPost, "/hook/workbuddy", []byte(questionBody), false)
+	if qResp.StatusCode != http.StatusOK {
+		t.Fatalf("elicitation Notification status=%d", qResp.StatusCode)
+	}
+	evResp2, evBody2 := relay.do(t, http.MethodGet, "/api/events?since=0", nil, true)
+	if evResp2.StatusCode != http.StatusOK {
+		t.Fatalf("events2 status=%d", evResp2.StatusCode)
+	}
+	if err := json.Unmarshal(evBody2, &events); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events after real question, got %d", len(events))
+	}
+	if events[1].Source != "workbuddy" || events[1].Kind != "needs_input" {
+		t.Fatalf("unexpected second event: %+v", events[1])
+	}
+	if strings.Contains(events[1].Text, "CodeBuddy") || !strings.Contains(events[1].Text, "WorkBuddy") {
+		t.Fatalf("expected CodeBuddy brand rewritten to WorkBuddy, got %q", events[1].Text)
+	}
 }

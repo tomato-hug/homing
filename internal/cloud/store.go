@@ -23,16 +23,20 @@ type Peer struct {
 // address. It is deliberately separate from internal/store (still owned by
 // WorkBuddy): when that lands, this becomes a thin adapter over it.
 type PeerStore struct {
-	path   string
-	mu     sync.RWMutex
-	server string
-	peers  map[string]Peer
+	path           string
+	mu             sync.RWMutex
+	server         string
+	relayKey       string
+	useSystemProxy bool
+	peers          map[string]Peer
 }
 
 type peerFile struct {
-	Version int             `json:"version"`
-	Server  string          `json:"server,omitempty"`
-	Peers   map[string]Peer `json:"peers"`
+	Version        int             `json:"version"`
+	Server         string          `json:"server,omitempty"`
+	RelayKey       string          `json:"relay_key,omitempty"`
+	UseSystemProxy bool            `json:"use_system_proxy,omitempty"`
+	Peers          map[string]Peer `json:"peers"`
 }
 
 func LoadPeerStore(dir string) (*PeerStore, error) {
@@ -50,6 +54,8 @@ func LoadPeerStore(dir string) (*PeerStore, error) {
 		return nil, fmt.Errorf("cloud: parse peers: %w", err)
 	}
 	store.server = file.Server
+	store.relayKey = file.RelayKey
+	store.useSystemProxy = file.UseSystemProxy
 	for id, peer := range file.Peers {
 		if peer.DeviceID == "" {
 			peer.DeviceID = id
@@ -63,7 +69,13 @@ func LoadPeerStore(dir string) (*PeerStore, error) {
 }
 
 func (s *PeerStore) saveLocked() error {
-	file := peerFile{Version: 1, Server: s.server, Peers: s.peers}
+	file := peerFile{
+		Version:        1,
+		Server:         s.server,
+		RelayKey:       s.relayKey,
+		UseSystemProxy: s.useSystemProxy,
+		Peers:          s.peers,
+	}
 	encoded, err := json.MarshalIndent(file, "", "  ")
 	if err != nil {
 		return err
@@ -119,5 +131,43 @@ func (s *PeerStore) SetServer(server string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.server = server
+	return s.saveLocked()
+}
+
+func (s *PeerStore) UseSystemProxy() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.useSystemProxy
+}
+
+func (s *PeerStore) SetUseSystemProxy(useProxy bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.useSystemProxy = useProxy
+	return s.saveLocked()
+}
+
+func (s *PeerStore) RelayKey() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.relayKey
+}
+
+func (s *PeerStore) RelayKeyHint() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.relayKey == "" {
+		return ""
+	}
+	if len(s.relayKey) <= 10 {
+		return s.relayKey[:min(4, len(s.relayKey))] + "••••"
+	}
+	return s.relayKey[:10] + "••••"
+}
+
+func (s *PeerStore) SetRelayKey(key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.relayKey = key
 	return s.saveLocked()
 }

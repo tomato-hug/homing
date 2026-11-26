@@ -100,12 +100,14 @@ import dev.agentpush.poc.ui.AgentAvatar
 import dev.agentpush.poc.ui.HomingCard
 import dev.agentpush.poc.ui.HomingPigeon
 import dev.agentpush.poc.ui.HomingPigeonScene
+import dev.agentpush.poc.ui.LocalHomingStrings
 import dev.agentpush.poc.ui.PigeonNeck
 import dev.agentpush.poc.ui.PigeonScene
 import dev.agentpush.poc.ui.MacStatusPill
 import dev.agentpush.poc.ui.PendingTag
 import dev.agentpush.poc.ui.PigeonState
 import dev.agentpush.poc.ui.UnreadBadge
+import dev.agentpush.poc.protocol.PairedComputerStore
 import dev.agentpush.poc.ui.theme.HomingMono
 import dev.agentpush.poc.ui.theme.HomingPalette
 import kotlinx.coroutines.delay
@@ -117,6 +119,7 @@ fun HomingInboxScreen(
     onOpenSession: (String) -> Unit,
     onNewSession: () -> Unit,
     onOpenAllSessions: () -> Unit,
+    onAddComputer: (() -> Unit)? = null,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -307,6 +310,10 @@ fun HomingInboxScreen(
         else -> PigeonState.Idle
     }
 
+    val strings = LocalHomingStrings.current
+    val hasPairedTarget = remember(state.settings.token, state.lastUpdatedAt) {
+        state.settings.token.isNotBlank() || PairedComputerStore(context).load().isNotEmpty()
+    }
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
             modifier = Modifier
@@ -370,14 +377,49 @@ fun HomingInboxScreen(
                         )
                     }
                     if (state.connection != ConnectionState.CONNECTED) {
-                        item(key = "offline") {
-                            InboxOfflineCard(
-                                reconnecting = state.connection == ConnectionState.RECONNECTING,
-                                reason = state.connectionDiagnostics.lastDisconnectReason,
-                                lastConnected = state.connectionDiagnostics.lastConnectedAt,
-                                lastDisconnected = state.connectionDiagnostics.lastDisconnectedAt,
-                                onRetry = viewModel::reconnect,
-                            )
+                        if (!hasPairedTarget && onAddComputer != null) {
+                            item(key = "unpaired-welcome") {
+                                HomingCard {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(18.dp),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                                    ) {
+                                        Text(
+                                            text = strings.pairWelcomeTitle,
+                                            style = MaterialTheme.typography.titleMedium,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = HomingPalette.Text,
+                                        )
+                                        Text(
+                                            text = strings.pairWelcomeDesc,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = HomingPalette.Muted,
+                                        )
+                                        Spacer(Modifier.height(4.dp))
+                                        Button(
+                                            onClick = onAddComputer,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(46.dp),
+                                            shape = RoundedCornerShape(10.dp),
+                                        ) {
+                                            Text(strings.pairScanCta)
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            item(key = "offline") {
+                                InboxOfflineCard(
+                                    reconnecting = state.connection == ConnectionState.RECONNECTING,
+                                    reason = state.connectionDiagnostics.lastDisconnectReason,
+                                    lastConnected = state.connectionDiagnostics.lastConnectedAt,
+                                    lastDisconnected = state.connectionDiagnostics.lastDisconnectedAt,
+                                    onRetry = viewModel::reconnect,
+                                )
+                            }
                         }
                     }
                     if (!mobileInbox.enabled) {

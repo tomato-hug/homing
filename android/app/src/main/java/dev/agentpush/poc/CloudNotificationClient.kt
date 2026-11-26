@@ -235,7 +235,7 @@ class CloudNotificationClient(
     ): CloudRpcResult {
         require(path.startsWith("/api/upload")) { "云端文件上传只能写入 /api/upload" }
         if (bytes.size > MAX_FILE_BYTES) {
-            throw CloudRpcException("單文件上限 20 MB")
+            throw CloudRpcException("单文件上限 20 MB")
         }
         val candidates = serverSessions(computer)
         val (serverUrl, session) = candidates.firstOrNull { it.second.isConnected() }
@@ -308,7 +308,7 @@ class CloudNotificationClient(
         timeoutMillis: Long = DEFAULT_FILE_TIMEOUT_MILLIS,
     ): ByteArray {
         if (!path.startsWith("/f/") || path.contains("..")) {
-            throw CloudRpcException("雲端附件下載只允許 /f/ 能力連結")
+            throw CloudRpcException("云端附件下载只允许 /f/ 能力链接")
         }
         val candidates = serverSessions(computer)
         val (serverUrl, session) = candidates.firstOrNull { it.second.isConnected() }
@@ -570,14 +570,23 @@ class CloudNotificationClient(
                 "ping" -> webSocket.send("""{"t":"pong"}""")
                 "pong" -> Unit
                 "error" -> {
-                    val detail = message.optString("message").ifBlank {
-                        message.optString("code")
+                    val code = message.optString("code")
+                    val detail = message.optString("message").ifBlank { code }
+                    if (code in RELAY_POLICY_ERROR_CODES) {
+                        // Quota / size limits reject one request but keep the
+                        // session valid. Reconnecting would only resend the same
+                        // traffic and hammer the relay, so fail the waiting
+                        // requests with the relay's explanation instead.
+                        failPendingRPC(serverUrl, detail)
+                        failPendingFiles(serverUrl, detail)
+                        listener.onStateChanged(serverUrl, State.CONNECTED, detail)
+                    } else {
+                        // An error frame does not close the socket. Start an actual
+                        // reconnect and fail uncertain requests instead of leaving
+                        // the UI disconnected while this session stays open.
+                        connectionLost(currentGeneration, detail)
+                        webSocket.cancel()
                     }
-                    // An error frame does not close the socket. Start an actual
-                    // reconnect and fail uncertain requests instead of leaving
-                    // the UI disconnected while this session stays open.
-                    connectionLost(currentGeneration, detail)
-                    webSocket.cancel()
                 }
             }
         }
@@ -835,7 +844,7 @@ class CloudNotificationClient(
             return
         }
         if (pending.output.size() + data.size > MAX_FILE_BYTES) {
-            failFileTransfer(fid, "單文件上限 20 MB", upload = false)
+            failFileTransfer(fid, "单文件上限 20 MB", upload = false)
             return
         }
         pending.output.write(data)
@@ -936,6 +945,11 @@ class CloudNotificationClient(
 
     companion object {
         private const val TAG = "HomingCloudWS"
+        private val RELAY_POLICY_ERROR_CODES = setOf(
+            "daily_quota_exceeded",
+            "weekly_time_exceeded",
+            "payload_too_large_for_tier",
+        )
         private const val INITIAL_RECONNECT_MILLIS = 1_000L
         private const val MAX_RECONNECT_MILLIS = 60_000L
         private const val HEARTBEAT_SECONDS = 25L

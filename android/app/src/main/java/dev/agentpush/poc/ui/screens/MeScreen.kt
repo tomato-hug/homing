@@ -23,12 +23,16 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.ArrowForward
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Computer
+import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
@@ -37,6 +41,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -75,6 +80,7 @@ import dev.agentpush.poc.protocol.PairedComputerStore
 import dev.agentpush.poc.ui.AgentAvatar
 import dev.agentpush.poc.ui.HomingCard
 import dev.agentpush.poc.ui.HomingPigeon
+import dev.agentpush.poc.ui.LocalHomingStrings
 import dev.agentpush.poc.ui.PigeonState
 import dev.agentpush.poc.ui.accentColor
 import dev.agentpush.poc.ui.serverHostLabel
@@ -89,7 +95,9 @@ fun MeScreen(
     viewModel: AgentViewModel,
     onOpenSettings: () -> Unit,
     onAddComputer: () -> Unit,
+    onBack: (() -> Unit)? = null,
 ) {
+    val strings = LocalHomingStrings.current
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var reminders by remember { mutableStateOf(ReminderPreferences.load(context)) }
@@ -98,6 +106,9 @@ fun MeScreen(
     var activeDeviceId by remember {
         mutableStateOf(computerStore.active()?.deviceId.orEmpty())
     }
+    var renamingComputer by remember { mutableStateOf<PairedComputer?>(null) }
+    var renameText by remember { mutableStateOf("") }
+    var removingComputer by remember { mutableStateOf<PairedComputer?>(null) }
     var addAgentOpen by remember { mutableStateOf(false) }
     var busyAgentIds by remember { mutableStateOf<Set<String>>(emptySet()) }
 
@@ -113,12 +124,21 @@ fun MeScreen(
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 16.dp),
     ) {
-        Text(
-            text = "我的",
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.padding(top = 12.dp, bottom = 12.dp),
-            style = MaterialTheme.typography.displaySmall.copy(fontSize = 28.sp),
-            color = HomingPalette.Text,
-        )
+        ) {
+            if (onBack != null) {
+                IconButton(onClick = onBack, modifier = Modifier.padding(end = 4.dp)) {
+                    Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
+                }
+            }
+            Text(
+                text = strings.meTitle,
+                style = MaterialTheme.typography.displaySmall.copy(fontSize = 28.sp),
+                color = HomingPalette.Text,
+            )
+        }
         MacConnectionCard(
             server = if (state.transportKind == TransportKind.CLOUD) {
                 computers.firstOrNull { it.deviceId == activeDeviceId }?.server
@@ -135,7 +155,7 @@ fun MeScreen(
             onOpenSettings = onOpenSettings,
         )
         Spacer(Modifier.height(18.dp))
-        SectionTitle("我的电脑")
+        SectionTitle(strings.myComputers)
         Spacer(Modifier.height(7.dp))
         CloudComputersCard(
             computers = computers,
@@ -145,6 +165,13 @@ fun MeScreen(
                 activeDeviceId = computer.deviceId
                 viewModel.activateComputer(computer.deviceId)
                 viewModel.refresh()
+            },
+            onRename = { computer ->
+                renamingComputer = computer
+                renameText = computer.name
+            },
+            onRemove = { computer ->
+                removingComputer = computer
             },
             onAddComputer = onAddComputer,
         )
@@ -225,6 +252,67 @@ fun MeScreen(
                 }
             },
             onDismiss = { addAgentOpen = false },
+        )
+    }
+
+    renamingComputer?.let { target ->
+        AlertDialog(
+            onDismissRequest = { renamingComputer = null },
+            title = { Text(strings.renameComputerTitle) },
+            text = {
+                OutlinedTextField(
+                    value = renameText,
+                    onValueChange = { renameText = it },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val trimmed = renameText.trim()
+                        if (trimmed.isNotBlank()) {
+                            computerStore.save(target.copy(name = trimmed))
+                            computers = computerStore.load()
+                        }
+                        renamingComputer = null
+                    },
+                ) {
+                    Text(strings.save)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { renamingComputer = null }) {
+                    Text(strings.cancel)
+                }
+            },
+        )
+    }
+
+    removingComputer?.let { target ->
+        AlertDialog(
+            onDismissRequest = { removingComputer = null },
+            title = { Text(strings.unpairTitle) },
+            text = { Text("${target.name}\n\n${strings.unpairConfirm}") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        computerStore.remove(target.deviceId)
+                        computers = computerStore.load()
+                        activeDeviceId = computerStore.active()?.deviceId.orEmpty()
+                        dev.agentpush.poc.AgentStore.get(context).refreshCloudComputers()
+                        viewModel.reconnect()
+                        removingComputer = null
+                    },
+                ) {
+                    Text(strings.remove, color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { removingComputer = null }) {
+                    Text(strings.cancel)
+                }
+            },
         )
     }
 }
@@ -318,8 +406,11 @@ private fun CloudComputersCard(
     computers: List<PairedComputer>,
     activeDeviceId: String,
     onSelect: (PairedComputer) -> Unit,
+    onRename: (PairedComputer) -> Unit,
+    onRemove: (PairedComputer) -> Unit,
     onAddComputer: () -> Unit,
 ) {
+    val strings = LocalHomingStrings.current
     HomingCard {
         Column {
             if (computers.isEmpty()) {
@@ -341,12 +432,12 @@ private fun CloudComputersCard(
                             .padding(start = 10.dp),
                     ) {
                         Text(
-                            text = "还没有通过云中转添加电脑",
+                            text = strings.noCloudComputer,
                             style = MaterialTheme.typography.bodyMedium,
                             color = HomingPalette.Text,
                         )
                         Text(
-                            text = "扫码或在电脑上生成 6 位配对码",
+                            text = strings.noCloudComputerSub,
                             style = MaterialTheme.typography.labelSmall,
                             color = HomingPalette.Muted,
                         )
@@ -364,7 +455,7 @@ private fun CloudComputersCard(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable { onSelect(computer) }
-                            .padding(horizontal = 14.dp, vertical = 11.dp),
+                            .padding(start = 14.dp, end = 6.dp, top = 10.dp, bottom = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Box(
@@ -399,7 +490,7 @@ private fun CloudComputersCard(
                                 modifier = Modifier.padding(top = 2.dp),
                                 style = MaterialTheme.typography.labelSmall.copy(
                                     fontFamily = HomingMono,
-                                    fontSize = 10.5.sp,
+                                    fontSize = 11.sp,
                                 ),
                                 color = HomingPalette.Muted,
                                 maxLines = 1,
@@ -415,7 +506,7 @@ private fun CloudComputersCard(
                             shape = RoundedCornerShape(50),
                         ) {
                             Text(
-                                text = if (computer.deviceId == activeDeviceId) "当前" else "切换",
+                                text = if (computer.deviceId == activeDeviceId) strings.activeTag else strings.switchTag,
                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = if (computer.deviceId == activeDeviceId) {
@@ -423,6 +514,22 @@ private fun CloudComputersCard(
                                 } else {
                                     HomingPalette.Muted
                                 },
+                            )
+                        }
+                        IconButton(onClick = { onRename(computer) }) {
+                            Icon(
+                                Icons.Outlined.Edit,
+                                contentDescription = strings.rename,
+                                tint = HomingPalette.Muted,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
+                        IconButton(onClick = { onRemove(computer) }) {
+                            Icon(
+                                Icons.Outlined.DeleteOutline,
+                                contentDescription = strings.remove,
+                                tint = HomingPalette.Muted,
+                                modifier = Modifier.size(18.dp),
                             )
                         }
                     }
@@ -442,7 +549,7 @@ private fun CloudComputersCard(
                     modifier = Modifier.size(18.dp),
                 )
                 Spacer(Modifier.width(6.dp))
-                Text("添加电脑")
+                Text(strings.addComputer)
             }
         }
     }

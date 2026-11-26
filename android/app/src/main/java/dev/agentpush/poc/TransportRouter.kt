@@ -22,6 +22,7 @@ class TransportRouter(
     private val probeLan: suspend () -> Boolean,
     private val cloudAvailable: () -> Boolean,
     private val clock: () -> Long = System::currentTimeMillis,
+    private val canUseLan: () -> Boolean = { true },
 ) {
     private val routeMutex = Mutex()
     private val failureLock = Any()
@@ -29,6 +30,8 @@ class TransportRouter(
     private var consecutiveLanFailures = 0
     private var routeInitialized = false
     private var lastProbeAt = 0L
+    private var lanProbeBackoffMillis = INITIAL_LAN_PROBE_BACKOFF_MILLIS
+    private var nextLanProbeAllowedAt = 0L
 
     @Volatile
     private var routeDirty = false
@@ -38,10 +41,21 @@ class TransportRouter(
     suspend fun ensureRoute(force: Boolean = false) {
         routeMutex.withLock {
             val now = clock()
-            if (!force && !routeDirty && routeInitialized &&
-                now - lastProbeAt < ROUTE_CACHE_MILLIS
-            ) {
+            val lanPermitted = runCatching { canUseLan() }.getOrDefault(true)
+            if (!lanPermitted) {
+                _kind.value = if (cloudAvailable()) TransportKind.CLOUD else TransportKind.LAN
+                routeInitialized = true
+                lastProbeAt = now
+                routeDirty = false
                 return
+            }
+            if (!force && !routeDirty && routeInitialized) {
+                if (_kind.value == TransportKind.CLOUD && now < nextLanProbeAllowedAt) {
+                    return
+                }
+                if (_kind.value == TransportKind.LAN && now - lastProbeAt < ROUTE_CACHE_MILLIS) {
+                    return
+                }
             }
             val lanAvailable = probeLanSafely()
             _kind.value = when {
@@ -52,7 +66,14 @@ class TransportRouter(
             routeInitialized = true
             lastProbeAt = now
             routeDirty = false
-            if (lanAvailable) clearLanFailures()
+            if (lanAvailable) {
+                clearLanFailures()
+                lanProbeBackoffMillis = INITIAL_LAN_PROBE_BACKOFF_MILLIS
+                nextLanProbeAllowedAt = 0L
+            } else {
+                nextLanProbeAllowedAt = now + lanProbeBackoffMillis
+                lanProbeBackoffMillis = nextLanBackoff(lanProbeBackoffMillis)
+            }
         }
     }
 
@@ -83,8 +104,9 @@ class TransportRouter(
         ensureRoute()
         val monitor = launch {
             while (isActive) {
-                delay(ROUTE_CACHE_MILLIS)
-                ensureRoute(force = true)
+                val onLan = _kind.value == TransportKind.LAN
+                delay(if (onLan) ROUTE_CACHE_MILLIS else CLOUD_MONITOR_INTERVAL_MILLIS)
+                ensureRoute(force = onLan)
             }
         }
         try {
@@ -108,7 +130,7 @@ class TransportRouter(
         val current = _kind.value
         if (current == TransportKind.CLOUD) {
             if (bytes.size > CLOUD_FILE_LIMIT_BYTES) {
-                throw CloudRpcException("單文件上限 20 MB")
+                throw CloudRpcException("单文件上限 20 MB")
             }
             return cloud.upload(path, bytes, name)
         }
@@ -125,6 +147,8 @@ class TransportRouter(
 
     fun invalidate() {
         routeDirty = true
+        lanProbeBackoffMillis = INITIAL_LAN_PROBE_BACKOFF_MILLIS
+        nextLanProbeAllowedAt = 0L
     }
 
     private suspend fun requestCloud(
@@ -139,10 +163,13 @@ class TransportRouter(
                 error !is IOException && error !is CloudRpcException ||
                 error is AgentApiException
             ) throw error
-            if (probeLanSafely()) {
+            val lanPermitted = runCatching { canUseLan() }.getOrDefault(true)
+            if (lanPermitted && probeLanSafely()) {
                 _kind.value = TransportKind.LAN
                 routeInitialized = true
                 lastProbeAt = clock()
+                lanProbeBackoffMillis = INITIAL_LAN_PROBE_BACKOFF_MILLIS
+                nextLanProbeAllowedAt = 0L
                 clearLanFailures()
                 // A lost response does not prove a mutation failed to execute.
                 if (canReplayTransportRequest(method)) lan.request(method, path, body) else throw error
@@ -165,6 +192,8 @@ class TransportRouter(
             consecutiveLanFailures += 1
             if (consecutiveLanFailures >= LAN_FAILURES_BEFORE_SWITCH && cloudAvailable()) {
                 _kind.value = TransportKind.CLOUD
+                nextLanProbeAllowedAt = clock() + lanProbeBackoffMillis
+                lanProbeBackoffMillis = nextLanBackoff(lanProbeBackoffMillis)
                 return true
             }
             return false
@@ -177,8 +206,20 @@ class TransportRouter(
         }
     }
 
+    private fun nextLanBackoff(current: Long): Long {
+        return when {
+            current < 10_000L -> 10_000L
+            current < 30_000L -> 30_000L
+            current < 60_000L -> 60_000L
+            else -> MAX_LAN_PROBE_BACKOFF_MILLIS
+        }
+    }
+
     companion object {
         private const val ROUTE_CACHE_MILLIS = 3_000L
+        private const val CLOUD_MONITOR_INTERVAL_MILLIS = 30_000L
+        private const val INITIAL_LAN_PROBE_BACKOFF_MILLIS = 3_000L
+        private const val MAX_LAN_PROBE_BACKOFF_MILLIS = 5 * 60_000L
         private const val LAN_FAILURES_BEFORE_SWITCH = 2
         private const val CLOUD_FILE_LIMIT_BYTES = 20 * 1024 * 1024
     }

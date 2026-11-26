@@ -281,6 +281,11 @@ func (Agent) ListSessions(_ context.Context, limit int) ([]agent.Session, error)
 			}
 		}
 		meta := readRolloutMetaCached(file)
+		// Skip internal subagent worker rollouts and auxiliary title-generator rollouts
+		// unless explicitly indexed as a top-level user thread in session_index.jsonl.
+		if titleSource != "agent" && (meta.isSubagent || meta.isTitleHelper) {
+			continue
+		}
 		rows = append(rows, row{
 			session: agent.Session{
 				SessionID:   sessionID,
@@ -383,6 +388,8 @@ type rolloutMeta struct {
 	contextLimit   int
 	// hasConversation is set when the rollout holds a user or assistant turn.
 	hasConversation bool
+	isSubagent      bool
+	isTitleHelper   bool
 }
 
 // metaFor is the codex branch of the Node sessionMetaFor.
@@ -617,15 +624,24 @@ func readRolloutMeta(file string) rolloutMeta {
 					m.branch = v
 				}
 			}
+			if srcMap, ok := payload["source"].(map[string]any); ok && srcMap["subagent"] != nil {
+				m.isSubagent = true
+			}
 		}
 		if payload["type"] == "message" && (payload["role"] == "user" || payload["role"] == "assistant") {
-			if strings.TrimSpace(scanlib.NormalizeContent(payload["content"])) != "" {
-				m.hasConversation = true
+			text := strings.TrimSpace(scanlib.NormalizeContent(payload["content"]))
+			if text != "" {
+				if payload["role"] == "assistant" && IsInternalTitleGeneratorPayload(text) {
+					m.isTitleHelper = true
+				} else {
+					m.hasConversation = true
+				}
 			}
 		}
 		if payload["type"] == "message" && payload["role"] == "assistant" {
-			if text := strings.TrimSpace(scanlib.NormalizeContent(payload["content"])); text != "" {
+			if text := strings.TrimSpace(scanlib.NormalizeContent(payload["content"])); text != "" && !IsInternalTitleGeneratorPayload(text) {
 				m.hasConversation = true
+				m.isTitleHelper = false
 				m.lastPreview = scanlib.FirstLine(text, 120)
 			}
 		}
@@ -784,6 +800,27 @@ func number(value any) int {
 		return n
 	}
 	return 0
+}
+
+// IsInternalTitleGeneratorPayload detects Codex Desktop's background thread-title
+// helper JSON responses (e.g. `{"title":"...","description":"..."}`) so they do
+// not spawn duplicate untitled project-named sessions or raw JSON bubbles.
+func IsInternalTitleGeneratorPayload(text string) bool {
+	return scanlib.IsInternalTitlePayload(text)
+}
+
+// IsAuxiliarySession reports internal Codex subagent worker threads or title-helper
+// rollouts that are not top-level user threads in session_index.jsonl.
+func (Agent) IsAuxiliarySession(sessionID string) bool {
+	if titles := titleIndex(); titles[sessionID] != "" {
+		return false
+	}
+	file := rolloutPathFor(sessionID)
+	if file == "" {
+		return false
+	}
+	m := readRolloutMetaCached(file)
+	return m.isSubagent || m.isTitleHelper
 }
 
 // IsEmptySession reports a thread that never got a real prompt or answer. It

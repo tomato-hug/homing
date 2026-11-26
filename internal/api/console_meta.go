@@ -71,7 +71,7 @@ func init() {
 func (d *Deps) loopbackGuard(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !isLoopback(r.RemoteAddr) {
-			WriteJSON(w, http.StatusForbidden, map[string]any{"error": "只允许在本机操作"})
+			WriteError(w, http.StatusForbidden, "loopback_only", "只允许在本机操作")
 			return
 		}
 		d.guard(h)(w, r)
@@ -116,6 +116,11 @@ func (d *Deps) handlePause(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		body := readBody(r)
 		minutes := numberFromJSON(body["minutes"])
+		if minutes <= 0 {
+			if paused, ok := body["paused"].(bool); ok && paused {
+				minutes = 60
+			}
+		}
 		reason := "手动暂停"
 		if value, ok := body["reason"].(string); ok && strings.TrimSpace(value) != "" {
 			reason = strings.TrimSpace(value)

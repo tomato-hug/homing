@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -103,6 +102,10 @@ type AgentInfo struct {
 	LastEventAt     *string         `json:"last_event_at"`
 	PermissionModes []string        `json:"permission_modes"`
 	Driver          *AgentDriver    `json:"driver,omitempty"`
+	ProcessRunning  bool            `json:"process_running"`
+	ActiveOnline    bool            `json:"active_online"`
+	CanWake         bool            `json:"can_wake"`
+	WakeMode        string          `json:"wake_mode,omitempty"`
 }
 
 // AgentDriver reports how the generic drive layer sees one integration. It is
@@ -160,6 +163,7 @@ func (d *Deps) handleAgents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now()
+	procMap := liveAgentProcessMap(ctx)
 	agents := make([]AgentInfo, 0, len(displayOrder))
 	for _, a := range sortedAgents(ctx) {
 		det := a.Detect(ctx)
@@ -179,6 +183,17 @@ func (d *Deps) handleAgents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		lastMillis := lastBySource[a.ID()]
+		procRunning, activeOnline, canWake, wakeMode := evaluateAgentWakeState(
+			d.DataDir,
+			a.ID(),
+			det.Installed,
+			driverInfo,
+			procMap,
+			lastMillis,
+			now,
+		)
+
 		info := AgentInfo{
 			Source:          a.ID(),
 			DisplayName:     a.Name(),
@@ -186,17 +201,21 @@ func (d *Deps) handleAgents(w http.ResponseWriter, r *http.Request) {
 			Capabilities:    capabilityMap(a, caps, det.Installed),
 			Models:          []AgentModel{},
 			Icon:            a.Icon(),
-			Installed:       det.Installed,
+			Installed:       det.Installed || wakeMode == "app",
 			Version:         det.Version,
 			PushSignal:      string(a.PushSignal()),
 			LastEventAt:     nil,
 			PermissionModes: append([]string{}, caps.PermissionModes...),
 			Driver:          driverInfo,
+			ProcessRunning:  procRunning,
+			ActiveOnline:    activeOnline,
+			CanWake:         canWake,
+			WakeMode:        wakeMode,
 		}
 
 		if a.ID() == "workbuddy" {
 			// Node：WorkBuddy 的 available 指桌面端进程在跑（回复要经它注入），installed 才是装没装。
-			info.Available = workbuddyRunning(ctx)
+			info.Available = procRunning
 		}
 
 		// Node 对注册表里的扫描型 agent（opencode / zcode …）不列模型；
@@ -331,7 +350,5 @@ func PermissionModeAllowed(id, mode string) bool {
 
 // workbuddyRunning is Node's workbuddyRunning(): is the desktop app's process up.
 func workbuddyRunning(ctx context.Context) bool {
-	ctx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
-	defer cancel()
-	return exec.CommandContext(ctx, "pgrep", "-f", "WorkBuddy.app/Contents/MacOS/Electron").Run() == nil
+	return liveAgentProcessMap(ctx)["workbuddy"]
 }

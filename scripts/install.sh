@@ -49,7 +49,8 @@ case "$(uname -s)" in
   Darwin) os=darwin ;;
   Linux) os=linux ;;
   *)
-    echo "这个安装脚本只支持 macOS 和 Linux；Windows 请下载 homing_windows_<arch>.exe。" >&2
+    echo "这个安装脚本适用于 macOS 和 Linux；Windows 请在 PowerShell 中运行：" >&2
+    echo "  irm https://raw.githubusercontent.com/tomato-hug/homing/main/scripts/install.ps1 | iex" >&2
     exit 1
     ;;
 esac

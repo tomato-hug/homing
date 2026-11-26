@@ -76,6 +76,22 @@ func TestConsoleIsLoopbackOnly(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("non-loopback status = %d, want 403", rec.Code)
 	}
+	req := httptest.NewRequest(http.MethodGet, "/console/", nil)
+	req.RemoteAddr = "192.168.1.20:4567"
+	req.Header.Set("Accept", "text/html")
+	htmlRec := httptest.NewRecorder()
+	d.handleConsole(htmlRec, req)
+	if htmlRec.Code != http.StatusForbidden || !strings.Contains(htmlRec.Body.String(), "ssh -N -L 18787") {
+		t.Fatalf("non-loopback HTML guide = %d %s", htmlRec.Code, htmlRec.Body.String())
+	}
+
+	rootReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	rootReq.RemoteAddr = "127.0.0.1:12345"
+	rootRec := httptest.NewRecorder()
+	d.handleRoot(rootRec, rootReq)
+	if rootRec.Code != http.StatusFound || rootRec.Header().Get("Location") != "/console/" {
+		t.Fatalf("loopback root = %d location=%q", rootRec.Code, rootRec.Header().Get("Location"))
+	}
 }
 
 func TestConsoleMethodsAndHead(t *testing.T) {

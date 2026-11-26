@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tomato-hug/homing/internal/platform"
 )
 
 // Spec describes one verified non-shell command that starts an agent in ACP
@@ -43,13 +45,12 @@ func (s Spec) CommandString() string {
 	return strings.Join(s.Command, " ")
 }
 
-// Installed reports whether the first argv element exists on PATH.
+// Installed reports whether the first argv element exists on PATH or user bin dirs.
 func (s Spec) Installed() bool {
 	if len(s.Command) == 0 || strings.TrimSpace(s.Command[0]) == "" {
 		return false
 	}
-	_, err := exec.LookPath(s.Command[0])
-	return err == nil
+	return platform.ResolveBinary(s.Command[0]) != ""
 }
 
 // specs intentionally contains only commands verified from official agent
@@ -271,7 +272,12 @@ func CheckReadiness(spec Spec) Readiness {
 	value.CheckedAt = time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
 	if len(spec.Check) > 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-		cmd := exec.CommandContext(ctx, spec.Check[0], spec.Check[1:]...)
+		checkBin := platform.ResolveBinary(spec.Check[0])
+		if checkBin == "" {
+			checkBin = spec.Check[0]
+		}
+		cmd := exec.CommandContext(ctx, checkBin, spec.Check[1:]...)
+		cmd.Env = platform.EnvWithAugmentedPATH(spec.Env)
 		var output bytes.Buffer
 		cmd.Stdout = &output
 		cmd.Stderr = &output

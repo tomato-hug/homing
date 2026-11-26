@@ -1,8 +1,10 @@
 package dev.agentpush.poc.ui.screens
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -13,11 +15,15 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.CleaningServices
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Schedule
@@ -61,7 +67,9 @@ import dev.agentpush.poc.SessionItemsState
 import dev.agentpush.poc.SessionStatus
 import dev.agentpush.poc.SessionSummary
 import dev.agentpush.poc.R
+import dev.agentpush.poc.defaultAgentDisplayName
 import dev.agentpush.poc.titleSourceLabel
+
 import dev.agentpush.poc.ui.AgentGlyph
 import dev.agentpush.poc.ui.ClaudeOrange
 import dev.agentpush.poc.ui.CodexGreen
@@ -92,6 +100,17 @@ internal fun SessionHeader(
     onToggleMuted: () -> Unit,
     onToggleArchived: () -> Unit,
     onToggleRemindOnDone: () -> Unit,
+    navigationAsDrawer: Boolean = false,
+    otherUrgentCount: Int = 0,
+    onJumpUrgent: (() -> Unit)? = null,
+    returnToSessionTitle: String? = null,
+    onReturnPreviousSession: (() -> Unit)? = null,
+    onQuickClear: (() -> Unit)? = null,
+    projectSiblings: List<SessionSummary> = emptyList(),
+    projectHistoryIds: Set<String> = emptySet(),
+    onOpenSibling: (String) -> Unit = {},
+    awayEnabled: Boolean = false,
+    onToggleAway: (() -> Unit)? = null,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
     var renameOpen by remember { mutableStateOf(false) }
@@ -113,8 +132,22 @@ internal fun SessionHeader(
                     .padding(start = 4.dp, end = 8.dp, top = 4.dp, bottom = 6.dp),
                 verticalAlignment = Alignment.Top,
             ) {
-                IconButton(onClick = onBack) {
-                    Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
+                IconButton(
+                    onClick = onBack,
+                    modifier = if (navigationAsDrawer) {
+                        Modifier.testTag("open-workspace-drawer")
+                    } else {
+                        Modifier
+                    },
+                ) {
+                    Icon(
+                        imageVector = if (navigationAsDrawer) {
+                            Icons.Outlined.Menu
+                        } else {
+                            Icons.AutoMirrored.Outlined.ArrowBack
+                        },
+                        contentDescription = if (navigationAsDrawer) "打开会话抽屉" else "返回",
+                    )
                 }
                 if (session != null) {
                     AgentGlyph(
@@ -147,7 +180,7 @@ internal fun SessionHeader(
                         Spacer(Modifier.height(4.dp))
                         Text(
                             text = buildString {
-                                append(session.brand.displayName)
+                                append(session.agentLabel.ifBlank { defaultAgentDisplayName(session.source) })
                                 append(" · ")
                                 append(session.project.ifBlank { "未命名项目" })
                                 session.branch.takeIf {
@@ -165,6 +198,26 @@ internal fun SessionHeader(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
+                        if (!returnToSessionTitle.isNullOrBlank() && onReturnPreviousSession != null) {
+                            Spacer(Modifier.height(4.dp))
+                            Surface(
+                                onClick = onReturnPreviousSession,
+                                color = HomingPalette.Raised,
+                                shape = RoundedCornerShape(6.dp),
+                                modifier = Modifier.testTag("return-previous-session-pill"),
+                            ) {
+                                Text(
+                                    text = "↩ 返回：$returnToSessionTitle",
+                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                                    style = TextStyle(
+                                        fontSize = 11.sp,
+                                        color = HomingPalette.BrandSoft,
+                                    ),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
                     }
                     Column(
                         horizontalAlignment = Alignment.End,
@@ -172,9 +225,97 @@ internal fun SessionHeader(
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(3.dp),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
+                            if (otherUrgentCount > 0 && onJumpUrgent != null) {
+                                Surface(
+                                    onClick = onJumpUrgent,
+                                    color = HomingPalette.Warning.copy(alpha = 0.16f),
+                                    border = BorderStroke(1.dp, HomingPalette.Warning.copy(alpha = 0.65f)),
+                                    shape = RoundedCornerShape(999.dp),
+                                    modifier = Modifier.testTag("urgent-jump-pill"),
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                                    ) {
+                                        Icon(
+                                            Icons.Outlined.Bolt,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(13.dp),
+                                            tint = HomingPalette.Warning,
+                                        )
+                                        Text(
+                                            text = "$otherUrgentCount 待审 ›",
+                                            style = TextStyle(
+                                                fontSize = 11.5.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = HomingPalette.Warning,
+                                            ),
+                                        )
+                                    }
+                                }
+                            }
                             HeaderRunState(session = session, itemsState = itemsState)
+                            if (onToggleAway != null) {
+                                Surface(
+                                    onClick = onToggleAway,
+                                    color = if (awayEnabled) {
+                                        HomingPalette.Brand.copy(alpha = 0.15f)
+                                    } else {
+                                        HomingPalette.Card
+                                    },
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (awayEnabled) {
+                                            HomingPalette.Brand.copy(alpha = 0.6f)
+                                        } else {
+                                            HomingPalette.NavBorder
+                                        },
+                                    ),
+                                    shape = RoundedCornerShape(999.dp),
+                                    modifier = Modifier.testTag("header-away-toggle"),
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(6.dp)
+                                                .background(
+                                                    if (awayEnabled) HomingPalette.Added else HomingPalette.Muted,
+                                                    CircleShape,
+                                                ),
+                                        )
+                                        Text(
+                                            text = if (awayEnabled) "监听中" else "未监听",
+                                            style = TextStyle(
+                                                fontSize = 10.5.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = if (awayEnabled) HomingPalette.Brand else HomingPalette.Muted,
+                                            ),
+                                        )
+                                    }
+                                }
+                            }
+                            if (onQuickClear != null) {
+                                IconButton(
+                                    onClick = onQuickClear,
+                                    modifier = Modifier
+                                        .size(34.dp)
+                                        .testTag("header-quick-clear"),
+                                ) {
+                                    Icon(
+                                        Icons.Outlined.CleaningServices,
+                                        contentDescription = "快速清理会话",
+                                        modifier = Modifier.size(18.dp),
+                                        tint = HomingPalette.Muted,
+                                    )
+                                }
+                            }
                             IconButton(
                                 onClick = { menuExpanded = true },
                                 modifier = Modifier.size(36.dp),
@@ -189,6 +330,15 @@ internal fun SessionHeader(
                                 expanded = menuExpanded,
                                 onDismissRequest = { menuExpanded = false },
                             ) {
+                                if (onToggleAway != null) {
+                                    DropdownMenuItem(
+                                        text = { Text(if (awayEnabled) "关闭离席监听" else "开启离席监听") },
+                                        onClick = {
+                                            menuExpanded = false
+                                            onToggleAway()
+                                        },
+                                    )
+                                }
                                 DropdownMenuItem(
                                     text = { Text("搜索这个会话") },
                                     leadingIcon = {
