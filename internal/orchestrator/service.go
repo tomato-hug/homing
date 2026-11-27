@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -18,6 +19,42 @@ import (
 )
 
 const MaxTaskRunes = 12000
+
+type storeDispatchLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+var storeDispatchLocks = struct {
+	mu    sync.Mutex
+	locks map[string]*storeDispatchLock
+}{locks: map[string]*storeDispatchLock{}}
+
+func lockStoreDispatches(st *store.Store) func() {
+	key := filepath.Clean(st.Paths.DataDir)
+	if key == "" || key == "." {
+		key = fmt.Sprintf("%p", st)
+	}
+	storeDispatchLocks.mu.Lock()
+	entry := storeDispatchLocks.locks[key]
+	if entry == nil {
+		entry = &storeDispatchLock{}
+		storeDispatchLocks.locks[key] = entry
+	}
+	entry.refs++
+	storeDispatchLocks.mu.Unlock()
+
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		storeDispatchLocks.mu.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(storeDispatchLocks.locks, key)
+		}
+		storeDispatchLocks.mu.Unlock()
+	}
+}
 
 // StartResult is what an agent-specific session launcher reports.
 type StartResult struct {
@@ -93,11 +130,21 @@ func (s *Service) Prepare(req Request, extra []store.Dispatch) (store.Dispatch, 
 
 // Dispatch validates, records, and starts one child task.
 func (s *Service) Dispatch(ctx context.Context, req Request) (store.Dispatch, error) {
+	if s == nil || s.Store == nil {
+		return store.Dispatch{}, &Error{Status: 500, Code: "store_unavailable", Message: "数据目录不可用"}
+	}
+	if s.Launcher == nil {
+		return store.Dispatch{}, &Error{Status: 503, Code: "dispatcher_unavailable", Message: "跨 Agent 调度器未启用"}
+	}
+
+	unlockReserve := lockStoreDispatches(s.Store)
 	dispatch, err := s.prepare(req, nil)
 	if err != nil {
+		unlockReserve()
 		return store.Dispatch{}, err
 	}
 	saved, err := s.Store.SaveDispatch(dispatch)
+	unlockReserve()
 	if err != nil {
 		return saved, &Error{Status: 500, Code: "dispatch_store_failed", Message: "保存调度记录失败", Dispatch: &saved}
 	}
@@ -119,32 +166,61 @@ func (s *Service) Dispatch(ctx context.Context, req Request) (store.Dispatch, er
 	if result.Status == "" {
 		result.Status = "started"
 	}
-	saved.TargetSessionID = strings.TrimSpace(result.SessionID)
-	saved.RequestID = strings.TrimSpace(result.RequestID)
-	saved.Message = strings.TrimSpace(result.Message)
-	if saved.TargetSessionID != "" {
-		saved.Status = "started"
-		saved.RequestID = ""
-	} else if saved.RequestID != "" {
-		saved.Status = "waiting_session"
-	} else {
-		saved.Status = normalizeStatus(result.Status)
-	}
-	if saved.Status == "failed" {
-		if saved.Message == "" {
-			saved.Message = "目标会话启动失败"
+
+	unlockFinalize := lockStoreDispatches(s.Store)
+	defer unlockFinalize()
+
+	latest := saved
+	for _, existing := range s.Store.Dispatches() {
+		if existing.ID == saved.ID {
+			latest = existing
+			break
 		}
-		saved, _ = s.Store.SaveDispatch(saved)
-		return saved, &Error{Status: 502, Code: "launch_failed", Message: saved.Message, Dispatch: &saved}
 	}
-	if saved.Preset == "handoff" && strings.TrimSpace(saved.Message) == "" {
-		saved.Message = "已移交給 @" + saved.TargetAgent + "，結果不會自動回到父會話"
+	switch latest.Status {
+	case "cancelled", "completed", "failed":
+		return latest, nil
 	}
-	saved, err = s.Store.SaveDispatch(saved)
+
+	sessionID := strings.TrimSpace(result.SessionID)
+	requestID := strings.TrimSpace(result.RequestID)
+	message := strings.TrimSpace(result.Message)
+
+	if latest.TargetSessionID == "" && sessionID != "" {
+		latest.TargetSessionID = sessionID
+	}
+	if latest.TargetSessionID != "" {
+		latest.RequestID = ""
+		if latest.Status == "starting" || latest.Status == "waiting_session" {
+			latest.Status = "started"
+		}
+	} else if requestID != "" {
+		latest.RequestID = requestID
+		if latest.Status == "starting" {
+			latest.Status = "waiting_session"
+		}
+	} else if latest.Status == "starting" || latest.Status == "waiting_session" {
+		latest.Status = normalizeStatus(result.Status)
+	}
+
+	if message != "" && (latest.Message == "" || latest.Status == "failed") {
+		latest.Message = message
+	}
+	if latest.Status == "failed" {
+		if latest.Message == "" {
+			latest.Message = "目标会话启动失败"
+		}
+		latest, _ = s.Store.SaveDispatch(latest)
+		return latest, &Error{Status: 502, Code: "launch_failed", Message: latest.Message, Dispatch: &latest}
+	}
+	if latest.Preset == "handoff" && strings.TrimSpace(latest.Message) == "" {
+		latest.Message = "已移交給 @" + latest.TargetAgent + "，結果不會自動回到父會話"
+	}
+	latest, err = s.Store.SaveDispatch(latest)
 	if err != nil {
-		return saved, &Error{Status: 500, Code: "dispatch_store_failed", Message: "保存调度状态失败", Dispatch: &saved}
+		return latest, &Error{Status: 500, Code: "dispatch_store_failed", Message: "保存调度状态失败", Dispatch: &latest}
 	}
-	return saved, nil
+	return latest, nil
 }
 
 func (s *Service) prepare(req Request, extra []store.Dispatch) (store.Dispatch, error) {

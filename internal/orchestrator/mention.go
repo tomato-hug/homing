@@ -41,7 +41,8 @@ func ParseMentions(input string) (string, []Mention) {
 		end    int
 	}
 	var hits []hit
-	fence := ""
+	var fenceChar byte
+	fenceLen := 0
 	lineStart := 0
 	for lineStart <= len(input) {
 		newline := strings.IndexByte(input[lineStart:], '\n')
@@ -51,22 +52,19 @@ func ParseMentions(input string) (string, []Mention) {
 		}
 		line := strings.TrimSuffix(input[lineStart:lineEnd], "\r")
 		trimLine := strings.TrimLeft(line, " \t")
-		marker := ""
-		if strings.HasPrefix(trimLine, "```") {
-			marker = "```"
-		} else if strings.HasPrefix(trimLine, "~~~") {
-			marker = "~~~"
-		}
-		if marker != "" {
-			if fence == "" {
-				fence = marker
-			} else if fence == marker {
-				fence = ""
+		if fenceLen > 0 {
+			if isClosingFence(trimLine, fenceChar, fenceLen) {
+				fenceChar = 0
+				fenceLen = 0
 			}
-		} else if fence == "" {
+		} else if ch, count, ok := parseOpeningFence(trimLine); ok {
+			fenceChar = ch
+			fenceLen = count
+		} else {
+			codeSpans := inlineCodeSpans(line)
 			for _, loc := range mentionPattern.FindAllStringSubmatchIndex(line, -1) {
 				start := loc[0]
-				if insideMentionToken(line, start) || insideInlineCode(line, start) {
+				if insideMentionToken(line, start) || posInSpans(codeSpans, start) {
 					continue
 				}
 				agent := strings.ToLower(line[loc[2]:loc[3]])
@@ -132,16 +130,80 @@ func insideMentionToken(line string, index int) bool {
 	return false
 }
 
-func insideInlineCode(line string, index int) bool {
-	ticks := 0
-	limit := index
-	if limit > len(line) {
-		limit = len(line)
+func parseOpeningFence(trimLine string) (byte, int, bool) {
+	if len(trimLine) < 3 {
+		return 0, 0, false
 	}
-	for i := 0; i < limit; i++ {
-		if line[i] == '`' {
-			ticks++
+	ch := trimLine[0]
+	if ch != '`' && ch != '~' {
+		return 0, 0, false
+	}
+	count := 0
+	for count < len(trimLine) && trimLine[count] == ch {
+		count++
+	}
+	if count < 3 {
+		return 0, 0, false
+	}
+	// CommonMark §4.5: a backtick code block's info string cannot contain backticks;
+	// otherwise ```` ```@agent``` ```` is an inline code span on this single line.
+	if ch == '`' && strings.IndexByte(trimLine[count:], '`') >= 0 {
+		return 0, 0, false
+	}
+	return ch, count, true
+}
+
+func isClosingFence(trimLine string, fenceChar byte, minLen int) bool {
+	count := 0
+	for count < len(trimLine) && trimLine[count] == fenceChar {
+		count++
+	}
+	if count < minLen {
+		return false
+	}
+	return strings.Trim(trimLine[count:], " \t") == ""
+}
+
+func inlineCodeSpans(line string) [][2]int {
+	var spans [][2]int
+	for i := 0; i < len(line); {
+		if line[i] != '`' {
+			i++
+			continue
+		}
+		openStart := i
+		for i < len(line) && line[i] == '`' {
+			i++
+		}
+		tickLen := i - openStart
+		closeEnd := -1
+		for j := i; j < len(line); {
+			if line[j] != '`' {
+				j++
+				continue
+			}
+			closeStart := j
+			for j < len(line) && line[j] == '`' {
+				j++
+			}
+			if j-closeStart == tickLen {
+				closeEnd = j
+				break
+			}
+		}
+		if closeEnd >= 0 {
+			spans = append(spans, [2]int{openStart, closeEnd})
+			i = closeEnd
 		}
 	}
-	return ticks%2 == 1
+	return spans
+}
+
+func posInSpans(spans [][2]int, index int) bool {
+	for _, span := range spans {
+		if index >= span[0] && index < span[1] {
+			return true
+		}
+	}
+	return false
 }
