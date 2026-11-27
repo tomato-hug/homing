@@ -491,7 +491,9 @@ func claudeSupportsSessionID(binary string) bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), configuredClaudeHelpTimeout())
 	defer cancel()
-	out, err := exec.CommandContext(ctx, binary, "--help").CombinedOutput()
+	cmd := exec.CommandContext(ctx, binary, "--help")
+	cmd.WaitDelay = 50 * time.Millisecond
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return false
 	}

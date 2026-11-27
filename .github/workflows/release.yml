@@ -21,12 +21,12 @@ jobs:
       matrix:
         include:
           - name: macOS arm64
-            os: macos-14
+            os: macos-latest
             goos: darwin
             goarch: arm64
             gui: true
           - name: macOS amd64
-            os: macos-14
+            os: macos-latest
             goos: darwin
             goarch: amd64
             gui: true
