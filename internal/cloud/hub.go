@@ -71,6 +71,7 @@ type Hub struct {
 	codeIndex  map[string]string
 	pending    map[string]*PairingRequest
 	requests   chan PairingRequest
+	files      fileAssembler
 }
 
 type lanToken struct {
@@ -269,6 +270,7 @@ func (h *Hub) RevokePeer(peerID string) error {
 	if err := h.peers.Remove(peerID); err != nil {
 		return err
 	}
+	h.files.dropPeer(peerID)
 	h.sendTo(peerID, map[string]any{
 		"t": "pair.revoked", "peer_id": h.identity.DeviceID(),
 	})
@@ -352,6 +354,7 @@ func (h *Hub) Close() {
 		conn.close(websocket.StatusGoingAway, "hub shutdown")
 	}
 	h.wg.Wait()
+	h.files.clear()
 }
 
 func (h *Hub) readLoop(conn *hostConn) {
@@ -549,6 +552,7 @@ func (h *Hub) handleRevoke(conn *hostConn, message map[string]any) error {
 	if err := h.peers.Remove(peerID); err != nil {
 		return err
 	}
+	h.files.dropPeer(peerID)
 	h.sendTo(peerID, map[string]any{"t": "pair.revoked", "peer_id": conn.deviceID})
 	conn.send(h.ctx, map[string]any{"t": "pair.revoked.ok", "peer_id": peerID})
 	return nil
@@ -586,7 +590,7 @@ func (h *Hub) handleEnvelope(conn *hostConn, message map[string]any) error {
 		conn.sendError(h.ctx, "decrypt_failed", "消息解密失败")
 		return nil
 	}
-	if payloads, handled := dispatchFilePayload(h.ctx, h.handler, peer.DeviceID, plaintext); handled {
+	if payloads, handled := h.files.dispatch(h.ctx, h.handler, peer.DeviceID, plaintext); handled {
 		for _, payload := range payloads {
 			response, err := sealPayload(h.identity, peer, payload)
 			if err != nil {
@@ -628,11 +632,16 @@ func (h *Hub) removeConn(conn *hostConn) {
 	if conn.deviceID == "" {
 		return
 	}
+	dropFiles := false
 	if set := h.conns[conn.deviceID]; set != nil {
 		delete(set, conn)
 		if len(set) == 0 {
 			delete(h.conns, conn.deviceID)
+			dropFiles = true
 		}
+	}
+	if dropFiles {
+		h.files.dropPeer(conn.deviceID)
 	}
 }
 

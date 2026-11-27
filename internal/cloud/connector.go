@@ -80,6 +80,7 @@ type Connector struct {
 	requests          chan PairingRequest
 	seenRIDs          map[string]time.Time
 	pendingNotify     []queuedEnvelope
+	files             fileAssembler
 }
 
 func NewConnector(cfg ConnectorConfig) (*Connector, error) {
@@ -452,6 +453,7 @@ func (c *Connector) runSession(parent context.Context) (bool, error) {
 	c.lastError = ""
 	c.mu.Unlock()
 	defer func() {
+		c.files.clear()
 		c.mu.Lock()
 		if c.conn == ws {
 			c.conn = nil
@@ -482,7 +484,11 @@ type decodedEnvelopeWork struct {
 
 func (c *Connector) readLoop(ctx context.Context, ws *websocket.Conn) error {
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	var workerWG sync.WaitGroup
+	defer func() {
+		cancel()
+		workerWG.Wait()
+	}()
 	// Keep ws.Read non-blocking so control frames (WebSocket ping/pong) are
 	// always answered immediately even under heavy RPC load.
 	// Read-only RPCs (GET/HEAD/OPTIONS) run on a bounded concurrent worker pool
@@ -492,7 +498,9 @@ func (c *Connector) readLoop(ctx context.Context, ws *websocket.Conn) error {
 	orderedJobs := make(chan decodedEnvelopeWork, connectorOrderedQueue)
 
 	for i := 0; i < connectorRPCReadWorkers; i++ {
+		workerWG.Add(1)
 		go func() {
+			defer workerWG.Done()
 			for {
 				select {
 				case <-ctx.Done():
@@ -508,7 +516,9 @@ func (c *Connector) readLoop(ctx context.Context, ws *websocket.Conn) error {
 			}
 		}()
 	}
+	workerWG.Add(1)
 	go func() {
+		defer workerWG.Done()
 		for {
 			select {
 			case <-ctx.Done():
@@ -523,7 +533,9 @@ func (c *Connector) readLoop(ctx context.Context, ws *websocket.Conn) error {
 			}
 		}
 	}()
+	workerWG.Add(1)
 	go func() {
+		defer workerWG.Done()
 		for {
 			select {
 			case <-ctx.Done():
@@ -609,7 +621,9 @@ func (c *Connector) handleMessage(ctx context.Context, ws *websocket.Conn, messa
 			c.log.Warn("pair request queue is full", "client", request.ClientID)
 		}
 	case "pair.revoked":
-		if err := c.peers.Remove(stringField(message, "peer_id")); err != nil {
+		peerID := stringField(message, "peer_id")
+		c.files.dropPeer(peerID)
+		if err := c.peers.Remove(peerID); err != nil {
 			c.log.Warn("remove revoked peer", "err", err)
 		}
 	case "error":
@@ -717,7 +731,7 @@ func (c *Connector) executeEnvelopeWork(ctx context.Context, ws *websocket.Conn,
 	defer func() {
 		_ = c.ackEnvelope(ctx, ws, work.envelope.ID)
 	}()
-	if payloads, handled := dispatchFilePayload(ctx, c.handler, work.peer.DeviceID, work.plaintext); handled {
+	if payloads, handled := c.files.dispatch(ctx, c.handler, work.peer.DeviceID, work.plaintext); handled {
 		for _, payload := range payloads {
 			response, err := sealPayload(c.identity, work.peer, payload)
 			if err != nil {

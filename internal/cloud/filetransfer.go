@@ -45,15 +45,48 @@ type fileAssembly struct {
 	updatedAt   time.Time
 }
 
-var fileAssemblies = struct {
+type fileAssembler struct {
 	sync.Mutex
 	items map[string]*fileAssembly
-}{items: make(map[string]*fileAssembly)}
+}
 
-// dispatchFilePayload handles the encrypted file.chunk and file.request
-// payloads. The bool reports whether the payload belonged to the file channel;
-// the returned values are encrypted back to the peer in order.
-func dispatchFilePayload(
+var fileAssemblies = fileAssembler{items: make(map[string]*fileAssembly)}
+
+func (a *fileAssembler) ensureLocked() {
+	if a.items == nil {
+		a.items = make(map[string]*fileAssembly)
+	}
+}
+
+func (a *fileAssembler) sweepLocked(now time.Time) {
+	for key, assembly := range a.items {
+		if now.Sub(assembly.updatedAt) > fileAssemblyTTL {
+			delete(a.items, key)
+		}
+	}
+}
+
+func (a *fileAssembler) dropPeer(peerID string) {
+	if peerID == "" {
+		return
+	}
+	prefix := peerID + "\x00"
+	a.Lock()
+	for key := range a.items {
+		if strings.HasPrefix(key, prefix) {
+			delete(a.items, key)
+		}
+	}
+	a.Unlock()
+}
+
+func (a *fileAssembler) clear() {
+	a.Lock()
+	a.items = make(map[string]*fileAssembly)
+	a.Unlock()
+}
+
+func (a *fileAssembler) dispatch(
 	ctx context.Context,
 	handler http.Handler,
 	peerID string,
@@ -71,7 +104,7 @@ func dispatchFilePayload(
 		if err := json.Unmarshal(plaintext, &chunk); err != nil {
 			return []any{fileError("", http.StatusBadRequest, "invalid_file_chunk")}, true
 		}
-		result, respond := acceptFileChunk(ctx, handler, peerID, chunk)
+		result, respond := a.acceptChunk(ctx, handler, peerID, chunk)
 		if !respond {
 			return nil, true
 		}
@@ -90,7 +123,7 @@ func dispatchFilePayload(
 	}
 }
 
-func acceptFileChunk(
+func (a *fileAssembler) acceptChunk(
 	ctx context.Context,
 	handler http.Handler,
 	peerID string,
@@ -109,12 +142,13 @@ func acceptFileChunk(
 
 	key := peerID + "\x00" + chunk.FID
 	now := time.Now()
-	fileAssemblies.Lock()
-	sweepFileAssembliesLocked(now)
-	assembly := fileAssemblies.items[key]
+	a.Lock()
+	a.ensureLocked()
+	a.sweepLocked(now)
+	assembly := a.items[key]
 	if chunk.Seq == 0 {
 		if !validUploadPath(chunk.Path) {
-			fileAssemblies.Unlock()
+			a.Unlock()
 			return fileError(chunk.FID, http.StatusForbidden, "forbidden_upload_path"), true
 		}
 		assembly = &fileAssembly{
@@ -122,35 +156,35 @@ func acceptFileChunk(
 			contentType: strings.TrimSpace(chunk.ContentType),
 			updatedAt:   now,
 		}
-		fileAssemblies.items[key] = assembly
+		a.items[key] = assembly
 	} else if assembly == nil {
-		fileAssemblies.Unlock()
+		a.Unlock()
 		return fileError(chunk.FID, http.StatusBadRequest, "unknown_file_transfer"), true
 	}
 	if chunk.Seq != assembly.nextSeq {
 		if chunk.Seq == 0 {
-			delete(fileAssemblies.items, key)
+			delete(a.items, key)
 		}
-		fileAssemblies.Unlock()
+		a.Unlock()
 		return fileError(chunk.FID, http.StatusConflict, "file_chunk_out_of_order"), true
 	}
 	if assembly.data.Len()+len(data) > maxCloudFileBytes {
-		delete(fileAssemblies.items, key)
-		fileAssemblies.Unlock()
+		delete(a.items, key)
+		a.Unlock()
 		return fileError(chunk.FID, http.StatusRequestEntityTooLarge, "file_too_large"), true
 	}
 	_, _ = assembly.data.Write(data)
 	assembly.nextSeq++
 	assembly.updatedAt = now
 	if !chunk.Last {
-		fileAssemblies.Unlock()
+		a.Unlock()
 		return nil, false
 	}
-	delete(fileAssemblies.items, key)
+	delete(a.items, key)
 	path := assembly.path
 	contentType := assembly.contentType
 	payload := append([]byte(nil), assembly.data.Bytes()...)
-	fileAssemblies.Unlock()
+	a.Unlock()
 
 	if contentType == "" {
 		contentType = "application/octet-stream"
@@ -162,6 +196,17 @@ func acceptFileChunk(
 		Status: status,
 		Body:   body,
 	}, true
+}
+
+// dispatchFilePayload handles the encrypted file.chunk and file.request
+// payloads on the default package assembler.
+func dispatchFilePayload(
+	ctx context.Context,
+	handler http.Handler,
+	peerID string,
+	plaintext []byte,
+) ([]any, bool) {
+	return fileAssemblies.dispatch(ctx, handler, peerID, plaintext)
 }
 
 func readFileChunks(
@@ -273,16 +318,10 @@ func validDownloadPath(path string) bool {
 }
 
 func sweepFileAssembliesLocked(now time.Time) {
-	for key, assembly := range fileAssemblies.items {
-		if now.Sub(assembly.updatedAt) > fileAssemblyTTL {
-			delete(fileAssemblies.items, key)
-		}
-	}
+	fileAssemblies.sweepLocked(now)
 }
 
 // clearFileAssemblies is used by tests to isolate transfers between cases.
 func clearFileAssemblies() {
-	fileAssemblies.Lock()
-	fileAssemblies.items = make(map[string]*fileAssembly)
-	fileAssemblies.Unlock()
+	fileAssemblies.clear()
 }
