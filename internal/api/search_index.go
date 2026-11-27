@@ -16,9 +16,14 @@ import (
 	"github.com/tomato-hug/homing/internal/searchindex"
 )
 
-func (d *Deps) searchIndex() (*searchindex.Index, error) {
-	d.searchMu.Lock()
-	defer d.searchMu.Unlock()
+var errSearchIndexDisabled = errors.New("search index disabled")
+
+func (d *Deps) searchDisabled() bool {
+	s, ok := d.store()
+	return ok && s.SearchDisabled()
+}
+
+func (d *Deps) openSearchIndexLocked() (*searchindex.Index, error) {
 	if d.searchValue != nil {
 		return d.searchValue, nil
 	}
@@ -35,9 +40,7 @@ func (d *Deps) searchIndex() (*searchindex.Index, error) {
 	return index, nil
 }
 
-func (d *Deps) resetSearchIndex() {
-	d.searchMu.Lock()
-	defer d.searchMu.Unlock()
+func (d *Deps) closeSearchIndexLocked() {
 	if d.searchValue != nil {
 		_ = d.searchValue.Close()
 	}
@@ -45,15 +48,29 @@ func (d *Deps) resetSearchIndex() {
 	d.searchErr = nil
 }
 
+func (d *Deps) resetSearchIndex() {
+	d.searchMu.Lock()
+	defer d.searchMu.Unlock()
+	d.closeSearchIndexLocked()
+}
+
 func (d *Deps) syncSearchIndex(ctx context.Context, summaries []Summary) (int, error) {
-	index, err := d.searchIndex()
+	d.searchMu.Lock()
+	if d.searchDisabled() {
+		d.searchMu.Unlock()
+		return 0, errSearchIndexDisabled
+	}
+	index, err := d.openSearchIndexLocked()
 	if err != nil {
+		d.searchMu.Unlock()
 		return 0, err
 	}
 	versions, err := index.Versions(ctx)
+	d.searchMu.Unlock()
 	if err != nil {
 		return 0, err
 	}
+
 	updated := 0
 	for _, summary := range summaries {
 		if summary.Archived || summary.IsEmpty || summary.SessionID == "" {
@@ -64,16 +81,35 @@ func (d *Deps) syncSearchIndex(ctx context.Context, summaries []Summary) (int, e
 		if versions[key] == version {
 			continue
 		}
-		items := readSearchableItems(ctx, summary)
-		if err := index.ReplaceSession(
-			ctx, summary.Source, summary.SessionID, version,
-			searchDocuments(items),
-		); err != nil {
-			return updated, err
+		docs := searchDocuments(readSearchableItems(ctx, summary))
+		d.searchMu.Lock()
+		if d.searchDisabled() || d.searchValue == nil {
+			d.searchMu.Unlock()
+			return updated, errSearchIndexDisabled
+		}
+		replaceErr := d.searchValue.ReplaceSession(
+			ctx, summary.Source, summary.SessionID, version, docs,
+		)
+		d.searchMu.Unlock()
+		if replaceErr != nil {
+			return updated, replaceErr
 		}
 		updated++
 	}
 	return updated, nil
+}
+
+func (d *Deps) querySearchIndex(ctx context.Context, query, source string, limit int) ([]searchindex.Hit, bool, error) {
+	d.searchMu.Lock()
+	defer d.searchMu.Unlock()
+	if d.searchDisabled() {
+		return nil, false, errSearchIndexDisabled
+	}
+	index, err := d.openSearchIndexLocked()
+	if err != nil {
+		return nil, false, err
+	}
+	return index.Search(ctx, query, source, limit)
 }
 
 func searchIndexVersion(summary Summary) string {
@@ -146,9 +182,11 @@ func (d *Deps) handleSearchIndexStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	paths := platform.NewPaths(d.DataDir)
 	stats := searchindex.Stats{Path: paths.Index, Trigram: true}
+	d.searchMu.Lock()
 	if _, err := os.Stat(paths.Index); err == nil {
-		index, openErr := d.searchIndex()
+		index, openErr := d.openSearchIndexLocked()
 		if openErr != nil {
+			d.searchMu.Unlock()
 			WriteJSON(w, http.StatusOK, map[string]any{
 				"enabled": !disabled,
 				"stats":   searchindex.Stats{Path: paths.Index, Trigram: false, OpenError: openErr.Error()},
@@ -158,19 +196,23 @@ func (d *Deps) handleSearchIndexStatus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		loaded, statsErr := index.Stats(ctxOf(r))
+		d.searchMu.Unlock()
 		if statsErr != nil {
 			WriteJSON(w, http.StatusInternalServerError, map[string]any{"error": statsErr.Error()})
 			return
 		}
 		stats = loaded
-	} else if !errors.Is(err, os.ErrNotExist) {
-		WriteJSON(w, http.StatusOK, map[string]any{
-			"enabled": !disabled,
-			"stats":   searchindex.Stats{Path: paths.Index, Trigram: true, OpenError: err.Error()},
-			"error":   err.Error(),
-			"fts5":    false,
-		})
-		return
+	} else {
+		d.searchMu.Unlock()
+		if !errors.Is(err, os.ErrNotExist) {
+			WriteJSON(w, http.StatusOK, map[string]any{
+				"enabled": !disabled,
+				"stats":   searchindex.Stats{Path: paths.Index, Trigram: true, OpenError: err.Error()},
+				"error":   err.Error(),
+				"fts5":    false,
+			})
+			return
+		}
 	}
 	WriteJSON(w, http.StatusOK, map[string]any{
 		"enabled": !disabled,
@@ -204,13 +246,16 @@ func (d *Deps) handleSearchIndexAction(w http.ResponseWriter, r *http.Request) {
 			"ok": true, "enabled": action == "enable",
 		})
 	case "rebuild":
+		d.searchMu.Lock()
 		if err := s.SetSearchDisabled(false); err != nil {
+			d.searchMu.Unlock()
 			WriteJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存设置失败"})
 			return
 		}
-		if index, err := d.searchIndex(); err == nil {
+		if index, err := d.openSearchIndexLocked(); err == nil {
 			_ = index.Clear(ctxOf(r))
 		}
+		d.searchMu.Unlock()
 		summaries := d.summaries(ctxOf(r), 1000, "", "")
 		updated, err := d.syncSearchIndex(ctxOf(r), summaries)
 		if err != nil {
@@ -222,13 +267,17 @@ func (d *Deps) handleSearchIndexAction(w http.ResponseWriter, r *http.Request) {
 			"ok": true, "enabled": true, "indexed": updated,
 		})
 	case "delete":
+		d.searchMu.Lock()
 		if err := s.SetSearchDisabled(true); err != nil {
+			d.searchMu.Unlock()
 			WriteJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存设置失败"})
 			return
 		}
-		d.resetSearchIndex()
-		if err := searchindex.Remove(platform.NewPaths(d.DataDir).Index); err != nil {
-			WriteJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		d.closeSearchIndexLocked()
+		removeErr := searchindex.Remove(platform.NewPaths(d.DataDir).Index)
+		d.searchMu.Unlock()
+		if removeErr != nil {
+			WriteJSON(w, http.StatusInternalServerError, map[string]any{"error": removeErr.Error()})
 			return
 		}
 		d.Audit(r, "search_index_delete", nil)

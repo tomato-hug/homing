@@ -2,10 +2,10 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/tomato-hug/homing/internal/agent"
 )
@@ -86,17 +86,26 @@ func (d *Deps) handleContentSearch(
 		})
 		return
 	}
-	index, err := d.searchIndex()
-	if err != nil {
-		d.searchFallback(w, r, query, source, limit, candidates, err)
+	updated, syncErr := d.syncSearchIndex(ctxOf(r), candidates)
+	if errors.Is(syncErr, errSearchIndexDisabled) {
+		WriteJSON(w, http.StatusConflict, map[string]any{
+			"error": "正文索引已关闭，可在设置中重新开启",
+			"code":  "search_index_disabled",
+		})
 		return
 	}
-	updated, syncErr := d.syncSearchIndex(ctxOf(r), candidates)
 	if syncErr != nil {
 		d.searchFallback(w, r, query, source, limit, candidates, syncErr)
 		return
 	}
-	rows, fallback, searchErr := index.Search(ctxOf(r), query, source, limit)
+	rows, fallback, searchErr := d.querySearchIndex(ctxOf(r), query, source, limit)
+	if errors.Is(searchErr, errSearchIndexDisabled) {
+		WriteJSON(w, http.StatusConflict, map[string]any{
+			"error": "正文索引已关闭，可在设置中重新开启",
+			"code":  "search_index_disabled",
+		})
+		return
+	}
 	if searchErr != nil {
 		d.searchFallback(w, r, query, source, limit, candidates, searchErr)
 		return
@@ -228,25 +237,33 @@ func snippetAround(text, query string) (SearchSnippet, bool) {
 	if text == "" || query == "" {
 		return SearchSnippet{}, false
 	}
-	lowerText := strings.ToLower(text)
 	lowerQuery := strings.ToLower(query)
-	byteIndex := strings.Index(lowerText, lowerQuery)
+	if lowerQuery == "" {
+		return SearchSnippet{}, false
+	}
+	runes := []rune(text)
+	var lowerBuf strings.Builder
+	lowerBuf.Grow(len(text))
+	byteToRune := make([]int, 0, len(text))
+	for idx, r := range runes {
+		folded := strings.ToLower(string(r))
+		for i := 0; i < len(folded); i++ {
+			byteToRune = append(byteToRune, idx)
+		}
+		lowerBuf.WriteString(folded)
+	}
+	byteIndex := strings.Index(lowerBuf.String(), lowerQuery)
 	if byteIndex < 0 {
 		return SearchSnippet{}, false
 	}
-	runeIndex := utf8.RuneCountInString(text[:byteIndex])
-	runes := []rune(text)
-	matchLength := utf8.RuneCountInString(query)
-	if matchLength < 1 {
-		matchLength = 1
+	runeIndex := byteToRune[byteIndex]
+	matchEnd := byteToRune[byteIndex+len(lowerQuery)-1] + 1
+	if matchEnd > len(runes) {
+		matchEnd = len(runes)
 	}
 	start := runeIndex - 32
 	if start < 0 {
 		start = 0
-	}
-	matchEnd := runeIndex + matchLength
-	if matchEnd > len(runes) {
-		matchEnd = len(runes)
 	}
 	end := matchEnd + 80
 	if end > len(runes) {
