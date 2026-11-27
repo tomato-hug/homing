@@ -418,6 +418,7 @@ fun HomingInboxScreen(
                                     lastConnected = state.connectionDiagnostics.lastConnectedAt,
                                     lastDisconnected = state.connectionDiagnostics.lastDisconnectedAt,
                                     onRetry = viewModel::reconnect,
+                                    onScanPair = onAddComputer,
                                 )
                             }
                         }
@@ -774,58 +775,82 @@ private fun InboxOfflineCard(
     lastConnected: Long?,
     lastDisconnected: Long?,
     onRetry: () -> Unit,
+    onScanPair: (() -> Unit)? = null,
 ) {
     val needsAuth = reason?.let {
         it.contains("中继账号") || it.contains("Relay Key") || it.contains("配对")
     } == true
     HomingCard(borderColor = HomingPalette.Warning.copy(alpha = 0.45f)) {
-        Row(
+        Column(
             modifier = Modifier.padding(horizontal = 13.dp, vertical = 11.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            if (reconnecting && !needsAuth) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(18.dp),
-                    strokeWidth = 2.dp,
-                    color = HomingPalette.Warning,
-                )
-            } else {
-                Icon(
-                    Icons.Outlined.ErrorOutline,
-                    contentDescription = null,
-                    tint = HomingPalette.Warning,
-                    modifier = Modifier.size(20.dp),
-                )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                if (reconnecting && !needsAuth) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                        color = HomingPalette.Warning,
+                    )
+                } else {
+                    Icon(
+                        Icons.Outlined.ErrorOutline,
+                        contentDescription = null,
+                        tint = HomingPalette.Warning,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = when {
+                            needsAuth -> "需要绑定中继账号"
+                            reconnecting -> "正在飞回 Mac…"
+                            else -> "暂时没有连上 Mac"
+                        },
+                        style = MaterialTheme.typography.labelLarge,
+                        color = HomingPalette.Text,
+                    )
+                    Text(
+                        text = buildString {
+                            append("连接 ")
+                            append(formatDiagnosticTime(lastConnected))
+                            append(" · 断开 ")
+                            append(formatDiagnosticTime(lastDisconnected))
+                            reason?.takeIf { it.isNotBlank() }?.let {
+                                append("\n")
+                                append(it.take(160))
+                            }
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = HomingPalette.Muted,
+                        maxLines = if (needsAuth) 4 else 3,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                if (!(needsAuth && onScanPair != null)) {
+                    TextButton(onClick = onRetry) { Text("重试") }
+                }
             }
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = when {
-                        needsAuth -> "需要绑定中继账号"
-                        reconnecting -> "正在飞回 Mac…"
-                        else -> "暂时没有连上 Mac"
-                    },
-                    style = MaterialTheme.typography.labelLarge,
-                    color = HomingPalette.Text,
-                )
-                Text(
-                    text = buildString {
-                        append("连接 ")
-                        append(formatDiagnosticTime(lastConnected))
-                        append(" · 断开 ")
-                        append(formatDiagnosticTime(lastDisconnected))
-                        reason?.takeIf { it.isNotBlank() }?.let {
-                            append("\n")
-                            append(it.take(160))
-                        }
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = HomingPalette.Muted,
-                    maxLines = if (needsAuth) 4 else 3,
-                    overflow = TextOverflow.Ellipsis,
-                )
+            if (needsAuth && onScanPair != null) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(onClick = onRetry) { Text("重试") }
+                    Spacer(Modifier.width(8.dp))
+                    Button(
+                        onClick = onScanPair,
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                        shape = RoundedCornerShape(8.dp),
+                    ) {
+                        Text("重新扫码")
+                    }
+                }
             }
-            TextButton(onClick = onRetry) { Text("重试") }
         }
     }
 }

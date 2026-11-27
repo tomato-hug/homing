@@ -1487,6 +1487,9 @@ class AgentStore private constructor(context: Context) {
 
     fun refreshCloudComputers() {
         cloudLink.refreshComputers()
+        if (!cloudLink.connected.value) {
+            cloudLink.reconnectNow()
+        }
         computerStore.active()?.deviceId?.let(::activateComputer)
         invalidateTransportRoute()
     }
