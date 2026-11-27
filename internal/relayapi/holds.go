@@ -65,6 +65,22 @@ func init() {
 	})
 }
 
+func drainQueuedReplies(s *store.Store, sessionID string) ([]string, bool) {
+	queued := queuedReplies(s, sessionID)
+	if len(queued) == 0 {
+		return nil, false
+	}
+	texts := make([]string, 0, len(queued))
+	for _, reply := range queued {
+		updated, ok := s.UpdateReplyStatus(reply.ID, "held", "已交给挂起中的钩子，Agent 继续执行")
+		if ok {
+			api.PublishReplyStatus(updated)
+		}
+		texts = append(texts, filepaths.DeliveryText(reply.Text, reply.Files))
+	}
+	return texts, true
+}
+
 // resumeFromPhone implements away mode for a Stop hook. Outside away mode the
 // hook returns immediately; inside away mode a queued phone reply continues the
 // turn, otherwise the HTTP request waits for the phone.
@@ -73,15 +89,7 @@ func resumeFromPhone(ctx context.Context, d *api.Deps, event store.Event) map[st
 	if err != nil || !s.Away() {
 		return map[string]any{}
 	}
-	if queued := queuedReplies(s, event.SessionID); len(queued) > 0 {
-		texts := make([]string, 0, len(queued))
-		for _, reply := range queued {
-			updated, ok := s.UpdateReplyStatus(reply.ID, "held", "已交给挂起中的钩子，Agent 继续执行")
-			if ok {
-				api.PublishReplyStatus(updated)
-			}
-			texts = append(texts, filepaths.DeliveryText(reply.Text, reply.Files))
-		}
+	if texts, ok := drainQueuedReplies(s, event.SessionID); ok {
 		return blockDecision(texts)
 	}
 
@@ -90,6 +98,12 @@ func resumeFromPhone(ctx context.Context, d *api.Deps, event store.Event) map[st
 	waits.bySession[event.SessionID] = append(waits.bySession[event.SessionID], hold)
 	waits.mu.Unlock()
 	defer removeStopHold(hold)
+
+	if len(queuedReplies(s, event.SessionID)) > 0 && removeStopHoldIfPresent(hold) {
+		if texts, ok := drainQueuedReplies(s, event.SessionID); ok {
+			return blockDecision(texts)
+		}
+	}
 
 	timer := time.NewTimer(holdTimeout)
 	defer timer.Stop()
@@ -123,20 +137,30 @@ func takeStopHold(sessionID string) *stopHold {
 }
 
 func removeStopHold(target *stopHold) {
+	_ = removeStopHoldIfPresent(target)
+}
+
+func removeStopHoldIfPresent(target *stopHold) bool {
 	waits.mu.Lock()
 	defer waits.mu.Unlock()
 	list := waits.bySession[target.sessionID]
+	removed := false
 	for i, hold := range list {
 		if hold == target {
 			list = append(list[:i], list[i+1:]...)
+			removed = true
 			break
 		}
+	}
+	if !removed {
+		return false
 	}
 	if len(list) == 0 {
 		delete(waits.bySession, target.sessionID)
 	} else {
 		waits.bySession[target.sessionID] = list
 	}
+	return true
 }
 
 func releaseStopHolds() int {

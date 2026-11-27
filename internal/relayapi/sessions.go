@@ -27,6 +27,11 @@ import (
 	"github.com/tomato-hug/homing/internal/store"
 )
 
+const (
+	pendingLaunchTTL   = 10 * time.Minute
+	maxPendingLaunches = 128
+)
+
 type launchInfo struct {
 	source string
 	cwd    string
@@ -42,6 +47,40 @@ var launches = struct {
 	pending: map[string]launchInfo{},
 	procs:   map[string]*exec.Cmd{},
 	acp:     map[string]acpSession{},
+}
+
+func recordPendingLaunch(requestID, source, cwd string, now time.Time) {
+	launches.mu.Lock()
+	defer launches.mu.Unlock()
+	prunePendingLaunchesLocked(now)
+	launches.pending[requestID] = launchInfo{source: source, cwd: cwd, at: now}
+	capPendingLaunchesLocked()
+}
+
+func prunePendingLaunchesLocked(now time.Time) {
+	for id, info := range launches.pending {
+		if now.Sub(info.at) > pendingLaunchTTL {
+			delete(launches.pending, id)
+		}
+	}
+	capPendingLaunchesLocked()
+}
+
+func capPendingLaunchesLocked() {
+	for len(launches.pending) > maxPendingLaunches {
+		oldestID := ""
+		var oldestAt time.Time
+		for id, info := range launches.pending {
+			if oldestID == "" || info.at.Before(oldestAt) {
+				oldestID = id
+				oldestAt = info.at
+			}
+		}
+		if oldestID == "" {
+			break
+		}
+		delete(launches.pending, oldestID)
+	}
 }
 
 func newSession(d *api.Deps, w http.ResponseWriter, r *http.Request) {
@@ -161,9 +200,7 @@ func newSession(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 	ok, _ := result["ok"].(bool)
 	if ok && stringField(result, "session_id") == "" && stringField(result, "request_id") == "" {
 		requestID := randomHex(8)
-		launches.mu.Lock()
-		launches.pending[requestID] = launchInfo{source: source, cwd: absolute, at: time.Now()}
-		launches.mu.Unlock()
+		recordPendingLaunch(requestID, source, absolute, time.Now())
 		result["request_id"] = requestID
 	}
 	status := http.StatusOK
@@ -414,18 +451,47 @@ func startClaudeSessionWithOptions(cwd, text, model, effort, permissionMode stri
 	if err := cmd.Start(); err != nil {
 		return map[string]any{"ok": false, "error": err.Error()}
 	}
-	go cmd.Wait()
+	if sessionID != "" {
+		launches.mu.Lock()
+		launches.procs[sessionID] = cmd
+		launches.mu.Unlock()
+	}
+	go func(id string, proc *exec.Cmd) {
+		_ = proc.Wait()
+		if id == "" {
+			return
+		}
+		launches.mu.Lock()
+		if launches.procs[id] == proc {
+			delete(launches.procs, id)
+		}
+		launches.mu.Unlock()
+	}(sessionID, cmd)
 	if sessionID != "" {
 		return map[string]any{"ok": true, "session_id": sessionID, "status": "started"}
 	}
 	return map[string]any{"ok": true, "session_id": nil, "status": "started"}
 }
 
+func configuredClaudeHelpTimeout() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("CLAUDE_HELP_TIMEOUT_MS"))
+	if raw == "" {
+		return 3 * time.Second
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return 3 * time.Second
+	}
+	return time.Duration(value) * time.Millisecond
+}
+
 func claudeSupportsSessionID(binary string) bool {
 	if cached, ok := claudeSessionIDSupport.Load(binary); ok {
 		return cached.(bool)
 	}
-	out, err := exec.Command(binary, "--help").CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), configuredClaudeHelpTimeout())
+	defer cancel()
+	out, err := exec.CommandContext(ctx, binary, "--help").CombinedOutput()
 	if err != nil {
 		return false
 	}
@@ -439,6 +505,7 @@ var claudeSessionIDSupport sync.Map
 func claimLaunch(d *api.Deps, event store.Event) {
 	requestID := ""
 	launches.mu.Lock()
+	prunePendingLaunchesLocked(time.Now())
 	var oldest time.Time
 	for id, launch := range launches.pending {
 		if launch.source != event.Source {

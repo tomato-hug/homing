@@ -48,13 +48,7 @@ func (relayLauncher) Start(ctx context.Context, options orchestrator.StartOption
 	requestID := started.RequestID
 	if sessionID == "" && requestID == "" {
 		requestID = randomHex(8)
-		launches.mu.Lock()
-		launches.pending[requestID] = launchInfo{
-			source: strings.ToLower(strings.TrimSpace(target)),
-			cwd:    options.Cwd,
-			at:     time.Now(),
-		}
-		launches.mu.Unlock()
+		recordPendingLaunch(requestID, strings.ToLower(strings.TrimSpace(target)), options.Cwd, time.Now())
 	}
 	return orchestrator.StartResult{
 		SessionID: sessionID,
