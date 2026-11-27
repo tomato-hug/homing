@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.6-beta.13 — Green Multi-Platform CI, Visual Showcase & Zero-Compile Onboarding
+
+- **Windows Native CI & Packaging Fixes**: Resolved all 6 Windows native test portability issues (cross-drive relative path, POSIX PATH fixtures, JSON backslash escaping & LIFO temp-dir cleanup in ACP tests, `USERPROFILE` isolation, POSIX permission bits), hardened NTFS case-insensitive directory & `PATH` deduplication plus ACP subprocess reaping, and refactored `scripts/package-windows.py` to build the embedded console natively in Python without invoking Windows `System32\bash.exe` (WSL).
+- **Backend Reliability & Concurrency Hardening**: Synchronized `SetReplyStatus` updates to JSONL with terminal dispatch guards (`internal/store`), drained `readLoop` workers on cloud disconnect and isolated file assemblies (`internal/cloud`), serialized cross-agent dispatch quota reservations and hardened backtick mention parsing (`internal/orchestrator`), normalized rate-limiter keys & FTS5 search index lifecycle (`internal/api`), and tracked Claude child processes & bounded pending launches (`internal/relayapi`).
+- **Zero-Friction Open-Source Onboarding**: Added authentic Desktop & Android product screenshots, live GitHub Actions & Release badges, prebuilt direct download links (macOS `.app.zip`, Windows `.zip`, Linux binaries, and `homing-android.apk`), transparent public trial relay quota documentation, and an explicit 3-tier Agent compatibility matrix (6 Deep Integrations + ACP/Remote Wake + 27+ Catalog).
+
 ## 0.11.6-beta.12 — Public Open-Source Release (Cross-Platform Desktop, Managed Relay & Away Mode)
 
 - **Native Windows 10/11 & macOS Desktop Parity**: Added native Windows system-tray application (`Homing.exe`, `PerMonitorV2` HiDPI, `SetThreadExecutionState` Keep-Awake, `\\wsl$\` session discovery, and PowerShell one-line installer `scripts/install.ps1`), alongside unified desktop Back/Forward navigation, clickable breadcrumbs, OS browser handoff, and reliable macOS menu-bar window reopening.

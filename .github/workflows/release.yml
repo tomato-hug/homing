@@ -130,6 +130,9 @@ jobs:
           distribution: temurin
           java-version: "17"
           cache: gradle
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0"
       - name: Build Android APK
         working-directory: android
         run: |
@@ -166,7 +169,7 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" artifacts/* --clobber
           else
-            gh release create "$TAG" artifacts/* --generate-notes --title "Homing $TAG"
+            gh release create "$TAG" artifacts/* --generate-notes --title "Homing $TAG" --latest
           fi
 
   docker:

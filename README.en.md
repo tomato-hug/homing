@@ -2,47 +2,73 @@
 
 [简体中文](README.md) | English
 
+[![CI](https://github.com/tomato-hug/homing/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tomato-hug/homing/actions/workflows/ci.yml)
+[![Mac native](https://github.com/tomato-hug/homing/actions/workflows/macos.yml/badge.svg?branch=main)](https://github.com/tomato-hug/homing/actions/workflows/macos.yml)
+[![Windows native](https://github.com/tomato-hug/homing/actions/workflows/windows.yml/badge.svg?branch=main)](https://github.com/tomato-hug/homing/actions/workflows/windows.yml)
+[![Release](https://img.shields.io/github/v/release/tomato-hug/homing?include_prereleases&label=Release&color=0D9488)](https://github.com/tomato-hug/homing/releases/latest)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-0D9488.svg)](LICENSE)
-[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8.svg)](go.mod)
-[![Android](https://img.shields.io/badge/Android-8.0%2B%20(Compose)-3DDC84.svg)](android/)
 [![E2E Encrypted](https://img.shields.io/badge/E2E-X25519%20%2B%20XChaCha20--Poly1305-6366F1.svg)](docs/protocol.md)
-[![Agents](https://img.shields.io/badge/Agents-27%2B%20Supported-F59E0B.svg)](docs/adapters.md)
-[![QQ Group](https://img.shields.io/badge/QQ_Group-512365124-12B7F5.svg)](#community--feedback)
+[![Agents](https://img.shields.io/badge/Agents-6%20Deep%20%2B%2021%2B%20Catalog-F59E0B.svg)](#supported-agents-tiered-compatibility)
+[![Discussions](https://img.shields.io/github/discussions/tomato-hug/homing?color=6366F1)](https://github.com/tomato-hug/homing/discussions)
 
 **Every coding agent, one pocket workspace — zero VPN on your phone, zero plaintext on the relay.**
 
-**Homing** is an open-source, self-hostable **multi-agent away-from-desk command center**. When you run **Claude Code, Codex, WorkBuddy, Cursor, Gemini CLI, OpenCode**, and other AI coding agents across your Mac, Linux workstation, or remote devbox, Homing lets you step away from your computer and seamlessly read live transcripts, approve or deny tool calls, send replies, remotely wake closed desktop agents, and run multi-agent meeting rooms from a single Android app—protected end-to-end by `X25519 + XChaCha20-Poly1305` encryption.
+**Homing** is an open-source, self-hostable **multi-agent away-from-desk command center**. When you run **Claude Code, Codex, WorkBuddy, Kimi CLI, OpenCode, ZCode**, and other CLI/ACP coding agents across your Mac, Windows workstation, or remote Linux devbox, Homing lets you step away from your desk and review live transcripts, approve or deny tool calls, send replies, wake sleeping agents remotely, and orchestrate multi-agent rooms from a single Android app—protected end-to-end by `X25519 + XChaCha20-Poly1305` encryption with zero VPN required on your phone.
 
-> Homing is currently in public **Beta**. See the [Beta Guide](docs/beta-release.md) for package types, signing channels, and verified scope.
+> **Public Beta**: Prebuilt installers for **macOS, Windows, Linux**, and a prebuilt **Android APK** (`homing-android.apk`) are ready on [GitHub Releases](https://github.com/tomato-hug/homing/releases/latest)—no compiler toolchain required. **iOS / iPhone** support via an E2E-encrypted Safari PWA (`/app`) is planned next. See the [Beta Guide](docs/beta-release.md) for package signing details.
 
 ---
 
-## Why Homing When Official Mobile Apps Already Exist?
+## Product Showcase
 
-Individual coding agents increasingly ship mobile companions, yet real-world workflows break down as soon as you combine **multiple agents** or **split-horizon / proxy-restricted networks**:
+<table>
+  <tr>
+    <th align="center">📱 Mobile · Conversation-First Left Drawer & Pinned Approvals</th>
+    <th align="center">📱 Mobile · Live Markdown, Diffs & Context Gauge</th>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/assets/screenshots/mobile-drawer.png" width="270" alt="Homing mobile workspace left drawer"></td>
+    <td align="center"><img src="docs/assets/screenshots/mobile-session.png" width="270" alt="Homing mobile conversation timeline"></td>
+  </tr>
+</table>
 
-| Away-From-Desk Pain Point | Separate Vendor Mobile Apps | Raw SSH / Termux | **Homing (Open Source)** |
+<table>
+  <tr>
+    <th align="center">🖥️ Desktop · Away-Guardian Hub (Agents, QR Pair & Keep-Awake)</th>
+    <th align="center">🌐 Desktop · Split-Horizon Relay & LAN Console</th>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/assets/screenshots/desktop-guardian.png" width="420" alt="Homing desktop Away Guardian Hub"></td>
+    <td align="center"><img src="docs/assets/screenshots/desktop-relay-split.png" width="420" alt="Homing desktop Relay and LAN configuration"></td>
+  </tr>
+</table>
+
+---
+
+## Why Homing When Vendor Mobile Companions Already Exist?
+
+First-party mobile companions work well if you only ever run a single coding agent without split-tunnel networking. Homing targets the exact intersection where those workflows break down—**running multiple agents in parallel** and **split-horizon proxy networks**:
+
+| Away-From-Desk Pain Point | Vendor Mobile Companions | Raw SSH / Termux | **Homing (Open Source)** |
 | :--- | :--- | :--- | :--- |
-| **Running 3+ Agents at Once** | Constant app-switching between Claude, Codex, Cursor, etc. | Juggling multiple `tmux` panes on a tiny keyboard | **One Conversation-First Left Drawer** unifying 27+ agents with pinned cross-agent approvals |
-| **Proxy Workstations × Regional Networks (e.g. Mainland China)** | Requires **24/7 VPN/proxy on your phone** as well—draining battery and hurting local apps | Exposing SSH ports or suffering frequent cellular drops | **Split-Horizon Dual-Plane Routing**: workstation agents keep their proxy for overseas LLMs; Homing bypasses `HTTP_PROXY` & TUN Fake-IP to dial a **domestic blind relay** directly—**zero VPN on your phone** |
-| **Closed Desktop Agents** | Unreachable if you forgot to launch the app before leaving | Manual CLI launch commands | **1-Tap Remote Wake** (`open -g -a` background macOS launch, service start, or CLI activation) |
-| **Privacy & Data Sovereignty** | Prompts & code hosted on third-party clouds | Manual tunnel management | **Zero-Knowledge Blind Relay** (`X25519 + XChaCha20-Poly1305`), self-hosted on any 1-vCPU VM with zero plaintext |
-| **Mobile Session Clutter** | Endless historical logs mixed with live tasks | Raw scrolling terminal buffers | **Background Keep-Alive while open · Auto-Clean on close** (retaining running/urgent tasks) + **Restore latest 10 items** on demand |
+| **3+ Agents Running Together** | Constant switching across Claude, Codex, and vendor apps | Juggling `tmux` panes on a phone keyboard | **One Conversation-First Left Drawer**: deep session control for 6 core agents + unified cross-agent pinned approval bar |
+| **Proxy Workstation × Regional 5G** | Requires **24/7 VPN/proxy on your phone too**, draining battery & breaking local apps | Exposing SSH ports; cellular drops break state | **Split-Horizon Dual-Plane Routing**: workstation agents keep their proxy for overseas LLMs; Homing bypasses `HTTP_PROXY` & TUN Fake-IP to dial a **domestic blind relay** directly (**zero VPN on phone**) |
+| **Closed Desktop Agents** | Unreachable if you forgot to open it before leaving | Manual CLI startup scripts | **1-Tap Remote Wake** (`open -g -a` background macOS launch, local server start, or CLI activation) |
+| **Privacy & Sovereignty** | Conversations stored on vendor clouds | Depends on custom tunnel setup | **Zero-Knowledge Blind Relay** (`X25519 + XChaCha20-Poly1305`), self-hostable on any 1-vCPU VM with zero plaintext |
+| **Mobile Notification Clutter** | Endless history mixed with active tasks | Unstructured raw terminal logs | **Background Keep-Alive while open · Auto-Clean on close** (retaining running/urgent tasks) + **Restore latest 10 items** on demand |
 
 ---
 
-## 6 Core Highlights
+## Core Architecture Highlights
 
-### 1. Split-Horizon Dual-Plane Architecture (Manage Proxy-Equipped Workstations via a Domestic Relay)
+### 1. Split-Horizon Dual-Plane Routing (Proxy Workstations + Zero-VPN Phone)
 
-Developers in Mainland China (and corporate split-tunnel environments) frequently run local proxies (`Clash`, `Mihomo`, `Surge`, `Sing-box`, `HTTP_PROXY`) on their workstations so overseas coding agents can reach Anthropic, OpenAI, and Google APIs. Conventional remote tools inherit those proxy settings—causing U-turn hairpin routing overseas or forcing the mobile phone to run a VPN as well.
-
-Homing decouples the **Model Plane** from the **Control & Relay Plane**:
+Workstations behind local proxies (`Clash`, `Mihomo`, `Surge`, `Sing-box`, `HTTP_PROXY`) need proxy routing for overseas LLM APIs, while mobile users want direct low-latency domestic 5G without running a phone VPN:
 
 ```text
                         [Model Plane · Keeps Workstation Proxy]
                    ┌──────────────────────────────────────────────┐
-                   │ Mac / Linux / Remote Devbox (Behind Proxy)   │
+                   │ Mac / Windows / Linux (Behind Proxy / TUN)   │
                    │   ├─ Claude Code / Codex / Gemini CLI ───────┼──► Local Proxy / TUN ──► Overseas LLM APIs
                    │   ├─ WorkBuddy / OpenCode / DSH / Qwen ──────┼──► Domestic / Custom LLM APIs
                    │   │                                          │
@@ -53,89 +79,86 @@ Homing decouples the **Model Plane** from the **Control & Relay Plane**:
                                           │ 3. Outbound-only E2E encrypted WSS (zero inbound ports on workstation)
                                           ▼
                            ┌──────────────────────────────┐
-                           │ Mainland China / Regional VM │  ◄── Self-host homing-server on a 1C1G VM
-                           │  (Zero-Knowledge Blind Relay)│      Forwards ciphertext envelopes only
+                           │ Domestic / Self-Hosted Relay │  ◄── Trial node or 1-vCPU homing-server
+                           │ (Zero-Knowledge Blind Relay) │      Forwards ciphertext envelopes only
                            └──────────────┬───────────────┘
-                                          │ Low-latency domestic WSS (~20–40 ms)
+                                          │ Low-latency direct WSS (~20–40 ms)
                                           ▼
                            ┌──────────────────────────────┐
                            │     Android Mobile Client    │  ◄── Native 5G / Wi-Fi direct connection
-                           │   (Zero VPN · Zero Proxy)    │      Instant cellular handoff & resync
+                           │   (Zero VPN · Zero Proxy)    │      Instant handoff & 1-RTT catch-up
                            └──────────────────────────────┘
 ```
 
-- **Zero Interference with Agent Proxies**: `homing` isolates `HTTP_PROXY` / `HTTPS_PROXY` by default (`direct_dial: true`) so your coding agents keep full overseas connectivity while relay traffic stays on low-latency domestic links.
-- **Automatic TUN Fake-IP Penetration**: Even when Clash / Surge / Sing-box runs in **TUN + Fake-IP (`198.18.0.0/15` / `fc00::/18`)** mode, Homing detects Fake-IP responses and queries public DNS directly to dial the real relay IP while preserving full TLS SNI verification—plus 1-click Clash / Mihomo / Surge `DIRECT` rule export in the Console.
-- **Reversible for Overseas Relays**: Hosting `homing-server` overseas instead? Flip **Route via System Proxy** (`use_system_proxy: true`) in one click in the Console.
-- Deep-dive guide: **[Mainland China Public Relay & Proxy Workstation Guide](docs/china-relay-and-proxy.md)**.
+- **Zero Interference**: `direct_dial: true` isolates `HTTP_PROXY` / `HTTPS_PROXY` by default; TUN Fake-IP (`198.18.0.0/15`, `fc00::/18`) responses are transparently bypassed via direct DNS while preserving full TLS SNI checks.
+- **Reversible**: Hosting your relay overseas instead? Toggle **Route via System Proxy** in one click. Full guide: **[Split-Horizon & Proxy Guide](docs/china-relay-and-proxy.md)**.
 
-### 2. Conversation-First Mobile Workspace & 1-Tap Remote Agent Wake
+### 2. Zero-Knowledge E2E Encryption & Cross-Agent Orchestration
 
-- **Boot Straight Into Your Active Thread**: Inspired by Claude and Codex mobile ergonomics, Homing opens directly into the conversation with a gesture-safe Left Drawer (respecting 24dp Android edge-back zones and yielding to horizontal code/table scrolling).
-- **Active-Only Agent Filtering + Remote Wake**: The drawer's horizontal capsules show **only agents actively open/running on your computer** (probed via a 3s cached single-snapshot process check). Tap **`Wake Agent`** (`POST /api/agents/{id}/wake`) to launch closed macOS desktop apps (`WorkBuddy`, `Cursor`, `Windsurf`, `Trae`, `Zed`) in the background without stealing focus (`open -g -a`), start local agent servers (`OpenCode`), or bring CLI agents online.
-- **Pinned Cross-Agent Emergencies**: Pending tool approvals and input requests pin to the top of the drawer with inline **Allow / Deny** buttons and a live **`Urgent ›` jump pill** in the conversation header.
-
-### 3. End-to-End Encrypted Zero-Knowledge Blind Relay
-
-- **Cryptographic Envelope**: Every host and phone generates its own `Ed25519` signing identity and `X25519` key-agreement pair; all RPC calls, streaming items, notifications, and file/image attachments are sealed end-to-end with **`XChaCha20-Poly1305`**.
-- **4-Word SAS Verification**: QR and 6-digit pairing codes display deterministic 4-word Short Authentication Strings on both screens to defeat MITM attacks.
-- **Tiny Footprint**: `homing-server` stores only public keys, pairing links, and bounded ciphertext queues (500 envelopes / 7 days). A minimal 1-vCPU / 1 GB RAM instance effortlessly serves all your devices.
-
-### 4. Purpose-Built Away Lifecycle: Keep-Alive, Clean-on-Close & 0-RTT Open
-
-- **Mac Away-Guardian Console**: Streamlined 3-card dashboard covering live Agent probes, Relay RTT & Split-Horizon status, and Paired Phones + a built-in **Prevent Mac Idle Sleep (`caffeinate`)** switch.
-- **Background Keep-Alive While Open · Clean Slate When Closed**: Locking your screen or switching apps keeps the Android foreground service connected in real time. Swiping Homing closed resets the mobile view on next launch (**automatically preserving sessions currently running or awaiting approval on your computer**).
-- **Dual Quick-Clear & Restore Latest 10 Records**: One-tap cleanup buttons (with 5-second Undo) in both the drawer and conversation header keep your phone clutter-free without touching desktop files; use **Restore History** anytime to re-attach specific sessions with their **latest 10 conversation records**.
-- **0-RTT Notification Previews & 1-RTT Bootstrap**: Encrypted push envelopes carry an inline markdown snippet so tapping a notification renders the reply in **0 ms** before any network round-trip; startup sync consolidates 9 endpoints into one `GET /api/mobile/bootstrap` call.
-
-### 5. Cross-Agent Orchestration (`@agent` Dispatch & Multi-Agent Rooms)
-
-- **Inline `@agent` Subtasks**: Mention another agent right inside an active thread (e.g. `@codex review the race condition in connector.go`) to spawn an isolated Git-worktree subtask and forward conclusions back to the parent session.
-- **Multi-Agent Rooms**: Bring multiple agents into a structured discussion room with speaker call-outs, pause/resume controls, automated meeting minutes, and confirmed action-item dispatch.
-
-### 6. Single Go Binary Across macOS, Windows, Linux, WSL2 & Docker
-
-- Both `homing` (native macOS menu-bar `.app` + **Windows 10/11 system-tray `Homing.exe`** + daemon + embedded bilingual TypeScript console) and `homing-server` compile into self-contained Go binaries with zero Node.js or Python runtime dependencies—equally at home on a MacBook, a Windows workstation (with native `\\wsl$\` session discovery & `SetThreadExecutionState` Keep-Awake), a headless Linux GPU server behind NAT, or Docker.
+- **End-to-End Sealed**: Local `Ed25519` + `X25519` + `XChaCha20-Poly1305` envelopes cover RPCs, transcripts, tool approvals, and attachments, verified by **4-word SAS** during QR pairing.
+- **0-RTT Previews & 1-RTT Bootstrap**: Push envelopes inline the latest reply snippet so notifications render in **0 ms** on opening; reconnect sync collapses 9 calls into one encrypted `GET /api/mobile/bootstrap`.
+- **Cross-Agent `@agent` Dispatch & Rooms**: Mention `@codex` inside a Claude thread to spawn an isolated Git-worktree subtask and return results, or coordinate multiple agents inside structured Rooms.
 
 ---
 
-## Supported Agents (27+)
+## Supported Agents (Tiered Compatibility)
 
-| Tier | Agents | Capabilities |
-| :--- | :--- | :--- |
-| **Core Deep Integrations** | **Claude Code**, **Codex**, **WorkBuddy**, **Kimi CLI**, **OpenCode**, **ZCode** | Continuous transcript streaming, lifecycle/permission hooks, mobile reply injection, model & reasoning-effort switching, remote wake, start/stop sessions |
-| **ACP Drivers & Built-in Catalog** | **Cursor**, **Windsurf**, **Trae**, **Antigravity**, **Gemini CLI**, **Qwen Code**, **GitHub Copilot CLI**, **DSH**, **CodeBuddy**, **Zed**, **Kiro**, **Cline**, **Roo Code**, **Goose**, **OpenHands**, **OpenClaw**, **Aider**, **Amp**, **Kilo Code**, **Junie**, **Warp**, **Droid**, and custom YAML/script adapters | Auto-detection, official vector brand icons, ACP session driving & `@agent` dispatch, extensible via `~/.homing/agents/*.yaml` |
+We separate **full deep session control** from **ACP/catalog detection** so expectations stay clear:
+
+| Tier & Agents | Exact Capabilities & Scope |
+| :--- | :--- |
+| **Tier 1 · Core Deep Integrations (6 Primary Agents)**<br>**Claude Code** · **Codex** · **WorkBuddy** · **Kimi CLI** · **OpenCode** · **ZCode** | Continuous transcript streaming, lifecycle/permission hooks, mobile reply injection (with queue/cancel where supported), model & effort switching, start/stop sessions, and remote wake. |
+| **Tier 2 · ACP Drivers & Remote Wake**<br>**Gemini CLI** · **Qwen Code** · **GitHub Copilot CLI** · **DSH** · **CodeBuddy** · **Cursor** · **Windsurf** · **Trae** · **Antigravity** · **Zed** · **OpenClaw**, etc. | Process/install detection, **1-tap Remote Wake** (`open -g -a` / daemon start), and **ACP-driven `@agent` subtasks**. Note: closed IDE editors without external reply APIs do not support injecting replies back into existing in-IDE chat tabs. |
+| **Tier 3 · Extensible Catalog Metadata (27+ Built-in + Custom)**<br>**Kiro** · **Cline** · **Roo Code** · **Goose** · **OpenHands** · **Aider** · **Amp** · **Kilo Code** · **Junie** · **Warp** · **Droid** + `~/.homing/agents/*.yaml` | Brand vector icons, local install discovery, and custom YAML/script adapters for any homegrown CLI (see [Adapter Spec](docs/adapters.md)). |
 
 ---
 
-## 5-Minute Quick Start
+## 3-Minute Quick Start (Prebuilt Binaries First)
 
-### 1. Start `homing` on Your Workstation (macOS / Windows / Linux)
+No Go, Node.js, or Android SDK required—grab prebuilt binaries directly from **[GitHub Latest Release](https://github.com/tomato-hug/homing/releases/latest)**.
 
-Requires **Go 1.26+** and at least one locally installed coding agent (prebuilt Web Console assets are already embedded):
+### 1. Install `homing` on Your Workstation
+
+| Platform | Prebuilt Install (Zero Compile) |
+| :--- | :--- |
+| **macOS 13+** (Apple Silicon / Intel) | Download `Homing-*-macos-arm64.app.zip` or `macos-amd64.app.zip` from [Latest Release](https://github.com/tomato-hug/homing/releases/latest) (menu-bar tray + `caffeinate` Keep-Awake), or install CLI:<br>`curl -fsSL https://raw.githubusercontent.com/tomato-hug/homing/main/scripts/install.sh \| sh` |
+| **Windows 10 / 11** (x64 / ARM64) | Download `Homing-*-windows-amd64.zip` (native system-tray `Homing.exe` + `\\wsl$\` WSL2 discovery + `Install-Homing.ps1`), or run in PowerShell:<br>`irm https://raw.githubusercontent.com/tomato-hug/homing/main/scripts/install.ps1 \| iex` |
+| **Linux / WSL2 / Headless** | Install SHA-256 verified binary & start daemon:<br>`curl -fsSL https://raw.githubusercontent.com/tomato-hug/homing/main/scripts/install.sh \| sh && homing serve --addr 127.0.0.1:18787` |
+
+<details>
+<summary>Build Desktop/Daemon from Source (Requires Go 1.26+)</summary>
 
 ```sh
 git clone https://github.com/tomato-hug/homing.git
 cd homing
 
-# macOS Desktop app (menu-bar tray + management window):
-go build -o homing ./cmd/homing
-./homing
+# macOS Desktop app:
+go build -o homing ./cmd/homing && ./homing
 
-# Windows 10/11 (PowerShell one-liner or local native bundle):
-#   irm https://raw.githubusercontent.com/tomato-hug/homing/main/scripts/install.ps1 | iex
-python3 scripts/package-windows.py --version 0.11.6 --arch amd64 --commit $(git rev-parse HEAD) --output dist/win
-
-# Linux / WSL2 / Remote headless devbox:
+# Linux / WSL2 / headless devbox:
 CGO_ENABLED=0 go build -tags headless -trimpath -ldflags="-s -w" -o homing ./cmd/homing
 ./homing serve --addr 127.0.0.1:18787
 ```
 
-Open `http://127.0.0.1:18787/console` to inspect your detected agents and Away-Guardian status.
+</details>
 
-### 2. Deploy the Self-Hosted Blind Relay (`homing-server`)
+Open `http://127.0.0.1:18787/console` (opened automatically by the desktop app) to reach the **Away-Guardian Hub**.
 
-On the same Wi-Fi network, you can pair directly over LAN (`--addr 0.0.0.0:18787`). For cellular access from anywhere, deploy `homing-server` behind HTTPS/WSS (Caddy or Nginx):
+---
+
+### 2. Choose Your Relay: Instant Public Beta Node OR Unlimited Self-Host
+
+On the same Wi-Fi LAN, scan the QR code directly—no relay needed. For cellular 5G access away from your desk:
+
+#### Option A: Official Public Beta Trial Relay (`https://homing.douqu.online/account`)
+1. Sign in via GitHub at **[https://homing.douqu.online/account](https://homing.douqu.online/account)** and generate a computer relay key (`hrk_...`).
+2. Paste `wss://homing.douqu.online/v1/ws` + your `hrk_...` key under **Relay & LAN** in the Desktop Console and click **Save & Reconnect** (leave **Direct Dial** enabled on proxy-equipped workstations).
+
+> **Public Trial Relay Transparency & Free Quota**:
+> - **Fair-Use Quota**: Free accounts include **20 hours/week (`1,200` active phone interaction minutes)**, resetting Mondays `00:00 UTC+8`; **desktop standby, keep-alive, and push notifications never consume weekly minutes** (64 MB/day data cap, 2 hosts / 4 phones).
+> - **Beta Trial Notice**: `homing.douqu.online` runs on a community-funded Beta trial server. For long-term production use—or **100% registration-free, unlimited** usage—self-host your own 1-vCPU relay below (switching endpoints in the Console takes 10 seconds).
+
+#### Option B: Self-Host `homing-server` on Any 1-vCPU VM (`AUTH_MODE=open`, Unlimited)
 
 ```sh
 docker build -f server/Dockerfile -t homing-server .
@@ -143,9 +166,21 @@ docker run -d --name homing-server --restart unless-stopped \
   -p 127.0.0.1:8080:8080 -v homing-data:/data homing-server
 ```
 
-Point Caddy at `127.0.0.1:8080` (`wss://homing.example.com/v1/ws`), then paste that URL into the Console under **Relay & LAN**. Keep **Direct Dial (Bypass Local Proxy)** enabled if your workstation runs a proxy for overseas LLMs while your relay is domestic.
+Or download `homing-server_linux_amd64` from [Latest Release](https://github.com/tomato-hug/homing/releases/latest) and front it with Caddy or `deploy/nginx-relay-location.conf`. See **[Self-Hosting & TLS Guide](docs/self-host.md)**.
 
-### 3. Install the Android App & Pair
+---
+
+### 3. Install Prebuilt Android APK & Pair
+
+- **Direct APK Download (Android 8.0+, no Play Store / no Gradle build required)**:
+  - APK: **[homing-android.apk](https://github.com/tomato-hug/homing/releases/latest/download/homing-android.apk)**
+  - Checksums: [checksums.txt](https://github.com/tomato-hug/homing/releases/latest/download/checksums.txt)
+
+1. Install the APK, grant notification permission (built-in Battery Optimization guide covers ColorOS, HyperOS, OriginOS, HarmonyOS, One UI, and stock Android).
+2. Scan the QR code in the Console, verify the matching **4 SAS words** on both screens, confirm, and switch your phone to 5G cellular to test!
+
+<details>
+<summary>Build Android Debug APK from Source (Requires Android SDK & JDK 17)</summary>
 
 ```sh
 cd android
@@ -153,38 +188,50 @@ cd android
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Scan the pairing QR code from the Console (or run `./homing pair --serve http://127.0.0.1:18787`), verify the **4 SAS words** match on both devices, confirm on your computer, and switch your phone to cellular data to verify!
+</details>
 
 ---
 
-## Documentation & Governance
+## Platform Matrix & Roadmap
+
+| Platform | Status | Delivery |
+| :--- | :---: | :--- |
+| **macOS 13+** (Apple Silicon / Intel) | ✅ Ready | Native menu-bar `.app.zip` + `caffeinate` Keep-Awake + CLI |
+| **Windows 10 / 11** (x64 / ARM64) | ✅ Ready | Native system-tray `Homing.exe` + `\\wsl$\` WSL2 session discovery + `install.ps1` |
+| **Linux / WSL2 / Docker** | ✅ Ready | Headless single-binary `homing serve` + `homing tui` + multi-arch Docker |
+| **Android 8.0+** (Jetpack Compose) | ✅ Ready | Direct `homing-android.apk` sideload + OEM keep-alive wizard |
+| **iOS / iPhone** | 🚧 **Next Up** | **E2E-Encrypted Safari PWA (`/app`)** hosted by `homing-server`, reusing `@homing/protocol-js`—zero App Store gatekeeping, zero VPN on cellular |
+
+---
+
+## Documentation & Architecture
 
 - **[Mainland China Public Relay & Proxy Workstation Guide (Split-Horizon Routing)](docs/china-relay-and-proxy.md)**
-- **[Self-Hosting Relay, TLS, FCM Push & Public Smoke Test](docs/self-host.md)**
-- **[macOS Native Menu-Bar App Guide](docs/macos-native.md)**
-- **[Protocol v1 Specification](docs/protocol.md)** · **[Go Architecture](docs/go-architecture.md)** · **[Custom Agent Adapters](docs/adapters.md)**
-- **[Beta Installation & Known Limits](docs/beta-release.md)** · **[Contributing](CONTRIBUTING.md)** · **[Security Policy](SECURITY.md)** · **[Changelog](CHANGELOG.md)**
+- **[Self-Hosting Relay, TLS, FCM Push & Smoke Test](docs/self-host.md)**
+- **[macOS Native Menu-Bar Guide](docs/macos-native.md)** · **[Protocol v1 Spec](docs/protocol.md)** · **[Go Architecture](docs/go-architecture.md)** · **[Custom Agent Adapters](docs/adapters.md)**
+- **[Beta Guide](docs/beta-release.md)** · **[Contributing](CONTRIBUTING.md)** · **[Security Policy](SECURITY.md)** · **[Changelog](CHANGELOG.md)**
 
 ---
 
 ## 💬 Community & Feedback
 
-- **QQ Discussion & Feedback Group**: **`512365124`** (setup troubleshooting, Mainland China relay & split-horizon proxy help, new Agent adapter requests, and bug reports)
-- **GitHub Issues**: [Submit bug reports & feature requests](https://github.com/tomato-hug/homing/issues)
+- **GitHub Discussions**: [Ask questions, share setups & request Agent adapters](https://github.com/tomato-hug/homing/discussions)
+- **GitHub Issues**: [Submit reproducible bug reports & feature requests](https://github.com/tomato-hug/homing/issues)
+- **QQ Group**: **`512365124`** (setup troubleshooting & Mainland China relay / split-horizon discussions)
 
 ---
 
 ## ☕ Support & Sponsor
 
-Homing is **Apache-2.0 open source, ad-free, and zero-knowledge E2E encrypted**. Self-hosting (`AUTH_MODE=open`) requires zero registration; for the official public relay (`AUTH_MODE=managed`), voluntary tips directly help cover server and Mainland BGP bandwidth costs. Backers are credited in [SPONSORS.md](SPONSORS.md) (anonymous optional) and eligible for official relay **Sponsor** quota codes.
+Homing is **Apache-2.0 open source, ad-free, and zero-knowledge E2E encrypted**. Self-hosting (`AUTH_MODE=open`) requires zero registration; voluntary tips help cover public trial relay bandwidth and hosting costs. Supporters can be credited in [SPONSORS.md](SPONSORS.md) (anonymous optional) and receive official relay **Sponsor** quota codes.
 
 <details>
-<summary><b>👉 Expand WeChat Reward / Alipay Tip QR Codes</b></summary>
+<summary><b>👉 Expand WeChat Pay / Alipay QR Codes</b></summary>
 <br>
 
-| WeChat Reward | Alipay Tip |
+| WeChat Pay | Alipay |
 | :---: | :---: |
-| <img src="docs/assets/sponsor/wechat-reward.png" width="220" alt="WeChat Reward QR"> | <img src="docs/assets/sponsor/alipay-reward.png" width="220" alt="Alipay Tip QR"> |
+| <img src="docs/assets/sponsor/wechat-reward.png" width="220" alt="WeChat Pay QR"> | <img src="docs/assets/sponsor/alipay-reward.png" width="220" alt="Alipay QR"> |
 
 </details>
 
