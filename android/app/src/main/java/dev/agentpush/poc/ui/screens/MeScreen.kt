@@ -31,6 +31,7 @@ import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Computer
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -126,7 +127,9 @@ fun MeScreen(
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(top = 12.dp, bottom = 12.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp, bottom = 12.dp),
         ) {
             if (onBack != null) {
                 IconButton(onClick = onBack, modifier = Modifier.padding(end = 4.dp)) {
@@ -135,9 +138,22 @@ fun MeScreen(
             }
             Text(
                 text = strings.meTitle,
+                modifier = Modifier.weight(1f),
                 style = MaterialTheme.typography.displaySmall.copy(fontSize = 28.sp),
                 color = HomingPalette.Text,
             )
+            OutlinedButton(
+                onClick = onAddComputer,
+                shape = RoundedCornerShape(10.dp),
+            ) {
+                Icon(
+                    Icons.Outlined.QrCodeScanner,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                )
+                Spacer(Modifier.width(5.dp))
+                Text("扫码配对")
+            }
         }
         MacConnectionCard(
             server = if (state.transportKind == TransportKind.CLOUD) {
@@ -153,6 +169,7 @@ fun MeScreen(
             reason = state.connectionDiagnostics.lastDisconnectReason,
             onReconnect = viewModel::reconnect,
             onOpenSettings = onOpenSettings,
+            onAddComputer = onAddComputer,
         )
         Spacer(Modifier.height(18.dp))
         SectionTitle(strings.myComputers)
@@ -327,7 +344,11 @@ private fun MacConnectionCard(
     reason: String?,
     onReconnect: () -> Unit,
     onOpenSettings: () -> Unit,
+    onAddComputer: () -> Unit,
 ) {
+    val needsAuth = reason?.let {
+        it.contains("中继账号") || it.contains("Relay Key") || it.contains("配对")
+    } == true && connection != ConnectionState.CONNECTED
     HomingCard {
         Column(modifier = Modifier.padding(15.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -378,23 +399,41 @@ private fun MacConnectionCard(
                     .padding(top = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(9.dp),
             ) {
-                Button(
-                    onClick = onReconnect,
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(48.dp),
-                    shape = RoundedCornerShape(10.dp),
-                ) {
-                    Text("重新连接")
+                if (needsAuth) {
+                    Button(
+                        onClick = onAddComputer,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp),
+                        shape = RoundedCornerShape(10.dp),
+                    ) {
+                        Icon(
+                            Icons.Outlined.QrCodeScanner,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(Modifier.width(5.dp))
+                        Text("扫码配对")
+                    }
+                } else {
+                    Button(
+                        onClick = onReconnect,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp),
+                        shape = RoundedCornerShape(10.dp),
+                    ) {
+                        Text("重新连接")
+                    }
                 }
                 OutlinedButton(
-                    onClick = onOpenSettings,
+                    onClick = if (needsAuth) onReconnect else onOpenSettings,
                     modifier = Modifier
                         .weight(1f)
                         .height(48.dp),
                     shape = RoundedCornerShape(10.dp),
                 ) {
-                    Text("重新配对")
+                    Text(if (needsAuth) "重试连接" else "重新配对")
                 }
             }
         }

@@ -150,7 +150,7 @@ export function createPairCard(options: PairCardOptions = {}): PairCard {
         "ol",
         { class: "hub-phone-steps" },
         h("li", null, h("b", { text: "用手机相机扫码" }), h("span", { text: "没装 App 就先下载安装（同一个 Wi‑Fi）" })),
-        h("li", null, h("b", { text: "点「打开 Homing 配对」" }), h("span", { text: "已装 App 也可以在「我的 › 添加电脑」里扫这个码" })),
+        h("li", null, h("b", { text: "点「打开 Homing 配对」" }), h("span", { text: "已装 App 也可以点左上角菜单 ›「电脑 / 扫码图标」或「设置 › 扫码配对」扫这个码" })),
         h("li", null, h("b", { text: "在这里核对四个词" }), h("span", { text: "一致就点接受，连接是端到端加密的" })),
       ),
       h(

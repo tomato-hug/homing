@@ -263,6 +263,7 @@ fun AgentApp(
                             viewModel = viewModel,
                             snackbarHostState = snackbarHostState,
                             onBack = { navController.popBackStack() },
+                            onAddComputer = { navController.navigate(ROUTE_ADD_COMPUTER) },
                         )
                     }
                 }

@@ -32,6 +32,7 @@ import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.ContentPaste
 import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -87,6 +88,7 @@ fun SettingsScreen(
     viewModel: AgentViewModel,
     snackbarHostState: SnackbarHostState,
     onBack: () -> Unit,
+    onAddComputer: (() -> Unit)? = null,
 ) {
     val strings = LocalHomingStrings.current
     val currentLanguage by LanguagePreferences.language.collectAsStateWithLifecycle()
@@ -169,6 +171,22 @@ fun SettingsScreen(
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    if (onAddComputer != null) {
+                        Spacer(Modifier.height(12.dp))
+                        Button(
+                            onClick = onAddComputer,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(13.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.QrCodeScanner,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(Modifier.width(7.dp))
+                            Text("扫码配对 / 添加电脑")
+                        }
+                    }
                     Spacer(Modifier.height(14.dp))
                     OutlinedTextField(
                         value = server,

@@ -72,6 +72,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -397,6 +398,8 @@ fun WorkspaceDrawerShell(
         )
         return
     }
+    val needsRelayAuth = state.connection != ConnectionState.CONNECTED &&
+        isRelayAuthReason(state.connectionDiagnostics.lastDisconnectReason)
 
     BoxWithConstraints(
         modifier = Modifier
@@ -663,16 +666,30 @@ fun WorkspaceDrawerShell(
                         onQuickClear = ::triggerHeaderQuickClear,
                     )
                 }
+                if (needsRelayAuth) {
+                    RelayAuthActionBanner(
+                        reason = state.connectionDiagnostics.lastDisconnectReason,
+                        onScanPair = onAddComputer,
+                        onRetry = viewModel::reconnect,
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .statusBarsPadding()
+                            .padding(top = 56.dp, start = 12.dp, end = 12.dp),
+                    )
+                }
             } else {
                 EmptyWorkspaceConversation(
                     state = state,
                     historicalCount = remember(rawSessions) { groupSessionsByProject(rawSessions).size },
                     inactiveWakeableCount = wakeCandidates.count { !it.activeOnline && it.canWake },
+                    needsRelayAuth = needsRelayAuth,
                     onOpenDrawer = ::openDrawer,
                     onNewSession = { onNewSession("") },
                     onToggleAway = { viewModel.toggleAwayMonitoring(!state.away) },
                     onOpenWakeSheet = { wakeSheetOpen = true },
                     onOpenRestoreSheet = { restoreSheetOpen = true },
+                    onScanPair = onAddComputer,
+                    onRetry = viewModel::reconnect,
                 )
             }
         }
@@ -736,6 +753,10 @@ fun WorkspaceDrawerShell(
                     onOpenMe = {
                         closeDrawer()
                         onOpenMe()
+                    },
+                    onAddComputer = {
+                        closeDrawer()
+                        onAddComputer()
                     },
                     onOpenSettings = {
                         closeDrawer()
@@ -802,6 +823,7 @@ private fun WorkspaceDrawerContent(
     onOpenRestoreSheet: () -> Unit,
     onOpenRooms: () -> Unit,
     onOpenMe: () -> Unit,
+    onAddComputer: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenBrowserHome: () -> Unit,
     strings: HomingStrings,
@@ -1369,16 +1391,21 @@ private fun WorkspaceDrawerContent(
                 }
             }
 
+            val drawerNeedsRelayAuth = state.connection != ConnectionState.CONNECTED &&
+                isRelayAuthReason(state.connectionDiagnostics.lastDisconnectReason)
             Surface(
                 onClick = onOpenMe,
                 color = HomingPalette.Card,
                 shape = RoundedCornerShape(10.dp),
-                border = BorderStroke(1.dp, HomingPalette.NavBorder),
+                border = BorderStroke(
+                    1.dp,
+                    if (drawerNeedsRelayAuth) HomingPalette.Warning.copy(alpha = 0.5f) else HomingPalette.NavBorder,
+                ),
             ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                        .padding(start = 10.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
@@ -1406,22 +1433,34 @@ private fun WorkspaceDrawerContent(
                             overflow = TextOverflow.Ellipsis,
                         )
                         Text(
-                            text = when (state.connection) {
-                                ConnectionState.CONNECTED ->
+                            text = when {
+                                state.connection == ConnectionState.CONNECTED ->
                                     if (state.transportKind == TransportKind.CLOUD) "云端加密后台保活中" else "局域网直连保活中"
-                                ConnectionState.RECONNECTING -> "正在重连电脑…"
-                                ConnectionState.DISCONNECTED -> "未连接 · 点此查看或重连"
+                                drawerNeedsRelayAuth -> "需要绑定中继账号 · 点右侧扫码"
+                                state.connection == ConnectionState.RECONNECTING -> "正在重连电脑…"
+                                else -> "未连接 · 点此查看或重连"
                             },
-                            style = TextStyle(fontSize = 11.sp, color = HomingPalette.Muted),
+                            style = TextStyle(
+                                fontSize = 11.sp,
+                                color = if (drawerNeedsRelayAuth) HomingPalette.Warning else HomingPalette.Muted,
+                            ),
                             maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                         )
                     }
-                    Icon(
-                        Icons.Outlined.Computer,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp),
-                        tint = HomingPalette.Muted,
-                    )
+                    IconButton(
+                        onClick = onAddComputer,
+                        modifier = Modifier
+                            .size(32.dp)
+                            .testTag("drawer-scan-pair"),
+                    ) {
+                        Icon(
+                            Icons.Outlined.QrCodeScanner,
+                            contentDescription = "扫码配对",
+                            modifier = Modifier.size(18.dp),
+                            tint = if (drawerNeedsRelayAuth) HomingPalette.Warning else HomingPalette.Brand,
+                        )
+                    }
                 }
             }
 
@@ -1964,11 +2003,14 @@ private fun EmptyWorkspaceConversation(
     state: AgentUiState,
     historicalCount: Int,
     inactiveWakeableCount: Int,
+    needsRelayAuth: Boolean,
     onOpenDrawer: () -> Unit,
     onNewSession: () -> Unit,
     onToggleAway: () -> Unit,
     onOpenWakeSheet: () -> Unit,
     onOpenRestoreSheet: () -> Unit,
+    onScanPair: () -> Unit,
+    onRetry: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -2056,6 +2098,14 @@ private fun EmptyWorkspaceConversation(
                     }
                 }
             }
+        }
+        if (needsRelayAuth) {
+            RelayAuthActionBanner(
+                reason = state.connectionDiagnostics.lastDisconnectReason,
+                onScanPair = onScanPair,
+                onRetry = onRetry,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+            )
         }
         Box(
             modifier = Modifier
@@ -2228,6 +2278,87 @@ private fun UnpairedWorkspaceWelcome(
             border = BorderStroke(1.dp, HomingPalette.NavBorder),
         ) {
             Text("手动填写连接地址", color = HomingPalette.Body)
+        }
+    }
+}
+
+internal fun isRelayAuthReason(reason: String?): Boolean {
+    if (reason.isNullOrBlank()) return false
+    return reason.contains("中继账号") || reason.contains("Relay Key") || reason.contains("配对")
+}
+
+@Composable
+private fun RelayAuthActionBanner(
+    reason: String?,
+    onScanPair: () -> Unit,
+    onRetry: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("relay-auth-banner"),
+        shape = RoundedCornerShape(12.dp),
+        color = HomingPalette.Card,
+        border = BorderStroke(1.dp, HomingPalette.Warning.copy(alpha = 0.55f)),
+        tonalElevation = 4.dp,
+        shadowElevation = 4.dp,
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Icon(
+                    Icons.Outlined.QrCodeScanner,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = HomingPalette.Warning,
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "需要绑定中继账号",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = HomingPalette.Text,
+                    )
+                    Text(
+                        text = reason?.takeIf { it.isNotBlank() }
+                            ?: "电脑端填写 Relay Key 后，点下方「扫码配对」扫一次电脑二维码即可连通",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = HomingPalette.Muted,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = onRetry) { Text("重试") }
+                Spacer(Modifier.width(6.dp))
+                Button(
+                    onClick = onScanPair,
+                    modifier = Modifier.testTag("banner-scan-pair"),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = HomingPalette.Brand,
+                        contentColor = HomingPalette.Background,
+                    ),
+                    shape = RoundedCornerShape(9.dp),
+                ) {
+                    Icon(
+                        Icons.Outlined.QrCodeScanner,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(Modifier.width(5.dp))
+                    Text("扫码配对", fontWeight = FontWeight.SemiBold)
+                }
+            }
         }
     }
 }
