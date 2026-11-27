@@ -86,6 +86,8 @@ func TestReplyResumesACPThroughSessionLoad(t *testing.T) {
 		sessionID = "demo-api-acp-session"
 		token     = "demo-token"
 	)
+	cwd := t.TempDir()
+	dir := t.TempDir()
 	if err := driver.ReplaceDynamicSpecs([]driver.Spec{{
 		ID: agentID, Label: "ACP API Test",
 		Command:  []string{os.Args[0], "-test.run=TestACPHelperProcess", "--"},
@@ -99,11 +101,21 @@ func TestReplyResumesACPThroughSessionLoad(t *testing.T) {
 		_ = driver.ReplaceDynamicSpecs(nil)
 	})
 
-	cwd := t.TempDir()
-	dir := t.TempDir()
-	events := `{"id":1,"ts":"2026-11-10T10:00:00.000Z","source":"` + agentID +
-		`","kind":"reply","session_id":"` + sessionID + `","cwd":"` + cwd +
-		`","title":"Demo ACP","text":"示例：上一回合","read":true}` + "\n"
+	eventRaw, err := json.Marshal(map[string]any{
+		"id":         1,
+		"ts":         "2026-11-10T10:00:00.000Z",
+		"source":     agentID,
+		"kind":       "reply",
+		"session_id": sessionID,
+		"cwd":        cwd,
+		"title":      "Demo ACP",
+		"text":       "示例：上一回合",
+		"read":       true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := string(eventRaw) + "\n"
 	for name, content := range map[string]string{
 		"events.jsonl":       events,
 		"session-state.json": `{"version":1,"sessions":{}}`,

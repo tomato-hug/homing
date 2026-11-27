@@ -305,6 +305,10 @@ func (c *Client) Close() {
 	}
 	if c.cmd.Process != nil {
 		_ = c.cmd.Process.Kill()
+		select {
+		case <-c.done:
+		case <-time.After(time.Second):
+		}
 	}
 }
 

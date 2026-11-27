@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -204,6 +205,9 @@ func sameDesktopDataDir(a, b string) bool {
 			return resolved
 		}
 		return filepath.Clean(p)
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(canonical(a), canonical(b))
 	}
 	return canonical(a) == canonical(b)
 }

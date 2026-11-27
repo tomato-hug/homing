@@ -37,6 +37,9 @@ func TestMacRuntimePathLaunchesAgentWithUserInstalledInterpreter(t *testing.T) {
 }
 
 func TestMacRuntimePathPreservesExplicitPrecedenceAndIsIdempotent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fixture")
+	}
 	userHome := t.TempDir()
 	dir := filepath.Join(userHome, ".local", "bin")
 	if err := os.MkdirAll(dir, 0700); err != nil {
@@ -56,6 +59,9 @@ func TestMacRuntimePathPreservesExplicitPrecedenceAndIsIdempotent(t *testing.T) 
 }
 
 func TestMacRuntimePathUsesNewestNVMVersionNumerically(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fixture")
+	}
 	userHome := t.TempDir()
 	for _, version := range []string{"v9.9.0", "v22.1.0", "v22.12.0"} {
 		dir := filepath.Join(userHome, ".nvm", "versions", "node", version, "bin")
@@ -71,6 +77,9 @@ func TestMacRuntimePathUsesNewestNVMVersionNumerically(t *testing.T) {
 }
 
 func TestMacRuntimePathDoesNotAddMissingOrRelativeDirectories(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fixture")
+	}
 	got := macRuntimePath("/usr/bin:/bin", "")
 	for _, part := range filepath.SplitList(got) {
 		if !filepath.IsAbs(part) {
@@ -81,5 +90,38 @@ func TestMacRuntimePathDoesNotAddMissingOrRelativeDirectories(t *testing.T) {
 	got = macRuntimePath("/usr/bin:/bin", userHome)
 	if strings.Contains(got, userHome) {
 		t.Fatalf("added non-existent installation directory: %q", got)
+	}
+}
+
+func TestAugmentedPATHDeduplicatesEntries(t *testing.T) {
+	sep := string(os.PathListSeparator)
+	first := filepath.Join(t.TempDir(), "first")
+	second := filepath.Join(t.TempDir(), "second")
+	dup := first + string(os.PathSeparator)
+	if runtime.GOOS == "windows" {
+		dup = strings.ToUpper(dup)
+	}
+	t.Setenv("PATH", strings.Join([]string{first, second, dup}, sep))
+
+	got := filepath.SplitList(AugmentedPATH())
+	if len(got) < 2 || got[0] != first || got[1] != second {
+		t.Fatalf("precedence lost: got %v (want %q, %q first)", got, first, second)
+	}
+	firstKey := filepath.Clean(first)
+	if runtime.GOOS == "windows" {
+		firstKey = strings.ToLower(firstKey)
+	}
+	count := 0
+	for _, entry := range got {
+		key := filepath.Clean(entry)
+		if runtime.GOOS == "windows" {
+			key = strings.ToLower(key)
+		}
+		if key == firstKey {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("entry %q appears %d times in %v", first, count, got)
 	}
 }

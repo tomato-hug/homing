@@ -85,10 +85,17 @@ func AugmentedPATH() string {
 	var parts []string
 	add := func(dir string) {
 		dir = strings.TrimSpace(dir)
-		if dir == "" || seen[dir] {
+		if dir == "" {
 			return
 		}
-		seen[dir] = true
+		key := filepath.Clean(dir)
+		if runtime.GOOS == "windows" {
+			key = strings.ToLower(key)
+		}
+		if seen[key] {
+			return
+		}
+		seen[key] = true
 		parts = append(parts, dir)
 	}
 	for _, p := range filepath.SplitList(current) {

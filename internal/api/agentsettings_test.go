@@ -13,9 +13,15 @@ import (
 	"github.com/tomato-hug/homing/internal/notify"
 )
 
+func setTestHome(t *testing.T, home string) {
+	t.Helper()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+}
+
 func TestAgentSettingsAndHooks(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	d := writeStore(t, "", `{"version":1,"sessions":{}}`)
 
 	settings := serveConsoleRequest(t, d, http.MethodGet, "http://127.0.0.1:18788/api/agents/settings", "")
@@ -92,7 +98,7 @@ func TestAgentSettingsAndHooks(t *testing.T) {
 }
 
 func TestAgentHooksRequireLoopback(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t, t.TempDir())
 	d := writeStore(t, "", `{"version":1,"sessions":{}}`)
 	req := consoleRequest(t, http.MethodPost, "http://127.0.0.1:18788/api/agents/claude/hooks", "")
 	req.RemoteAddr = "192.168.1.20:23456"
@@ -104,7 +110,7 @@ func TestAgentHooksRequireLoopback(t *testing.T) {
 }
 
 func TestAgentTestPushUsesRealDeliverySink(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t, t.TempDir())
 	d := writeStore(t, "", `{"version":1,"sessions":{}}`)
 	patched := serveConsoleRequest(t, d, http.MethodPatch, "http://127.0.0.1:18788/api/agents/codex/settings",
 		`{"push_to_phone":true}`)
@@ -135,7 +141,7 @@ func TestAgentTestPushUsesRealDeliverySink(t *testing.T) {
 }
 
 func TestAgentTestPushReportsMissingTransport(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t, t.TempDir())
 	d := writeStore(t, "", `{"version":1,"sessions":{}}`)
 	serveConsoleRequest(t, d, http.MethodPatch, "http://127.0.0.1:18788/api/agents/codex/settings",
 		`{"push_to_phone":true}`)

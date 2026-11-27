@@ -131,16 +131,10 @@ func TestDesktopRejectsAmbiguousRelativeServiceDirectory(t *testing.T) {
 }
 
 func TestOwnedDesktopAdvertisesAbsoluteDataDirectory(t *testing.T) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := t.TempDir()
-	relative, err := filepath.Rel(cwd, dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	local, err := startDesktopService(context.Background(), "127.0.0.1:0", relative, "demo", nil)
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "state")
+	t.Chdir(parent)
+	local, err := startDesktopService(context.Background(), "127.0.0.1:0", "state", "demo", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,6 +154,9 @@ func TestOwnedDesktopAdvertisesAbsoluteDataDirectory(t *testing.T) {
 	}
 	if !filepath.IsAbs(info.DataDir) {
 		t.Fatalf("service advertises relative directory %q", info.DataDir)
+	}
+	if !sameDesktopDataDir(info.DataDir, dir) {
+		t.Fatalf("service advertised %q, want %q", info.DataDir, dir)
 	}
 }
 
