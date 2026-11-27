@@ -139,6 +139,9 @@ def main():
         stage.mkdir(parents=True)
         ico_path = stage / "Homing.ico"
         try:
+            host_env = dict(os.environ)
+            host_env.pop("GOOS", None)
+            host_env.pop("GOARCH", None)
             # 1. Generate Windows .syso (embedded multi-size icon + High-DPI PerMonitorV2 manifest)
             run(
                 [
@@ -148,6 +151,7 @@ def main():
                     "-ico", str(ico_path),
                 ],
                 cwd=root,
+                env=host_env,
             )
 
             win_env = dict(os.environ)

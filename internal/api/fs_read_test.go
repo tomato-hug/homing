@@ -35,6 +35,7 @@ func TestFSReadServesProjectTextAndRejectsUnsafePaths(t *testing.T) {
 	}
 
 	deps := &Deps{DataDir: t.TempDir(), Version: "test"}
+	t.Cleanup(func() { _ = deps.Close() })
 	s, err := deps.Store()
 	if err != nil {
 		t.Fatal(err)

@@ -14,6 +14,7 @@ import (
 func TestAuditWritesIdentifiersButNotBody(t *testing.T) {
 	dir := t.TempDir()
 	deps := &Deps{DataDir: dir}
+	t.Cleanup(func() { _ = deps.Close() })
 	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/compose", strings.NewReader("secret body"))
 	request.Header.Set("Authorization", "Bearer local-test-token")
 	request.RemoteAddr = "192.0.2.10:5000"
@@ -51,6 +52,7 @@ func TestAuditWritesIdentifiersButNotBody(t *testing.T) {
 
 func TestCheckRateLimitsPerAction(t *testing.T) {
 	deps := &Deps{DataDir: t.TempDir()}
+	t.Cleanup(func() { _ = deps.Close() })
 	makeRequest := func() *http.Request {
 		request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/compose", nil)
 		request.Header.Set("Authorization", "Bearer hm_rate-demo-device-token")

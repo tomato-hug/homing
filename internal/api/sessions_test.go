@@ -29,7 +29,9 @@ func writeStore(t *testing.T, events, state string) *Deps {
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"token":"demo-token"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return &Deps{DataDir: dir}
+	d := &Deps{DataDir: dir}
+	t.Cleanup(func() { _ = d.Close() })
+	return d
 }
 
 const demoEvents = `{"id":1,"ts":"2026-01-01T10:00:00.000Z","source":"codex","kind":"reply","session_id":"demo-session-1","cwd":"/tmp/demo-project","project":"demo-project","title":"Codex 回复","text":"第一行\n第二行","read":false}

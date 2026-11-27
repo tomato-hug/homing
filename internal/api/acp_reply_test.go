@@ -117,6 +117,7 @@ func TestReplyResumesACPThroughSessionLoad(t *testing.T) {
 		DataDir: dir,
 		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
+	t.Cleanup(func() { _ = deps.Close() })
 	server := httptest.NewServer(NewMux(deps))
 	t.Cleanup(server.Close)
 

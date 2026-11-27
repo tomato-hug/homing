@@ -66,6 +66,7 @@ func TestAgentProcessParserAndWakeRoutes(t *testing.T) {
 
 	// 3. HTTP route scope & whitelist checks
 	deps := &Deps{DataDir: dataDir, Version: "0.11.6-test"}
+	t.Cleanup(func() { _ = deps.Close() })
 	st, err := deps.Store()
 	if err != nil {
 		t.Fatalf("open store: %v", err)
