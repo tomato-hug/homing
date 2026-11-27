@@ -489,24 +489,10 @@ func (s *Store) AppendReply(r Reply) (Reply, error) {
 	return r, nil
 }
 
-// SetReplyStatus updates the status/message of an existing reply.
+// SetReplyStatus updates the status/message of an existing reply in memory,
+// replies.jsonl, and history.db using the shared monotonic transition rule.
 func (s *Store) SetReplyStatus(id int64, status, message string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i := range s.replies {
-		if s.replies[i].ID == id {
-			if status == "queued" && replyStatusIsDelivered(s.replies[i].Status) {
-				return
-			}
-			s.replies[i].Status = status
-			s.replies[i].Message = message
-			s.replies[i].Injected = status == "injected" || status == "held"
-			if s.history != nil {
-				_ = s.history.putReply(s.replies[i])
-			}
-			return
-		}
-	}
+	_, _ = s.UpdateReplyStatus(id, status, message)
 }
 
 // ---- cross-agent dispatches ---------------------------------------------
@@ -525,6 +511,10 @@ func (s *Store) Dispatches() []Dispatch {
 func (s *Store) SaveDispatch(dispatch Dispatch) (Dispatch, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.saveDispatchLocked(dispatch)
+}
+
+func (s *Store) saveDispatchLocked(dispatch Dispatch) (Dispatch, error) {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
 	if dispatch.CreatedAt == "" {
 		dispatch.CreatedAt = now
@@ -563,24 +553,30 @@ func (s *Store) SaveDispatch(dispatch Dispatch) (Dispatch, error) {
 }
 
 // BindDispatchTarget attaches the session id a launcher only discovered later
-// (Claude Code's Stop hook, for example).
+// (Claude Code's Stop hook, for example) without reviving terminal dispatches.
 func (s *Store) BindDispatchTarget(requestID, targetAgent, targetSessionID string) (Dispatch, bool) {
 	if requestID == "" || targetSessionID == "" {
 		return Dispatch{}, false
 	}
-	dispatches := s.Dispatches()
-	for _, dispatch := range dispatches {
-		if dispatch.RequestID != requestID || dispatch.TargetAgent != targetAgent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, dispatch := range s.dispatches {
+		if dispatch.RequestID != requestID || dispatch.TargetAgent != targetAgent ||
+			dispatchIsTerminal(dispatch.Status) {
 			continue
 		}
 		dispatch.TargetSessionID = targetSessionID
 		dispatch.RequestID = ""
 		dispatch.Status = "started"
 		dispatch.Message = "已关联到目标会话"
-		updated, err := s.SaveDispatch(dispatch)
+		updated, err := s.saveDispatchLocked(dispatch)
 		return updated, err == nil
 	}
 	return Dispatch{}, false
+}
+
+func dispatchIsTerminal(status string) bool {
+	return status == "cancelled" || status == "completed" || status == "failed"
 }
 
 // ---- session state -------------------------------------------------------
