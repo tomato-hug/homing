@@ -107,6 +107,28 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def build_console(root: Path):
+    console_dir = root / "console"
+    dist_dir = console_dir / "dist"
+    web_console = root / "web" / "console"
+    npm = shutil.which("npm.cmd") or shutil.which("npm")
+    if not npm:
+        raise RuntimeError("npm not found on PATH")
+    if not (console_dir / "node_modules").is_dir():
+        run([npm, "ci"], cwd=console_dir)
+    run([npm, "run", "build"], cwd=console_dir)
+    for sub in ("assets", "sponsor"):
+        target = web_console / sub
+        if target.exists():
+            shutil.rmtree(target)
+    web_console.mkdir(parents=True, exist_ok=True)
+    for name in ("index.html", "favicon.svg"):
+        shutil.copy2(dist_dir / name, web_console / name)
+    shutil.copytree(dist_dir / "assets", web_console / "assets")
+    if (dist_dir / "sponsor").is_dir():
+        shutil.copytree(dist_dir / "sponsor", web_console / "sponsor")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", required=True)
@@ -131,7 +153,7 @@ def main():
         parser.error(f"output already contains {zip_target.name}; choose an empty output directory")
 
     if not args.skip_console_build:
-        run(["bash", "scripts/build-console.sh"], cwd=root)
+        build_console(root)
 
     syso_path = root / "cmd" / "homing" / f"rsrc_windows_{args.arch}.syso"
     with tempfile.TemporaryDirectory(prefix="homing-win-") as tmp:
