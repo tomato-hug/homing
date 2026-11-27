@@ -507,15 +507,20 @@ export function renderRelay(ctx: PageContext): PageResult {
     clear(host);
     const cloud = info.cloud || { configured: false, connected: false, server: "", peers: 0 };
     const cloudConfigured = Boolean(cloud.configured);
-    const cloudConnected = cloudConfigured && Boolean(cloud.connected);
+    const cloudAuthRequired = Boolean(cloud.auth_required);
+    const cloudConnected = cloudConfigured && Boolean(cloud.connected) && !cloudAuthRequired;
     const cloudBadge = !cloudConfigured
       ? { text: "可配置", tone: "plain" as const }
-      : cloudConnected
-        ? { text: "已连接", tone: "ok" as const }
-        : { text: "已配置 · 重连中", tone: "warn" as const };
+      : cloudAuthRequired
+        ? { text: "需要 Relay Key", tone: "warn" as const }
+        : cloudConnected
+          ? { text: "已连接", tone: "ok" as const }
+          : { text: "已配置 · 重连中", tone: "warn" as const };
     const cloudNote = !cloudConfigured
       ? "尚未配置。填写 Homing 云中转或自建 homingd 的 WebSocket 地址后，手机可在离开局域网时继续使用。"
-      : `${cloudConnected ? "已连接" : "正在后台重连"}：${cloud.server}${cloud.peers > 0 ? ` · ${cloud.peers} 台已配对设备` : ""}`;
+      : cloudAuthRequired
+        ? `尚未绑定 Relay Key：${cloud.server} · 请前往 /account 获取并保存密钥`
+        : `${cloudConnected ? "已连接" : "正在后台重连"}：${cloud.server}${cloud.peers > 0 ? ` · ${cloud.peers} 台已配对设备` : ""}`;
 
     // 连接方式
     host.append(
@@ -598,7 +603,7 @@ export function renderRelay(ctx: PageContext): PageResult {
           h(
             "div",
             { class: "lrow", style: "align-items:flex-start" },
-            h("span", { class: cloudConnected ? "dot dot-ok" : "dot", style: "margin-top:8px" }),
+            h("span", { class: cloudConnected ? "dot dot-ok" : cloudAuthRequired ? "dot dot-warn" : "dot", style: "margin-top:8px" }),
             h(
               "div",
               { class: "lrow-main" },
@@ -606,7 +611,10 @@ export function renderRelay(ctx: PageContext): PageResult {
                 "div",
                 { class: "lrow-title" },
                 h("span", { class: "txt", text: cloudConfigured ? "已配置中继" : "连接云中转或自建服务器" }),
-                tag(cloudConnected ? "已连接" : cloudConfigured ? "重连中" : "未配置", cloudConnected ? "ok" : cloudConfigured ? "warn" : "mute"),
+                tag(
+                  cloudAuthRequired ? "需要 Relay Key（未绑定账号）" : cloudConnected ? "已连接" : cloudConfigured ? "重连中" : "未配置",
+                  cloudConnected ? "ok" : cloudConfigured ? "warn" : "mute",
+                ),
                 cloud.relay_key_configured ? tag(cloud.relay_key_hint || "已绑密钥", "plain") : null,
                 matchedProbe && !matchedProbe.error
                   ? tag(

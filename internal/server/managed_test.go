@@ -561,3 +561,125 @@ func TestWeekKeyStartsMondayChinaTime(t *testing.T) {
 		t.Fatalf("weekResetAt = %v, want %v", reset, monday)
 	}
 }
+
+func dialDeviceWithKeypair(t *testing.T, wsURL, bearerKey string, pub ed25519.PublicKey, priv ed25519.PrivateKey) *websocket.Conn {
+	t.Helper()
+	devID := protocol.DeviceID(pub)
+	var opts *websocket.DialOptions
+	if bearerKey != "" {
+		opts = &websocket.DialOptions{
+			HTTPHeader: http.Header{"Authorization": []string{"Bearer " + bearerKey}},
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ws, _, err := websocket.Dial(ctx, wsURL, opts)
+	if err != nil {
+		t.Fatalf("dial ws: %v", err)
+	}
+	ws.SetReadLimit(maxMessageSize)
+	chal := readWSFrame(t, ws)
+	nonce, _ := chal["nonce"].(string)
+	ts := time.Now().UTC().Format(time.RFC3339Nano)
+	sig, err := protocol.HelloSignature(priv, nonce, ts)
+	if err != nil {
+		t.Fatalf("sign hello: %v", err)
+	}
+	writeWSFrame(t, ws, map[string]any{
+		"t":         "hello",
+		"device_id": devID,
+		"pub":       protocol.ToBase64(pub),
+		"ts":        ts,
+		"sig":       protocol.ToBase64(sig),
+	})
+	return ws
+}
+
+func TestManagedHelloReportsBoundAndAutoAdoptsLegacyPairing(t *testing.T) {
+	mailer := &captureEmailSender{}
+	srv, err := New(Config{
+		Addr:             "127.0.0.1:0",
+		DBPath:           ":memory:",
+		AuthMode:         AuthModeManaged,
+		RegistrationMode: RegModeOpen,
+		EmailSender:      mailer,
+	})
+	if err != nil {
+		t.Fatalf("New server: %v", err)
+	}
+	defer srv.Close()
+	ln, err := srv.Start()
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	baseHTTP := "http://" + ln.Addr().String()
+	wsURL := srv.URL()
+
+	// 1. Unbound socket receives hello.ok with auth_mode=managed, bound=false.
+	unboundWS, _, _, _ := dialAuthedTestDevice(t, wsURL, "")
+	defer unboundWS.CloseNow()
+	unboundHello := readWSFrame(t, unboundWS)
+	if unboundHello["t"] != "hello.ok" || unboundHello["auth_mode"] != AuthModeManaged || unboundHello["bound"] != false {
+		t.Fatalf("expected managed unbound hello.ok, got %v", unboundHello)
+	}
+
+	// 2. Register an account to obtain a Relay Key.
+	postJSON := func(path string, body any) map[string]any {
+		raw, _ := json.Marshal(body)
+		resp, err := http.Post(baseHTTP+path, "application/json", bytes.NewReader(raw))
+		if err != nil {
+			t.Fatalf("POST %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		var out map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return out
+	}
+	postJSON("/v1/account/email/send-code", map[string]any{"email": "adopt@example.com"})
+	ver := postJSON("/v1/account/email/verify", map[string]any{
+		"email": "adopt@example.com",
+		"code":  mailer.lastCode("adopt@example.com"),
+	})
+	relayKey, _ := ver["initial_key"].(string)
+	if !strings.HasPrefix(relayKey, "hrk_") {
+		t.Fatalf("expected relayKey, got %v", ver)
+	}
+
+	// 3. Simulate a legacy pairing created before managed mode existed (devices + pairings, no account_devices).
+	hostPub, hostPriv, _ := ed25519.GenerateKey(nil)
+	hostID := protocol.DeviceID(hostPub)
+	phonePub, phonePriv, _ := ed25519.GenerateKey(nil)
+	phoneID := protocol.DeviceID(phonePub)
+	now := time.Now().UTC()
+	if ok, err := srv.DB().RegisterDevice(context.Background(), hostID, protocol.ToBase64(hostPub), now); err != nil || !ok {
+		t.Fatalf("RegisterDevice host: ok=%v err=%v", ok, err)
+	}
+	if ok, err := srv.DB().RegisterDevice(context.Background(), phoneID, protocol.ToBase64(phonePub), now); err != nil || !ok {
+		t.Fatalf("RegisterDevice phone: ok=%v err=%v", ok, err)
+	}
+	if err := srv.DB().CreatePairing(context.Background(), hostID, phoneID, now); err != nil {
+		t.Fatalf("CreatePairing: %v", err)
+	}
+
+	// Host connects with Relay Key -> bound=true.
+	hostWS := dialDeviceWithKeypair(t, wsURL, relayKey, hostPub, hostPriv)
+	defer hostWS.CloseNow()
+	hostHello := readWSFrame(t, hostWS)
+	if hostHello["t"] != "hello.ok" || hostHello["bound"] != true {
+		t.Fatalf("expected bound host hello.ok, got %v", hostHello)
+	}
+
+	// Pre-paired phone reconnects without Relay Key -> auto-adopted -> bound=true and can relay E2E messages immediately.
+	phoneWS := dialDeviceWithKeypair(t, wsURL, "", phonePub, phonePriv)
+	defer phoneWS.CloseNow()
+	phoneHello := readWSFrame(t, phoneWS)
+	if phoneHello["t"] != "hello.ok" || phoneHello["bound"] != true {
+		t.Fatalf("expected auto-adopted phone hello.ok bound=true, got %v", phoneHello)
+	}
+	writeWSFrame(t, phoneWS, map[string]any{
+		"v": 1, "t": "msg", "id": "legacy-adopt-1", "from": phoneID, "to": hostID, "ciphertext": "ZGVtbw==",
+	})
+	if delivered := readWSFrame(t, hostWS); delivered["id"] != "legacy-adopt-1" {
+		t.Fatalf("expected legacy-adopt-1 delivered to host, got %v", delivered)
+	}
+}

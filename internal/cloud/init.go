@@ -146,7 +146,8 @@ func StatusFor(dataDir string, hub *Hub) api.CloudStatus {
 		status.RelayKeyConfigured = status.RelayKeyHint != ""
 	}
 	if connector, ok := ConnectorFor(dataDir); ok && connector != nil {
-		status.Connected = connector.Connected()
+		status.AuthRequired = connector.AuthRequired()
+		status.Connected = connector.Connected() && !status.AuthRequired
 		status.DirectDial = connector.DirectDial()
 		status.LatencyMs = connector.LatencyMs()
 		status.LastError = connector.LastError()

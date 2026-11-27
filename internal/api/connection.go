@@ -55,6 +55,7 @@ type CloudStatus struct {
 	ResolvedIP         string `json:"resolved_ip,omitempty"`
 	RelayKeyConfigured bool   `json:"relay_key_configured,omitempty"`
 	RelayKeyHint       string `json:"relay_key_hint,omitempty"`
+	AuthRequired       bool   `json:"auth_required,omitempty"`
 	LastError          string `json:"last_error,omitempty"`
 	// RelayNotice is the latest policy message from the relay (quota, key,
 	// account status) even while the socket stays connected.

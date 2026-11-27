@@ -328,3 +328,59 @@ func TestSplitHorizonFakeIPDetectionAndBypass(t *testing.T) {
 			targetIP, fakeDetected, fakeBypassed)
 	}
 }
+
+func TestConnectorManagedUnboundSetsAuthRequiredAndNotice(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	connector, _, _ := setupConnectorTest(t, http.NotFoundHandler())
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		peer, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer peer.CloseNow()
+		_ = peer.Write(ctx, websocket.MessageText, []byte(`{"t":"challenge","nonce":"`+protocol.ToBase64(make([]byte, 32))+`"}`))
+		_, _, err = peer.Read(ctx)
+		if err != nil {
+			return
+		}
+		_ = peer.Write(ctx, websocket.MessageText, []byte(`{"t":"hello.ok","auth_mode":"managed","bound":false}`))
+		<-ctx.Done()
+	}))
+	defer ts.Close()
+
+	connector.serverURL = "ws://" + ts.Listener.Addr().String()
+	go func() { _, _ = connector.runSession(ctx) }()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if connector.Connected() {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !connector.Connected() {
+		t.Fatal("expected underlying socket to connect for unbound pairing window")
+	}
+	if !connector.AuthRequired() {
+		t.Fatal("expected AuthRequired() to be true when hello.ok reports bound=false")
+	}
+	if connector.RelayNotice() == "" {
+		t.Fatal("expected RelayNotice() to surface Relay Key guidance")
+	}
+	hub := &Hub{peers: connector.peers}
+	dataDir := t.TempDir()
+	registry.Lock()
+	registry.connectors[dataDir] = connector
+	registry.Unlock()
+	defer func() {
+		registry.Lock()
+		delete(registry.connectors, dataDir)
+		registry.Unlock()
+	}()
+	st := StatusFor(dataDir, hub)
+	if st.Connected || !st.AuthRequired {
+		t.Fatalf("expected StatusFor Connected=false, AuthRequired=true; got %+v", st)
+	}
+}

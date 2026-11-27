@@ -23,7 +23,9 @@ class CloudLinkManager private constructor(context: Context) : CloudLink {
     private val computers = PairedComputerStore(appContext)
     private val lock = Any()
     private val serverStates = ConcurrentHashMap<String, CloudNotificationClient.State>()
+    private val serverDetails = ConcurrentHashMap<String, String>()
     private val _connected = MutableStateFlow(false)
+    private val _statusDetail = MutableStateFlow<String?>(null)
     private val _events = MutableSharedFlow<TransportEvent>(
         extraBufferCapacity = 128,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
@@ -36,6 +38,7 @@ class CloudLinkManager private constructor(context: Context) : CloudLink {
         ((PairedComputer, NotifyPayload) -> Boolean)? = null
 
     override val connected: StateFlow<Boolean> = _connected.asStateFlow()
+    override val statusDetail: StateFlow<String?> = _statusDetail.asStateFlow()
 
     fun setNotificationHandler(
         handler: (PairedComputer, NotifyPayload) -> Boolean,
@@ -100,12 +103,20 @@ class CloudLinkManager private constructor(context: Context) : CloudLink {
                         ) {
                             if (state == CloudNotificationClient.State.STOPPED) {
                                 serverStates.remove(server)
+                                serverDetails.remove(server)
                             } else {
                                 serverStates[server] = state
+                                if (state == CloudNotificationClient.State.CONNECTED && detail.isNullOrBlank()) {
+                                    serverDetails.remove(server)
+                                } else if (!detail.isNullOrBlank()) {
+                                    serverDetails[server] = detail
+                                }
                             }
-                            _connected.value = serverStates.values.any {
+                            val anyConnected = serverStates.values.any {
                                 it == CloudNotificationClient.State.CONNECTED
                             }
+                            _connected.value = anyConnected
+                            _statusDetail.value = resolveStatusDetail(anyConnected)
                             Log.i(
                                 TAG,
                                 "Cloud transport $server: $state" +
@@ -219,7 +230,20 @@ class CloudLinkManager private constructor(context: Context) : CloudLink {
         }
         active?.stop()
         serverStates.clear()
+        serverDetails.clear()
         _connected.value = false
+        _statusDetail.value = null
+    }
+
+    private fun resolveStatusDetail(anyConnected: Boolean): String? {
+        serverStates.entries.firstOrNull { it.value == CloudNotificationClient.State.AUTH_REQUIRED }
+            ?.let { entry -> serverDetails[entry.key]?.takeIf { it.isNotBlank() } }
+            ?.let { return it }
+        if (anyConnected) {
+            return serverStates.entries.firstOrNull { it.value == CloudNotificationClient.State.CONNECTED }
+                ?.let { entry -> serverDetails[entry.key]?.takeIf { it.isNotBlank() } }
+        }
+        return serverDetails.values.firstOrNull { it.isNotBlank() }
     }
 
     companion object {

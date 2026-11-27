@@ -775,13 +775,16 @@ private fun InboxOfflineCard(
     lastDisconnected: Long?,
     onRetry: () -> Unit,
 ) {
+    val needsAuth = reason?.let {
+        it.contains("中继账号") || it.contains("Relay Key") || it.contains("配对")
+    } == true
     HomingCard(borderColor = HomingPalette.Warning.copy(alpha = 0.45f)) {
         Row(
             modifier = Modifier.padding(horizontal = 13.dp, vertical = 11.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            if (reconnecting) {
+            if (reconnecting && !needsAuth) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(18.dp),
                     strokeWidth = 2.dp,
@@ -797,7 +800,11 @@ private fun InboxOfflineCard(
             }
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = if (reconnecting) "正在飞回 Mac…" else "暂时没有连上 Mac",
+                    text = when {
+                        needsAuth -> "需要绑定中继账号"
+                        reconnecting -> "正在飞回 Mac…"
+                        else -> "暂时没有连上 Mac"
+                    },
                     style = MaterialTheme.typography.labelLarge,
                     color = HomingPalette.Text,
                 )
@@ -809,12 +816,12 @@ private fun InboxOfflineCard(
                         append(formatDiagnosticTime(lastDisconnected))
                         reason?.takeIf { it.isNotBlank() }?.let {
                             append("\n")
-                            append(it.take(90))
+                            append(it.take(160))
                         }
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = HomingPalette.Muted,
-                    maxLines = 3,
+                    maxLines = if (needsAuth) 4 else 3,
                     overflow = TextOverflow.Ellipsis,
                 )
             }

@@ -534,11 +534,17 @@ func (s *Server) handleHello(conn *clientConn, message map[string]any) error {
 	}
 	conn.authed.Store(true)
 	s.addConnection(conn)
-	conn.send(s.ctx, map[string]any{
+	helloOK := map[string]any{
 		"t":           "hello.ok",
 		"device_id":   deviceID,
 		"fingerprint": protocol.Fingerprint(pub),
-	})
+	}
+	if s.isManagedMode() {
+		accountID, _ := conn.account()
+		helloOK["auth_mode"] = AuthModeManaged
+		helloOK["bound"] = accountID != ""
+	}
+	conn.send(s.ctx, helloOK)
 	if flushOffline {
 		s.flushQueue(conn)
 	}

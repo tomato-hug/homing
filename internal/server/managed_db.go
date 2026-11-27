@@ -1158,3 +1158,49 @@ func (d *DB) GetAdminOverview(ctx context.Context, now time.Time) (AdminOverview
 	_ = d.sql.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(active_minutes), 0) FROM account_usage_weekly WHERE week = ?`, weekKey(now)).Scan(&st.WeekActiveAccounts, &st.WeekActiveMinutes)
 	return st, nil
 }
+
+// FindPairedHostAccount looks up the most recently seen active host account
+// paired with clientDeviceID so phones paired prior to managed mode are
+// auto-adopted once their paired host binds a Relay Key.
+func (d *DB) FindPairedHostAccount(ctx context.Context, clientDeviceID string) (Account, bool, error) {
+	var accountID string
+	err := d.sql.QueryRowContext(ctx, `
+		SELECT ad.account_id
+		FROM pairings p
+		JOIN account_devices ad
+		  ON ad.device_id = CASE WHEN p.device_a = ? THEN p.device_b ELSE p.device_a END
+		WHERE (p.device_a = ? OR p.device_b = ?)
+		  AND ad.role = 'host'
+		ORDER BY ad.last_seen_at DESC
+		LIMIT 1
+	`, clientDeviceID, clientDeviceID, clientDeviceID).Scan(&accountID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Account{}, false, nil
+	}
+	if err != nil {
+		return Account{}, false, err
+	}
+	return d.GetAccount(ctx, accountID)
+}
+
+// ListPairedPeerIDs returns all device IDs paired with deviceID.
+func (d *DB) ListPairedPeerIDs(ctx context.Context, deviceID string) ([]string, error) {
+	rows, err := d.sql.QueryContext(ctx, `
+		SELECT CASE WHEN device_a = ? THEN device_b ELSE device_a END
+		FROM pairings
+		WHERE device_a = ? OR device_b = ?
+	`, deviceID, deviceID, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var peers []string
+	for rows.Next() {
+		var peerID string
+		if err := rows.Scan(&peerID); err != nil {
+			return nil, err
+		}
+		peers = append(peers, peerID)
+	}
+	return peers, rows.Err()
+}

@@ -1116,6 +1116,26 @@ func (s *Server) authorizeManagedHello(conn *clientConn, message map[string]any,
 			return false, false
 		}
 		conn.setAccount(acc.ID, "host")
+		if peers, pErr := s.db.ListPairedPeerIDs(s.ctx, deviceID); pErr == nil && len(peers) > 0 {
+			for _, peerID := range peers {
+				s.mu.Lock()
+				targets := make([]*clientConn, 0, len(s.conns[peerID]))
+				for c := range s.conns[peerID] {
+					if id, _ := c.account(); id == "" {
+						targets = append(targets, c)
+					}
+				}
+				s.mu.Unlock()
+				if len(targets) == 0 {
+					continue
+				}
+				if bErr := s.db.BindAccountDevice(s.ctx, acc, peerID, "client", "", now); bErr == nil {
+					for _, c := range targets {
+						c.setAccount(acc.ID, "client")
+					}
+				}
+			}
+		}
 		return true, true
 	}
 
@@ -1131,6 +1151,25 @@ func (s *Server) authorizeManagedHello(conn *clientConn, message map[string]any,
 		pairCount, _ := s.db.CountPairingsForDevice(s.ctx, deviceID)
 		if role == "client" && pairCount > 0 {
 			conn.setAccount(acc.ID, "client")
+			return true, true
+		}
+	}
+
+	// Auto-adopt already-paired phones once their paired host binds a Relay Key.
+	if hostAcc, hostFound, hErr := s.db.FindPairedHostAccount(s.ctx, deviceID); hErr == nil && hostFound {
+		if hostAcc.Status != AccountStatusActive {
+			conn.sendError(s.ctx, "account_suspended", "所属官方中继账号已被停用")
+			conn.close(websocket.StatusPolicyViolation, "account suspended")
+			return false, false
+		}
+		if bErr := s.db.BindAccountDevice(s.ctx, hostAcc, deviceID, "client", stringField(message, "name"), now); bErr != nil {
+			if errors.Is(bErr, ErrDeviceQuotaExceeded) {
+				conn.sendError(s.ctx, "device_quota_exceeded", fmt.Sprintf("当前账号最多可配对 %d 台移动设备", hostAcc.EffectiveLimits().MaxDevices))
+				conn.close(websocket.StatusPolicyViolation, "device quota exceeded")
+				return false, false
+			}
+		} else {
+			conn.setAccount(hostAcc.ID, "client")
 			return true, true
 		}
 	}

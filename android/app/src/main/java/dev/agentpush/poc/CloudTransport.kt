@@ -9,6 +9,7 @@ import java.util.Base64
 
 interface CloudLink {
     val connected: StateFlow<Boolean>
+    val statusDetail: StateFlow<String?>
 
     fun ensureStarted()
 

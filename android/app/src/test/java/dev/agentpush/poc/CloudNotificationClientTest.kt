@@ -229,4 +229,161 @@ class CloudNotificationClientTest {
             server.shutdown()
         }
     }
+
+    @Test
+    fun accountRequiredStopsRapidReconnectLoopAndSurfacesDetail() {
+        val server = MockWebServer()
+        val sawAuthRequired = CountDownLatch(1)
+        val capturedDetail = AtomicReference<String?>()
+        val handshakes = java.util.concurrent.atomic.AtomicInteger()
+        val sockets = java.util.concurrent.ConcurrentLinkedQueue<WebSocket>()
+
+        server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                sockets.add(webSocket)
+                webSocket.send(JSONObject().put("t", "challenge")
+                    .put("nonce", crypto.toBase64(ByteArray(32) { 5 })).toString())
+            }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                if (JSONObject(text).optString("t") != "hello") return
+                handshakes.incrementAndGet()
+                webSocket.send("""{"t":"hello.ok"}""")
+                webSocket.send("""{"t":"error","code":"account_required","message":"设备尚未关联有效的官方中继账号"}""")
+            }
+
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                webSocket.close(code, reason)
+            }
+        }))
+        server.start()
+        val computer = PairedComputer(
+            deviceId = hostId, name = "Demo Mac", server = server.url("/v1/ws").toString(),
+            publicKeyBase64 = crypto.toBase64(hostKeys.publicKey),
+            fingerprint = crypto.fingerprint(hostKeys.publicKey), pairedAt = 1L, lastSeen = 1L,
+        )
+        val client = CloudNotificationClient(
+            identity = clientIdentity, computersProvider = { listOf(computer) }, crypto = crypto,
+            listener = object : CloudNotificationClient.Listener {
+                override fun onNotification(computer: PairedComputer, payload: NotifyPayload) = true
+                override fun onStateChanged(server: String, state: CloudNotificationClient.State, detail: String?) {
+                    if (state == CloudNotificationClient.State.AUTH_REQUIRED) {
+                        capturedDetail.set(detail)
+                        sawAuthRequired.countDown()
+                    }
+                }
+            },
+        )
+        try {
+            client.start()
+            assertTrue("expected AUTH_REQUIRED state", sawAuthRequired.await(5, TimeUnit.SECONDS))
+            assertTrue("expected Relay Key guidance", capturedDetail.get().orEmpty().contains("Relay Key"))
+            Thread.sleep(2_000)
+            assertEquals("must not reconnect every 1s when account_required", 1, handshakes.get())
+        } finally {
+            client.stop()
+            sockets.forEach { it.close(1000, "test complete") }
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun helloOkUnboundImmediatelyReportsAuthRequired() {
+        val server = MockWebServer()
+        val sawAuthRequired = CountDownLatch(1)
+        val sawConnected = java.util.concurrent.atomic.AtomicBoolean(false)
+        val sockets = java.util.concurrent.ConcurrentLinkedQueue<WebSocket>()
+
+        server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                sockets.add(webSocket)
+                webSocket.send(JSONObject().put("t", "challenge")
+                    .put("nonce", crypto.toBase64(ByteArray(32) { 8 })).toString())
+            }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                if (JSONObject(text).optString("t") != "hello") return
+                webSocket.send("""{"t":"hello.ok","auth_mode":"managed","bound":false}""")
+            }
+        }))
+        server.start()
+        val computer = PairedComputer(
+            deviceId = hostId, name = "Demo Mac", server = server.url("/v1/ws").toString(),
+            publicKeyBase64 = crypto.toBase64(hostKeys.publicKey),
+            fingerprint = crypto.fingerprint(hostKeys.publicKey), pairedAt = 1L, lastSeen = 1L,
+        )
+        val client = CloudNotificationClient(
+            identity = clientIdentity, computersProvider = { listOf(computer) }, crypto = crypto,
+            listener = object : CloudNotificationClient.Listener {
+                override fun onNotification(computer: PairedComputer, payload: NotifyPayload) = true
+                override fun onStateChanged(server: String, state: CloudNotificationClient.State, detail: String?) {
+                    if (state == CloudNotificationClient.State.CONNECTED) sawConnected.set(true)
+                    if (state == CloudNotificationClient.State.AUTH_REQUIRED) sawAuthRequired.countDown()
+                }
+            },
+        )
+        try {
+            client.start()
+            assertTrue("expected AUTH_REQUIRED when bound=false", sawAuthRequired.await(5, TimeUnit.SECONDS))
+            assertTrue("must not emit CONNECTED when bound=false", !sawConnected.get())
+        } finally {
+            client.stop()
+            sockets.forEach { it.close(1000, "test complete") }
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun rapidDisconnectAfterHelloEscalatesBackoff() {
+        val server = MockWebServer()
+        val timestamps = java.util.Collections.synchronizedList(mutableListOf<Long>())
+        val sockets = java.util.concurrent.ConcurrentLinkedQueue<WebSocket>()
+        val threeHandshakes = CountDownLatch(3)
+
+        repeat(3) {
+            server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    sockets.add(webSocket)
+                    webSocket.send(JSONObject().put("t", "challenge")
+                        .put("nonce", crypto.toBase64(ByteArray(32) { 9 })).toString())
+                }
+
+                override fun onMessage(webSocket: WebSocket, text: String) {
+                    if (JSONObject(text).optString("t") != "hello") return
+                    timestamps.add(System.currentTimeMillis())
+                    threeHandshakes.countDown()
+                    webSocket.send("""{"t":"hello.ok"}""")
+                    webSocket.close(1011, "transient failure")
+                }
+
+                override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                    webSocket.close(code, reason)
+                }
+            }))
+        }
+        server.start()
+        val computer = PairedComputer(
+            deviceId = hostId, name = "Demo Mac", server = server.url("/v1/ws").toString(),
+            publicKeyBase64 = crypto.toBase64(hostKeys.publicKey),
+            fingerprint = crypto.fingerprint(hostKeys.publicKey), pairedAt = 1L, lastSeen = 1L,
+        )
+        val client = CloudNotificationClient(
+            identity = clientIdentity, computersProvider = { listOf(computer) }, crypto = crypto,
+            listener = object : CloudNotificationClient.Listener {
+                override fun onNotification(computer: PairedComputer, payload: NotifyPayload) = true
+            },
+        )
+        try {
+            client.start()
+            assertTrue("expected 3 reconnect attempts", threeHandshakes.await(8, TimeUnit.SECONDS))
+            val gap1 = timestamps[1] - timestamps[0]
+            val gap2 = timestamps[2] - timestamps[1]
+            assertTrue("first reconnect gap=${gap1}ms", gap1 >= 800L)
+            assertTrue("second reconnect gap=${gap2}ms should escalate (>= 1800ms)", gap2 >= 1_800L)
+        } finally {
+            client.stop()
+            sockets.forEach { it.close(1000, "test complete") }
+            server.shutdown()
+        }
+    }
 }

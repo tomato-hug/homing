@@ -134,7 +134,29 @@ class AgentStore private constructor(context: Context) {
                 if (connected) {
                     onConnectionEstablished()
                 } else {
-                    onConnectionLost("云端连接已断开")
+                    onConnectionLost(
+                        cloudLink.statusDetail.value?.takeIf { it.isNotBlank() }
+                            ?: "云端连接已断开",
+                    )
+                }
+            }
+        }
+        backgroundScope.launch {
+            cloudLink.statusDetail.collect { detail ->
+                if (transportRouter.kind.value != TransportKind.CLOUD) return@collect
+                if (detail.isNullOrBlank()) return@collect
+                if (!cloudLink.connected.value) {
+                    val diagnostics = _state.value.connectionDiagnostics.copy(
+                        lastDisconnectReason = detail,
+                    )
+                    persistDiagnostics(diagnostics)
+                    _state.update { current ->
+                        current.copy(connectionDiagnostics = diagnostics)
+                    }
+                } else {
+                    _state.update { current ->
+                        current.copy(error = detail)
+                    }
                 }
             }
         }

@@ -730,6 +730,7 @@ export interface CloudStatus {
   resolved_ip?: string;
   relay_key_configured?: boolean;
   relay_key_hint?: string;
+  auth_required?: boolean;
   last_error?: string;
   relay_notice?: string;
 }

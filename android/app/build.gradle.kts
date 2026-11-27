@@ -31,8 +31,8 @@ android {
         applicationId = "dev.homing.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 32
-        versionName = "0.11.6-beta.13"
+        versionCode = 33
+        versionName = "0.11.6-beta.14"
 
         val enableDirectDonation =
             providers.environmentVariable("HOMING_ENABLE_DIRECT_DONATION")

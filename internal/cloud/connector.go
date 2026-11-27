@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -71,6 +72,7 @@ type Connector struct {
 	lastRTTMs         int64
 	lastError         string
 	relayNotice       string
+	authRequired      bool
 	tunFakeIPDetected bool
 	tunFakeIPBypassed bool
 	resolvedIP        string
@@ -132,6 +134,16 @@ func (c *Connector) RelayNotice() string {
 	defer c.mu.Unlock()
 	return c.relayNotice
 }
+
+// AuthRequired reports whether the connected managed relay still requires a
+// bound Relay Key before the paired phone can exchange encrypted traffic.
+func (c *Connector) AuthRequired() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.authRequired
+}
+
+const managedAuthNotice = "当前中继已启用官方账号验证：请前往「连接与能力 → 云中转设置 → 打开中继账号中心 (/account)」获取并填写 Relay Key，保存重连后手机即可连通"
 
 // relayPolicyCodes are relay errors the user can act on (renew a key, wait
 // for a quota reset, upgrade). They are surfaced in the console.
@@ -301,6 +313,7 @@ func (c *Connector) Run(parent context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		sessionStart := time.Now()
 		connected, err := c.runSession(ctx)
 		if ctx.Err() != nil {
 			return
@@ -310,7 +323,9 @@ func (c *Connector) Run(parent context.Context) {
 			c.lastError = err.Error()
 			c.mu.Unlock()
 		}
-		if connected {
+		if c.AuthRequired() {
+			backoff = connectorMaxBackoff
+		} else if connected && time.Since(sessionStart) >= 15*time.Second {
 			backoff = time.Second
 		}
 		c.log.Warn("cloud relay disconnected",
@@ -441,6 +456,8 @@ func (c *Connector) runSession(parent context.Context) (bool, error) {
 	if stringField(answer, "t") != "hello.ok" {
 		return false, fmt.Errorf("expected hello.ok, got %q", stringField(answer, "t"))
 	}
+	bound, hasBound := answer["bound"].(bool)
+	unbound := (hasBound && !bound) || (!hasBound && c.relayKey == "" && c.probeManagedRelay(parent))
 	initialRTT := time.Since(helloStart).Milliseconds()
 	if initialRTT < 1 {
 		initialRTT = 1
@@ -451,6 +468,12 @@ func (c *Connector) runSession(parent context.Context) (bool, error) {
 	c.connectedAt = time.Now()
 	c.lastRTTMs = initialRTT
 	c.lastError = ""
+	c.authRequired = unbound
+	if unbound {
+		c.relayNotice = managedAuthNotice
+	} else if c.relayNotice == managedAuthNotice {
+		c.relayNotice = ""
+	}
 	c.mu.Unlock()
 	defer func() {
 		c.files.clear()
@@ -636,6 +659,9 @@ func (c *Connector) handleMessage(ctx context.Context, ws *websocket.Conn, messa
 			}
 			c.mu.Lock()
 			c.relayNotice = time.Now().Format("01-02 15:04") + " · " + text
+			if code == "account_required" || code == "invalid_relay_key" || code == "account_suspended" {
+				c.authRequired = true
+			}
 			c.mu.Unlock()
 		}
 	case "ping":
@@ -1105,6 +1131,49 @@ func readJSON(ctx context.Context, ws *websocket.Conn, timeout time.Duration) (m
 		return nil, err
 	}
 	return message, nil
+}
+
+func (c *Connector) probeManagedRelay(parent context.Context) bool {
+	u, err := url.Parse(c.serverURL)
+	if err != nil {
+		return false
+	}
+	switch u.Scheme {
+	case "wss":
+		u.Scheme = "https"
+	case "ws":
+		u.Scheme = "http"
+	default:
+		return false
+	}
+	u.Path = "/v1/account/config"
+	u.RawQuery = ""
+	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return false
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	if !c.useSystemProxy {
+		client = c.directDialHTTPClient()
+		client.Timeout = 3 * time.Second
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	var payload struct {
+		AuthMode string `json:"auth_mode"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return false
+	}
+	return payload.AuthMode == "managed"
 }
 
 func numberField(message map[string]any, key string) float64 {

@@ -496,13 +496,16 @@ export function renderHome(ctx: PageContext): PageResult {
   function buildPairingNetworkCard(): HTMLElement {
     const cloud = connection?.cloud;
     const directDial = cloud?.direct_dial !== false;
-    const latencyLabel = cloud?.connected
-      ? cloud.latency_ms
-        ? `${cloud.latency_ms} ms`
-        : loc("已连通", "Connected")
-      : cloud?.configured
-        ? loc("重连中…", "Reconnecting…")
-        : loc("仅局域网", "LAN only");
+    const authRequired = Boolean(cloud?.auth_required);
+    const latencyLabel = authRequired
+      ? loc("未绑定 Relay Key", "Relay Key required")
+      : cloud?.connected
+        ? cloud.latency_ms
+          ? `${cloud.latency_ms} ms`
+          : loc("已连通", "Connected")
+        : cloud?.configured
+          ? loc("重连中…", "Reconnecting…")
+          : loc("仅局域网", "LAN only");
 
     const relayBox = h(
       "div",
@@ -524,10 +527,42 @@ export function renderHome(ctx: PageContext): PageResult {
           }),
         ),
         pill(
-          cloud?.connected ? latencyLabel : cloud?.configured ? loc("重连中", "Retrying") : "LAN",
-          cloud?.connected ? "ok" : cloud?.configured ? "warn" : "mute",
+          authRequired
+            ? loc("需要 Relay Key", "Relay Key Required")
+            : cloud?.connected
+              ? latencyLabel
+              : cloud?.configured
+                ? loc("重连中", "Retrying")
+                : "LAN",
+          authRequired ? "warn" : cloud?.connected ? "ok" : cloud?.configured ? "warn" : "mute",
         ),
       ),
+      authRequired
+        ? h(
+            "div",
+            {
+              style:
+                "margin-top:8px;padding:8px 10px;border-radius:8px;background:rgba(251,191,36,0.12);color:var(--amber, #fbbf24);font-size:12.5px;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap",
+            },
+            h("span", {
+              style: "flex:1;min-width:180px",
+              text:
+                cloud?.relay_notice ||
+                loc("当前官方中继需要绑定 Relay Key，否则手机端无法通过中继连接", "Official relay requires a Relay Key before phones can connect"),
+            }),
+            button(loc("前往配置 Relay Key ›", "Configure Relay Key ›"), {
+              small: true,
+              variant: "quiet",
+              onClick: () => ctx.navigate("/console/relay"),
+            }),
+          )
+        : cloud?.relay_notice
+          ? h("div", {
+              style:
+                "margin-top:8px;padding:6px 10px;border-radius:8px;background:rgba(251,191,36,0.10);color:var(--amber, #fbbf24);font-size:12px",
+              text: cloud.relay_notice,
+            })
+          : null,
       cloud?.configured
         ? h(
             "div",

@@ -76,6 +76,7 @@ class CloudNotificationClient(
     enum class State {
         CONNECTING,
         CONNECTED,
+        AUTH_REQUIRED,
         RECONNECTING,
         STOPPED,
     }
@@ -396,6 +397,7 @@ class CloudNotificationClient(
         private var heartbeatTask: ScheduledFuture<*>? = null
         private var backoffMillis = INITIAL_RECONNECT_MILLIS
         private var connectedNow = false
+        private var connectedAtMillis = 0L
 
         fun start() {
             val shouldConnect = synchronized(stateLock) {
@@ -527,7 +529,16 @@ class CloudNotificationClient(
 
                     override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                         webSocket.close(code, reason)
-                        connectionLost(currentGeneration, "连接关闭 $code")
+                        if (isRelayAuthCloseReason(reason)) {
+                            val authCode = if (reason.contains("suspended", ignoreCase = true)) {
+                                "account_suspended"
+                            } else {
+                                "account_required"
+                            }
+                            handleAuthBlocked(null, currentGeneration, authCode, formatAuthError(authCode, reason))
+                        } else {
+                            connectionLost(currentGeneration, "连接关闭 $code")
+                        }
                     }
 
                     override fun onClosed(
@@ -535,10 +546,19 @@ class CloudNotificationClient(
                         code: Int,
                         reason: String,
                     ) {
-                        connectionLost(
-                            currentGeneration,
-                            "连接关闭 $code${reason.takeIf { it.isNotBlank() }?.let { ": $it" }.orEmpty()}",
-                        )
+                        if (isRelayAuthCloseReason(reason)) {
+                            val authCode = if (reason.contains("suspended", ignoreCase = true)) {
+                                "account_suspended"
+                            } else {
+                                "account_required"
+                            }
+                            handleAuthBlocked(null, currentGeneration, authCode, formatAuthError(authCode, reason))
+                        } else {
+                            connectionLost(
+                                currentGeneration,
+                                "连接关闭 $code${reason.takeIf { it.isNotBlank() }?.let { ": $it" }.orEmpty()}",
+                            )
+                        }
                     }
                 },
             )
@@ -563,8 +583,17 @@ class CloudNotificationClient(
             when (message.optString("t")) {
                 "challenge" -> sendHello(webSocket, currentGeneration, message.optString("nonce"))
                 "hello.ok" -> {
-                    connected(currentGeneration)
-                    sendPushRegistration()
+                    if (message.has("bound") && !message.optBoolean("bound", true)) {
+                        handleAuthBlocked(
+                            webSocket,
+                            currentGeneration,
+                            "account_required",
+                            formatAuthError("account_required", ""),
+                        )
+                    } else {
+                        connected(currentGeneration)
+                        sendPushRegistration()
+                    }
                 }
                 "msg" -> handleEnvelope(webSocket, currentGeneration, message)
                 "ping" -> webSocket.send("""{"t":"pong"}""")
@@ -580,6 +609,13 @@ class CloudNotificationClient(
                         failPendingRPC(serverUrl, detail)
                         failPendingFiles(serverUrl, detail)
                         listener.onStateChanged(serverUrl, State.CONNECTED, detail)
+                    } else if (code in RELAY_AUTH_ERROR_CODES) {
+                        handleAuthBlocked(
+                            webSocket,
+                            currentGeneration,
+                            code,
+                            formatAuthError(code, detail),
+                        )
                     } else {
                         // An error frame does not close the socket. Start an actual
                         // reconnect and fail uncertain requests instead of leaving
@@ -620,11 +656,11 @@ class CloudNotificationClient(
         private fun connected(currentGeneration: Int) {
             synchronized(stateLock) {
                 if (currentGeneration != generation.get() || stopped) return
-                backoffMillis = INITIAL_RECONNECT_MILLIS
                 reconnectTask?.cancel(false)
                 reconnectTask = null
                 cancelHeartbeatLocked()
                 connectedNow = true
+                connectedAtMillis = System.currentTimeMillis()
                 heartbeatTask = scheduler.scheduleWithFixedDelay(
                     {
                         if (isCurrent(currentGeneration)) {
@@ -763,16 +799,48 @@ class CloudNotificationClient(
             webSocket.send(JSONObject().put("t", "ack").put("id", id).toString())
         }
 
-        private fun connectionLost(currentGeneration: Int, detail: String) {
-            val delay: Long
+        private fun handleAuthBlocked(
+            webSocket: WebSocket?,
+            currentGeneration: Int,
+            code: String,
+            detail: String,
+        ) {
             synchronized(stateLock) {
                 if (currentGeneration != generation.get() || stopped) return
                 generation.incrementAndGet()
                 socket = null
                 connectedNow = false
+                connectedAtMillis = 0L
                 cancelHeartbeatLocked()
+                backoffMillis = MAX_RECONNECT_MILLIS
+                reconnectTask?.cancel(false)
+                reconnectTask = scheduler.schedule(
+                    { connect() },
+                    MAX_RECONNECT_MILLIS,
+                    TimeUnit.MILLISECONDS,
+                )
+            }
+            webSocket?.close(1000, code)
+            failPendingRPC(serverUrl, detail)
+            failPendingFiles(serverUrl, detail)
+            listener.onStateChanged(serverUrl, State.AUTH_REQUIRED, detail)
+        }
+
+        private fun connectionLost(currentGeneration: Int, detail: String) {
+            val delay: Long
+            val now = System.currentTimeMillis()
+            synchronized(stateLock) {
+                if (currentGeneration != generation.get() || stopped) return
+                generation.incrementAndGet()
+                socket = null
+                connectedNow = false
+                if (connectedAtMillis > 0L && (now - connectedAtMillis) >= STABLE_SESSION_MILLIS) {
+                    backoffMillis = INITIAL_RECONNECT_MILLIS
+                }
+                connectedAtMillis = 0L
+                cancelHeartbeatLocked()
+                delay = backoffMillis
                 backoffMillis = (backoffMillis * 2).coerceAtMost(MAX_RECONNECT_MILLIS)
-                delay = backoffMillis / 2
                 reconnectTask?.cancel(false)
                 reconnectTask = scheduler.schedule(
                     { connect() },
@@ -950,8 +1018,31 @@ class CloudNotificationClient(
             "weekly_time_exceeded",
             "payload_too_large_for_tier",
         )
+        private val RELAY_AUTH_ERROR_CODES = setOf(
+            "account_required",
+            "account_suspended",
+            "invalid_relay_key",
+            "not_paired",
+            "host_quota_exceeded",
+            "device_quota_exceeded",
+        )
         private const val INITIAL_RECONNECT_MILLIS = 1_000L
         private const val MAX_RECONNECT_MILLIS = 60_000L
+        private const val STABLE_SESSION_MILLIS = 15_000L
+
+        private fun isRelayAuthCloseReason(reason: String): Boolean {
+            val lower = reason.lowercase()
+            return "account required" in lower ||
+                "account suspended" in lower ||
+                "invalid relay key" in lower
+        }
+
+        private fun formatAuthError(code: String, rawDetail: String): String =
+            when (code) {
+                "account_required" -> "中继账号未绑定：请先在电脑端「云中转设置」填写 Relay Key 并保存；若电脑已绑定请重新扫码配对"
+                "not_paired" -> "设备配对已失效：请在电脑端打开配对二维码重新扫码"
+                else -> rawDetail.ifBlank { code }
+            }
         private const val HEARTBEAT_SECONDS = 25L
         private const val DEFAULT_RPC_TIMEOUT_MILLIS = 20_000L
         private const val DEFAULT_FILE_TIMEOUT_MILLIS = 90_000L

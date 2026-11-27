@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.6-beta.14 — Managed Relay Reconnect Loop Fix & Auto-Adoption
+
+- **Android Managed-Relay Loop Fix**: `CloudNotificationClient` now recognizes `bound=false` on `hello.ok`, `account_required` / `invalid_relay_key` / `account_suspended` error frames, and `1008 account required` close reasons—switching to `State.AUTH_REQUIRED` with clear Relay Key instructions instead of looping on a 1s reconnect (`91ms` connect/disconnect churn), and avoids resetting reconnect backoff unless a session stays healthy for at least 15 seconds. Surfacing exact disconnect details through `CloudLinkManager` and `AgentStore` directly into the inbox banner.
+- **Pre-Managed Phone Pairing Auto-Adoption & `bound` Handshake**: `homing-server` now reports `auth_mode` and `bound` in `hello.ok`, automatically adopts phones from existing `pairings` once their paired desktop host binds a `Relay Key` (eliminating forced re-pairing for upgraded setups), and promotes online paired peer sockets immediately upon host authentication.
+- **Desktop Relay Key Warning & Slow Backoff**: `internal/cloud` and the Desktop Console Home / Relay pages detect unbound managed relays via `auth_required`, replace misleading green `"已连接"` pills with actionable `"需要 Relay Key"` guidance linking straight to `/console/relay`, and throttle unbound background retries to 60s.
+
 ## 0.11.6-beta.13 — Green Multi-Platform CI, Visual Showcase & Zero-Compile Onboarding
 
 - **Windows Native CI & Packaging Fixes**: Resolved all 6 Windows native test portability issues (cross-drive relative path, POSIX PATH fixtures, JSON backslash escaping & LIFO temp-dir cleanup in ACP tests, `USERPROFILE` isolation, POSIX permission bits), hardened NTFS case-insensitive directory & `PATH` deduplication plus ACP subprocess reaping, and refactored `scripts/package-windows.py` to build the embedded console natively in Python without invoking Windows `System32\bash.exe` (WSL).

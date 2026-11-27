@@ -75,6 +75,7 @@ class CloudTransportTest {
 
 private class FakeCloudLink : CloudLink {
     override val connected: StateFlow<Boolean> = MutableStateFlow(true)
+    override val statusDetail: StateFlow<String?> = MutableStateFlow(null)
     val events = MutableSharedFlow<TransportEvent>(extraBufferCapacity = 16)
     var active: PairedComputer? = null
 
