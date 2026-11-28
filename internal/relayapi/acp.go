@@ -86,11 +86,7 @@ func (o acpObserver) Permission(
 		return driver.PermissionDecision{Cancel: true}
 	}
 	trackDispatchLifecycle(o.d, event)
-	answer := holdApproval(ctx, event)
-	if s, storeErr := o.d.Store(); storeErr == nil {
-		s.MarkRead([]int64{event.ID})
-		_ = s.AdvanceSeen(agentID, sessionID, event.ID)
-	}
+	answer := holdApprovalWithDeps(ctx, o.d, event)
 	if len(answer) == 0 {
 		return driver.PermissionDecision{Cancel: true}
 	}

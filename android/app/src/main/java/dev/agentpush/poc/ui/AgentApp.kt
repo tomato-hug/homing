@@ -290,7 +290,8 @@ private fun decodeSessionToken(token: String): String {
 }
 
 private fun browserRoute(url: String, title: String): String {
-    return "browser/${encodeToken(url)}/${encodeToken(title.ifBlank { "网页" })}"
+    val cleanUrl = url.trim().ifBlank { "about:blank" }
+    return "browser/${encodeToken(cleanUrl)}/${encodeToken(title.ifBlank { "网页" })}"
 }
 
 private fun newSessionRoute(cwd: String = ""): String {

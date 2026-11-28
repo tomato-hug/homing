@@ -1,18 +1,23 @@
 package dev.agentpush.poc.ui
 
+import android.content.pm.ActivityInfo
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -20,16 +25,20 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.FitScreen
 import androidx.compose.material.icons.outlined.OpenInFull
 import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.ScreenRotation
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -38,7 +47,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.platform.UriHandler
@@ -57,6 +68,7 @@ import com.mikepenz.markdown.model.ImageData
 import com.mikepenz.markdown.compose.Markdown
 import com.mikepenz.markdown.compose.components.markdownComponents
 import com.mikepenz.markdown.compose.elements.MarkdownCodeFence
+import com.mikepenz.markdown.compose.elements.MarkdownImage
 import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
 import dev.agentpush.poc.AgentApi
@@ -91,6 +103,7 @@ fun RichMarkdown(
         }
     }
     var previewHtml by remember { mutableStateOf<String?>(null) }
+    var previewImageUrl by remember { mutableStateOf<String?>(null) }
     var localCodeDoc by remember { mutableStateOf<CodeViewerDoc?>(null) }
     val renderLimit = 80_000
     val truncated = source.length > renderLimit
@@ -158,6 +171,22 @@ fun RichMarkdown(
                                 )
                             }
                         },
+                        image = { model ->
+                            val rawUrl = remember(model.node, model.content) {
+                                extractMarkdownImageUrl(model.content, model.node)
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable(enabled = !rawUrl.isNullOrBlank()) {
+                                        if (!rawUrl.isNullOrBlank()) {
+                                            previewImageUrl = rawUrl
+                                        }
+                                    },
+                            ) {
+                                MarkdownImage(content = model.content, node = model.node)
+                            }
+                        },
                     ),
                 )
             }
@@ -175,9 +204,31 @@ fun RichMarkdown(
     previewHtml?.let { html ->
         HtmlPreviewDialog(html = html, onDismiss = { previewHtml = null })
     }
+    previewImageUrl?.let { imgUrl ->
+        FullScreenUrlImageDialog(
+            url = imgUrl,
+            settings = AppSettings(baseUrl = "", token = ""),
+            onDismiss = { previewImageUrl = null },
+        )
+    }
     localCodeDoc?.let { doc ->
         CodeViewerDialog(doc = doc, onDismiss = { localCodeDoc = null }, onOpenUrl = onOpenUrl)
     }
+}
+
+private val INLINE_MD_IMAGE_DEST = Regex("!\\[[^\\]]*\\]\\(([^)\\s]+)(?:\\s+[\"'][^\"']*[\"'])?\\)")
+
+private fun extractMarkdownImageUrl(
+    content: String,
+    node: org.intellij.markdown.ast.ASTNode,
+): String? {
+    val slice = runCatching {
+        content.substring(
+            node.startOffset.coerceIn(0, content.length),
+            node.endOffset.coerceIn(0, content.length),
+        )
+    }.getOrNull() ?: return null
+    return INLINE_MD_IMAGE_DEST.find(slice)?.groupValues?.getOrNull(1)?.trim('<', '>')
 }
 
 @Composable
@@ -292,8 +343,34 @@ fun rewriteMarkdownImageUrls(
 }
 
 @Composable
-internal fun HtmlPreviewDialog(html: String, onDismiss: () -> Unit) {
-    var progress by remember { mutableIntStateOf(0) }
+internal fun HtmlPreviewDialog(
+    html: String,
+    title: String = "HTML 预览",
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    val activity = remember(context) { context.findHostActivity() }
+    val initialOrientation = remember(activity) {
+        activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+    }
+    var landscape by remember { mutableStateOf(false) }
+    var fitToScreen by remember(html) { mutableStateOf(true) }
+    var progress by remember(html) { mutableIntStateOf(0) }
+    var webViewRef by remember { mutableStateOf<WebView?>(null) }
+
+    DisposableEffect(activity) {
+        onDispose {
+            activity?.requestedOrientation = initialOrientation
+            webViewRef?.apply {
+                stopLoading()
+                webChromeClient = null
+                webViewClient = WebViewClient()
+                destroy()
+            }
+            webViewRef = null
+        }
+    }
+
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(
@@ -301,19 +378,70 @@ internal fun HtmlPreviewDialog(html: String, onDismiss: () -> Unit) {
             decorFitsSystemWindows = false,
         ),
     ) {
-        Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            Column(modifier = Modifier.fillMaxSize()) {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = MaterialTheme.colorScheme.background,
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .statusBarsPadding()
+                    .navigationBarsPadding(),
+            ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 8.dp, vertical = 8.dp),
+                        .padding(start = 16.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        text = "HTML 预览",
+                        text = title,
                         modifier = Modifier.weight(1f),
                         style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
+                    TextButton(
+                        onClick = {
+                            val next = !fitToScreen
+                            fitToScreen = next
+                            webViewRef?.let { applyMobileFitScript(it, next) }
+                        },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.FitScreen,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Text(
+                            text = if (fitToScreen) " 适应" else " 1:1",
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    }
+                    if (activity != null) {
+                        IconButton(
+                            onClick = {
+                                val next = !landscape
+                                landscape = next
+                                activity.requestedOrientation = if (next) {
+                                    ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                                } else {
+                                    ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                                }
+                            },
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.ScreenRotation,
+                                contentDescription = if (landscape) "切回竖屏" else "横屏查看",
+                                tint = if (landscape) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface
+                                },
+                            )
+                        }
+                    }
                     IconButton(onClick = onDismiss) {
                         Icon(Icons.Outlined.Close, contentDescription = "关闭")
                     }
@@ -324,24 +452,40 @@ internal fun HtmlPreviewDialog(html: String, onDismiss: () -> Unit) {
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
+                val preparedHtml = remember(html) {
+                    prepareHtmlForMobilePreview(html, fitToScreen = true)
+                }
                 AndroidView(
-                    modifier = Modifier.fillMaxSize(),
-                    factory = { context ->
-                        WebView(context).apply {
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    factory = { viewContext ->
+                        WebView(viewContext).apply {
                             setBackgroundColor(0xFFFFFFFF.toInt())
                             settings.javaScriptEnabled = true
                             settings.domStorageEnabled = true
                             settings.allowFileAccess = false
                             settings.allowContentAccess = false
+                            settings.useWideViewPort = true
+                            settings.loadWithOverviewMode = true
+                            settings.setSupportZoom(true)
+                            settings.builtInZoomControls = true
+                            settings.displayZoomControls = false
                             webChromeClient = object : WebChromeClient() {
                                 override fun onProgressChanged(view: WebView?, newProgress: Int) {
                                     progress = newProgress
                                 }
                             }
-                            webViewClient = WebViewClient()
+                            webViewClient = object : WebViewClient() {
+                                override fun onPageFinished(view: WebView?, url: String?) {
+                                    super.onPageFinished(view, url)
+                                    view?.let { applyMobileFitScript(it, fitToScreen) }
+                                }
+                            }
+                            webViewRef = this
                             loadDataWithBaseURL(
                                 "https://agent-inbox.local/",
-                                html,
+                                preparedHtml,
                                 "text/html",
                                 "UTF-8",
                                 null,

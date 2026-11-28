@@ -10,28 +10,44 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	filepaths "github.com/tomato-hug/homing/internal/files"
 )
 
-const fsReadMaxBytes = 512 << 10
+const (
+	fsReadMaxBytes = 512 << 10
+	fsRawMaxBytes  = 20 << 20
+)
+
+var allowedRawPreviewExt = map[string]bool{
+	".png":  true,
+	".jpg":  true,
+	".jpeg": true,
+	".gif":  true,
+	".webp": true,
+	".svg":  true,
+	".bmp":  true,
+	".ico":  true,
+	".avif": true,
+	".pdf":  true,
+	".html": true,
+	".htm":  true,
+}
 
 func init() {
 	Register("fs-read", 21, func(mux *http.ServeMux, d *Deps) {
 		mux.HandleFunc("GET /api/fs/read", d.guard(d.handleFSRead))
+		mux.HandleFunc("GET /api/fs/raw", d.guard(d.handleFSRaw))
 	})
 }
 
-// handleFSRead returns the text of one file inside a project an agent has
-// worked in. It powers the phone's code / text viewer for file paths that
-// appear in conversations. It never reads outside known project directories,
-// never follows a symlink out of them, refuses credential-like files and
-// binaries, and caps the payload.
-func (d *Deps) handleFSRead(w http.ResponseWriter, r *http.Request) {
+func (d *Deps) resolveProjectFile(w http.ResponseWriter, r *http.Request) (string, int, os.FileInfo, bool) {
 	query := r.URL.Query()
 	rawPath := strings.TrimSpace(query.Get("path"))
 	rawCwd := strings.TrimSpace(query.Get("cwd"))
 	if rawPath == "" {
 		WriteError(w, http.StatusBadRequest, "path_required", "path 不能为空")
-		return
+		return "", 0, nil, false
 	}
 	rawPath, line := splitPathLineSuffix(rawPath)
 	if strings.HasPrefix(rawPath, "file://") {
@@ -49,7 +65,7 @@ func (d *Deps) handleFSRead(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(roots) == 0 {
 		WriteError(w, http.StatusForbidden, "no_known_projects", "没有已知项目目录")
-		return
+		return "", 0, nil, false
 	}
 
 	var candidate string
@@ -64,7 +80,7 @@ func (d *Deps) handleFSRead(w http.ResponseWriter, r *http.Request) {
 		}
 		if base == "" {
 			WriteError(w, http.StatusBadRequest, "cwd_required", "相对路径需要提供 cwd")
-			return
+			return "", 0, nil, false
 		}
 		candidate = filepath.Clean(filepath.Join(base, rawPath))
 	}
@@ -72,7 +88,7 @@ func (d *Deps) handleFSRead(w http.ResponseWriter, r *http.Request) {
 	real, err := filepath.EvalSymlinks(candidate)
 	if err != nil {
 		WriteError(w, http.StatusNotFound, "file_not_found", "文件不存在")
-		return
+		return "", 0, nil, false
 	}
 	if !pathWithinRoots(real, roots) {
 		// Event history covers most projects; native session scans are slower,
@@ -81,19 +97,32 @@ func (d *Deps) handleFSRead(w http.ResponseWriter, r *http.Request) {
 	}
 	if !pathWithinRoots(real, roots) {
 		WriteError(w, http.StatusForbidden, "outside_project", "文件不在已知项目目录内")
-		return
+		return "", 0, nil, false
 	}
 	if sensitiveFile(real) {
 		WriteError(w, http.StatusForbidden, "sensitive_file", "出于安全考虑，不在手机上显示密钥或凭据类文件")
-		return
+		return "", 0, nil, false
 	}
 	info, err := os.Stat(real)
 	if err != nil {
 		WriteError(w, http.StatusNotFound, "file_not_found", "文件不存在")
-		return
+		return "", 0, nil, false
 	}
 	if info.IsDir() {
 		WriteError(w, http.StatusBadRequest, "is_directory", "这是一个目录")
+		return "", 0, nil, false
+	}
+	return real, line, info, true
+}
+
+// handleFSRead returns the text of one file inside a project an agent has
+// worked in. It powers the phone's code / text viewer for file paths that
+// appear in conversations. It never reads outside known project directories,
+// never follows a symlink out of them, refuses credential-like files and
+// binaries, and caps the payload.
+func (d *Deps) handleFSRead(w http.ResponseWriter, r *http.Request) {
+	real, line, info, ok := d.resolveProjectFile(w, r)
+	if !ok {
 		return
 	}
 	file, err := os.Open(real)
@@ -131,6 +160,35 @@ func (d *Deps) handleFSRead(w http.ResponseWriter, r *http.Request) {
 		"language":  strings.TrimPrefix(strings.ToLower(filepath.Ext(real)), "."),
 		"content":   string(raw),
 	})
+}
+
+// handleFSRaw serves safe previewable project media (images, SVG, HTML, PDF)
+// inside known project roots, guarding size and file type so Android can load
+// inline images referenced by relative or workspace paths over LAN or Cloud RPC.
+func (d *Deps) handleFSRaw(w http.ResponseWriter, r *http.Request) {
+	real, _, info, ok := d.resolveProjectFile(w, r)
+	if !ok {
+		return
+	}
+	ext := strings.ToLower(filepath.Ext(real))
+	if !allowedRawPreviewExt[ext] {
+		WriteError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "仅支持在手机上预览常见图片、SVG、HTML 或 PDF 文件")
+		return
+	}
+	if info.Size() > fsRawMaxBytes {
+		WriteError(w, http.StatusRequestEntityTooLarge, "file_too_large", "文件超过 20 MB 预览上限")
+		return
+	}
+	file, err := os.Open(real)
+	if err != nil {
+		WriteError(w, http.StatusNotFound, "file_not_found", "文件无法读取")
+		return
+	}
+	defer file.Close()
+	w.Header().Set("Content-Type", filepaths.MimeFor(real))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "private, max-age=60")
+	http.ServeContent(w, r, info.Name(), info.ModTime(), file)
 }
 
 // validPrefixLen trims an incomplete trailing UTF-8 sequence from the probe so

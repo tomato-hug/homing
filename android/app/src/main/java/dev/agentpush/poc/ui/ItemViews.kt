@@ -66,9 +66,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import dev.agentpush.poc.AgentApi
 import dev.agentpush.poc.AgentBrand
 import dev.agentpush.poc.AppSettings
 import dev.agentpush.poc.ApprovalOption
+import dev.agentpush.poc.Attachment
 import dev.agentpush.poc.ItemFileChange
 import dev.agentpush.poc.SessionItem
 import dev.agentpush.poc.SessionItemType
@@ -137,6 +139,10 @@ fun AssistantItemCard(
     settings: AppSettings,
     onOpenUrl: (String) -> Unit,
     onCopyCode: (String) -> Unit,
+    attachments: List<Attachment> = emptyList(),
+    cwd: String = "",
+    onOpenBrowser: ((String, String) -> Unit)? = null,
+    onOpenImage: ((List<Attachment>, Int) -> Unit)? = null,
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -161,10 +167,34 @@ fun AssistantItemCard(
             }
             Spacer(Modifier.height(6.dp))
             RichMarkdown(
-                source = absolutizeMarkdown(item.text.ifBlank { "（无文字内容）" }, settings),
+                source = rewriteMarkdownImageUrls(
+                    absolutizeMarkdown(
+                        item.text.ifBlank { "（无文字内容）" },
+                        settings,
+                        cwd = cwd,
+                    ),
+                    attachments,
+                    settings,
+                ),
                 onCopyCode = onCopyCode,
                 onOpenUrl = onOpenUrl,
             )
+            if (attachments.isNotEmpty() && onOpenBrowser != null && onOpenImage != null) {
+                AttachmentCardList(
+                    attachments = attachments,
+                    settings = settings,
+                    onOpenHtml = { attachment ->
+                        onOpenBrowser(
+                            AgentApi.attachmentUrl(settings, attachment),
+                            attachment.name,
+                        )
+                    },
+                    onOpenImage = { index ->
+                        onOpenImage(attachments.filter { it.isImage }, index)
+                    },
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
         }
     }
 }
@@ -1023,12 +1053,34 @@ private fun toolStatusLabel(item: SessionItem): String {
     }
 }
 
-fun absolutizeMarkdown(source: String, settings: AppSettings): String {
-    val base = settings.baseUrl.trimEnd('/')
-    if (base.isBlank()) return source
-    return rewriteMarkdownDestinations(source) { link ->
-        // Only Homing routes are server-relative; /tmp and other computer
-        // filesystem paths must remain local-image fallbacks.
+fun absolutizeMarkdown(
+    source: String,
+    settings: AppSettings,
+    cwd: String = "",
+): String {
+    val base = if (AgentApi.isCloudActive() || settings.baseUrl.isBlank()) {
+        AgentApi.CLOUD_ATTACHMENT_ORIGIN
+    } else {
+        settings.baseUrl.trimEnd('/')
+    }
+    val withServerRoutes = rewriteMarkdownDestinations(source) { link ->
         if (listOf("/f/", "/p/", "/api/", "/uploads/").any(link::startsWith)) "$base$link" else null
+    }
+    if (cwd.isBlank() || !withServerRoutes.contains("![")) return withServerRoutes
+    return rewriteMarkdownDestinations(withServerRoutes, imagesOnly = true) { link ->
+        val trimmed = link.trim()
+        val isRemoteOrData = trimmed.startsWith("http://") ||
+            trimmed.startsWith("https://") ||
+            trimmed.startsWith("data:")
+        if (isRemoteOrData) {
+            null
+        } else {
+            val clean = trimmed.removePrefix("file://")
+            if (clean.startsWith("/") || clean.startsWith("~/") || !clean.contains("://")) {
+                AgentApi.projectRawFileUrl(settings, clean, cwd)
+            } else {
+                null
+            }
+        }
     }
 }

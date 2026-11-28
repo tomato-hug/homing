@@ -27,13 +27,44 @@ type ReplyInterceptor func(
 type ReplyTransport func(ctx context.Context, source, sessionID, text string) (status, message string, handled bool)
 
 var (
-	replyInterceptorMu sync.RWMutex
-	replyInterceptor   ReplyInterceptor
-	replyTransportMu   sync.RWMutex
-	replyTransports    []ReplyTransport
-	awayEndMu          sync.RWMutex
-	awayEndHooks       []func()
+	replyInterceptorMu      sync.RWMutex
+	replyInterceptor        ReplyInterceptor
+	replyTransportMu        sync.RWMutex
+	replyTransports         []ReplyTransport
+	awayEndMu               sync.RWMutex
+	awayEndHooks            []func()
+	approvalSettledMu       sync.RWMutex
+	approvalSettledCheckers []func(eventID int64) bool
 )
+
+// RegisterApprovalSettledChecker registers a callback that reports whether a
+// permission event's interactive approval hold has already completed, timed out,
+// or been resolved elsewhere so session status does not stay stuck on permission.
+func RegisterApprovalSettledChecker(fn func(eventID int64) bool) {
+	if fn == nil {
+		return
+	}
+	approvalSettledMu.Lock()
+	approvalSettledCheckers = append(approvalSettledCheckers, fn)
+	approvalSettledMu.Unlock()
+}
+
+// IsApprovalSettled reports whether any registered hold tracker knows that
+// eventID is no longer pending approval.
+func IsApprovalSettled(eventID int64) bool {
+	if eventID <= 0 {
+		return false
+	}
+	approvalSettledMu.RLock()
+	checkers := append([]func(int64) bool(nil), approvalSettledCheckers...)
+	approvalSettledMu.RUnlock()
+	for _, fn := range checkers {
+		if fn(eventID) {
+			return true
+		}
+	}
+	return false
+}
 
 // SetReplyInterceptor installs the process-wide reply claim hook.
 func SetReplyInterceptor(fn ReplyInterceptor) {

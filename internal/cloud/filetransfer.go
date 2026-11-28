@@ -314,7 +314,10 @@ func validUploadPath(path string) bool {
 }
 
 func validDownloadPath(path string) bool {
-	return strings.HasPrefix(path, "/f/") && !strings.Contains(path, "..")
+	if strings.Contains(path, "..") {
+		return false
+	}
+	return strings.HasPrefix(path, "/f/") || strings.HasPrefix(path, "/api/fs/raw?")
 }
 
 func sweepFileAssembliesLocked(now time.Time) {

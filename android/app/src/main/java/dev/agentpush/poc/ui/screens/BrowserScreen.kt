@@ -2,6 +2,7 @@ package dev.agentpush.poc.ui.screens
 
 import android.app.DownloadManager
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Environment
@@ -18,18 +19,24 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.ArrowForward
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.FitScreen
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.ScreenRotation
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -49,6 +56,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -63,6 +71,17 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import dev.agentpush.poc.AgentApi
+import dev.agentpush.poc.media.AttachmentFiles
+import dev.agentpush.poc.ui.applyMobileFitScript
+import dev.agentpush.poc.ui.findHostActivity
+import dev.agentpush.poc.ui.friendlyBrowserAddress
+import dev.agentpush.poc.ui.guessWebMime
+import dev.agentpush.poc.ui.isCloudAttachmentBrowserUrl
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 @Composable
 fun BrowserScreen(
@@ -76,7 +95,23 @@ fun BrowserScreen(
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     val focusManager = LocalFocusManager.current
-    var address by remember(url) { mutableStateOf(if (url == "about:blank") "" else url) }
+    val scope = rememberCoroutineScope()
+    val activity = remember(context) { context.findHostActivity() }
+    val initialOrientation = remember(activity) {
+        activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+    }
+    var landscape by remember { mutableStateOf(false) }
+    var fitToScreen by remember(url) { mutableStateOf(true) }
+    var activeUrl by remember(url) { mutableStateOf(if (url == "about:blank") "" else url) }
+    var address by remember(url) {
+        mutableStateOf(
+            when {
+                url == "about:blank" -> ""
+                isCloudAttachmentBrowserUrl(url) -> friendlyBrowserAddress(url)
+                else -> url
+            },
+        )
+    }
     var pageTitle by remember(url) { mutableStateOf(title.ifBlank { "网页" }) }
     var progress by remember { mutableIntStateOf(0) }
     var canGoBack by remember { mutableStateOf(false) }
@@ -87,6 +122,15 @@ fun BrowserScreen(
     var pageError by remember { mutableStateOf<String?>(null) }
     var failedUrl by remember { mutableStateOf<String?>(null) }
 
+    fun syncDisplayedUrl(rawUrl: String) {
+        activeUrl = rawUrl
+        address = if (isCloudAttachmentBrowserUrl(rawUrl)) {
+            friendlyBrowserAddress(rawUrl)
+        } else {
+            rawUrl
+        }
+    }
+
     fun rejectLink() {
         pageError = "无法打开此链接"
         failedUrl = null
@@ -94,7 +138,8 @@ fun BrowserScreen(
     }
 
     fun loadAddress(input: String, allowBareHost: Boolean = false) {
-        val target = browserHttpUrl(input, allowBareHost)
+        val rawInput = if (input.startsWith("电脑文件 · ") && activeUrl.isNotBlank()) activeUrl else input
+        val target = browserHttpUrl(rawInput, allowBareHost)
         if (target == null) {
             rejectLink()
             return
@@ -105,15 +150,38 @@ fun BrowserScreen(
         }
         pageError = null
         failedUrl = null
-        address = target.toString()
+        syncDisplayedUrl(target.toString())
         progress = 1
         focusManager.clearFocus()
         webViewRef?.loadUrl(target.toString())
     }
 
     fun reloadPage() {
-        val target = failedUrl ?: webViewRef?.url ?: url
+        val target = failedUrl ?: webViewRef?.url ?: activeUrl.ifBlank { url }
         loadAddress(target)
+    }
+
+    fun shareOrOpenCloudFile(targetUrl: String, share: Boolean) {
+        scope.launch {
+            runCatching {
+                val bytes = withContext(Dispatchers.IO) { AgentApi.downloadUrlViaCloudTransport(targetUrl) }
+                val (mime, _) = guessWebMime(targetUrl, bytes)
+                val name = friendlyBrowserAddress(targetUrl).removePrefix("电脑文件 · ")
+                    .replace(Regex("[^\\p{L}\\p{N}._-]+"), "_")
+                    .ifBlank { "preview.html" }
+                val file = withContext(Dispatchers.IO) {
+                    val dir = File(context.cacheDir, "attachments").apply { mkdirs() }
+                    File(dir, "browser-$name").apply { writeBytes(bytes) }
+                }
+                if (share) {
+                    AttachmentFiles.share(context, file, mime)
+                } else {
+                    AttachmentFiles.open(context, file, mime)
+                }
+            }.onFailure { err ->
+                Toast.makeText(context, "打开文件失败：${err.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     BackHandler {
@@ -126,8 +194,9 @@ fun BrowserScreen(
         }
     }
 
-    DisposableEffect(Unit) {
+    DisposableEffect(activity) {
         onDispose {
+            activity?.requestedOrientation = initialOrientation
             webViewRef?.apply {
                 stopLoading()
                 webChromeClient = null
@@ -163,6 +232,49 @@ fun BrowserScreen(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
+                        if (isCloudAttachmentBrowserUrl(activeUrl.ifBlank { url })) {
+                            TextButton(
+                                onClick = {
+                                    val next = !fitToScreen
+                                    fitToScreen = next
+                                    webViewRef?.let { applyMobileFitScript(it, next) }
+                                },
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.FitScreen,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                                Text(
+                                    text = if (fitToScreen) " 适应" else " 1:1",
+                                    style = MaterialTheme.typography.labelMedium,
+                                )
+                            }
+                        }
+                        if (activity != null) {
+                            IconButton(
+                                onClick = {
+                                    val next = !landscape
+                                    landscape = next
+                                    activity.requestedOrientation = if (next) {
+                                        ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                                    } else {
+                                        ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                                    }
+                                },
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.ScreenRotation,
+                                    contentDescription = if (landscape) "切回竖屏" else "横屏查看",
+                                    tint = if (landscape) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface
+                                    },
+                                )
+                            }
+                        }
                         IconButton(
                             onClick = {
                                 reloadPage()
@@ -178,19 +290,25 @@ fun BrowserScreen(
                                 expanded = menuOpen,
                                 onDismissRequest = { menuOpen = false },
                             ) {
+                                val currentTarget = webViewRef?.url?.takeIf { it.isNotBlank() }
+                                    ?: activeUrl.ifBlank { address }
+                                val isCloudDoc = isCloudAttachmentBrowserUrl(currentTarget)
                                 DropdownMenuItem(
-                                    text = { Text("分享链接") },
+                                    text = { Text(if (isCloudDoc) "导出并分享文件" else "分享链接") },
                                     leadingIcon = {
                                         Icon(Icons.Outlined.Share, contentDescription = null)
                                     },
                                     onClick = {
                                         menuOpen = false
-                                        val current = webViewRef?.url ?: address
+                                        if (isCloudDoc) {
+                                            shareOrOpenCloudFile(currentTarget, share = true)
+                                            return@DropdownMenuItem
+                                        }
                                         runCatching { context.startActivity(
                                             Intent.createChooser(
                                                 Intent(Intent.ACTION_SEND).apply {
                                                     type = "text/plain"
-                                                    putExtra(Intent.EXTRA_TEXT, current)
+                                                    putExtra(Intent.EXTRA_TEXT, currentTarget)
                                                 },
                                                 "分享链接",
                                             ),
@@ -207,19 +325,26 @@ fun BrowserScreen(
                                     onClick = {
                                         menuOpen = false
                                         clipboard.setText(
-                                            AnnotatedString(webViewRef?.url ?: address),
+                                            AnnotatedString(currentTarget),
                                         )
                                         Toast.makeText(context, "链接已复制", Toast.LENGTH_SHORT).show()
                                     },
                                 )
                                 DropdownMenuItem(
-                                    text = { Text("系统浏览器打开") },
+                                    text = { Text(if (isCloudDoc) "用其他应用打开" else "系统浏览器打开") },
                                     leadingIcon = {
-                                        Icon(Icons.Outlined.OpenInNew, contentDescription = null)
+                                        Icon(
+                                            if (isCloudDoc) Icons.Outlined.Download else Icons.Outlined.OpenInNew,
+                                            contentDescription = null,
+                                        )
                                     },
                                     onClick = {
                                         menuOpen = false
-                                        val current = browserHttpUrl(webViewRef?.url ?: address)?.toString()
+                                        if (isCloudDoc) {
+                                            shareOrOpenCloudFile(currentTarget, share = false)
+                                            return@DropdownMenuItem
+                                        }
+                                        val current = browserHttpUrl(currentTarget)?.toString()
                                             ?: return@DropdownMenuItem
                                         runCatching {
                                             context.startActivity(
@@ -276,7 +401,7 @@ fun BrowserScreen(
             }
         },
     ) { padding ->
-        Box(Modifier.fillMaxSize().padding(padding)) {
+        Box(Modifier.fillMaxSize().padding(padding).navigationBarsPadding()) {
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
                 factory = { viewContext ->
@@ -307,7 +432,7 @@ fun BrowserScreen(
                         webViewClient = object : WebViewClient() {
                             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                                 super.onPageStarted(view, url, favicon)
-                                if (!url.isNullOrBlank()) address = url
+                                if (!url.isNullOrBlank()) syncDisplayedUrl(url)
                                 pageError = null
                                 failedUrl = null
                                 progress = 1
@@ -317,14 +442,19 @@ fun BrowserScreen(
 
                             override fun onPageFinished(view: WebView?, url: String?) {
                                 super.onPageFinished(view, url)
-                                if (!url.isNullOrBlank()) address = url
+                                if (!url.isNullOrBlank()) {
+                                    syncDisplayedUrl(url)
+                                    if (isCloudAttachmentBrowserUrl(url) && view != null) {
+                                        applyMobileFitScript(view, fitToScreen)
+                                    }
+                                }
                                 canGoBack = view?.canGoBack() == true
                                 canGoForward = view?.canGoForward() == true
                                 progress = 100
                             }
 
                             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
-                                if (!url.isNullOrBlank()) address = url
+                                if (!url.isNullOrBlank()) syncDisplayedUrl(url)
                                 canGoBack = view?.canGoBack() == true
                                 canGoForward = view?.canGoForward() == true
                             }
@@ -371,10 +501,19 @@ fun BrowserScreen(
                                 request: WebResourceRequest?,
                             ): WebResourceResponse? {
                                 val target = request?.url?.toString().orEmpty()
+                                cloudAttachmentResponse(
+                                    target = target,
+                                    isMainFrame = request?.isForMainFrame == true,
+                                    fitToScreen = fitToScreen,
+                                )?.let { return it }
                                 return authenticatedProxyResponse(target, serverBase, authToken, request?.method.orEmpty())
                             }
                         }
                         setDownloadListener { downloadUrl, userAgent, contentDisposition, mime, _ ->
+                            if (isCloudAttachmentBrowserUrl(downloadUrl)) {
+                                shareOrOpenCloudFile(downloadUrl, share = false)
+                                return@setDownloadListener
+                            }
                             runCatching {
                                 require(browserHttpUrl(downloadUrl) != null) { "仅支持 HTTP 和 HTTPS 下载链接" }
                                 val fileName = URLUtil.guessFileName(

@@ -2495,13 +2495,34 @@ class AgentStore private constructor(context: Context) {
             decision,
             optionId,
         )
-        if (result.ok) {
+        val isNotPending = !result.ok && (
+            result.errorCode == "not_pending" ||
+                result.message == "not_pending"
+            )
+        if (result.ok || isNotPending) {
             val targetSession = sessionId
                 ?.takeIf { it.isNotBlank() }
                 ?: _state.value.events[eventId]?.sessionKey
+            _state.update { current ->
+                current.copy(
+                    settledApprovalIds = current.settledApprovalIds + eventId,
+                    events = current.events.mapValues { (id, ev) ->
+                        if (id == eventId) ev.copy(read = true) else ev
+                    },
+                )
+            }
             if (!targetSession.isNullOrBlank()) {
                 markSessionReadLocally(targetSession)
                 patchSessionReadRemote(targetSession)
+            } else {
+                runCatching { AgentApi.markRead(_state.value.settings, listOf(eventId)) }
+            }
+            if (isNotPending) {
+                return CommandResult(
+                    ok = false,
+                    message = "该授权请求已在电脑端处理或已过期，已自动清除",
+                    errorCode = "not_pending",
+                )
             }
         }
         return result

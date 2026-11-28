@@ -333,6 +333,16 @@ func TestFileTransferChunkBoundariesSecurityAndTTLExpiry(t *testing.T) {
 	}))
 	assertFileError(t, out, http.StatusForbidden, "forbidden_upload_path")
 
+	if !validDownloadPath("/f/demo/a.png") {
+		t.Fatal("expected /f/ path to be allowed")
+	}
+	if !validDownloadPath("/api/fs/raw?path=a.png&cwd=/tmp/demo") {
+		t.Fatal("expected /api/fs/raw path to be allowed")
+	}
+	if validDownloadPath("/api/fs/raw?path=../secret.png") {
+		t.Fatal("expected traversal in /api/fs/raw to be rejected")
+	}
+
 	out, _ = dispatchFilePayload(ctx, handler, "peer-1", []byte(`{"type":"file.request","fid":"fid_trav","path":"/f/../config.json"}`))
 	assertFileError(t, out, http.StatusForbidden, "forbidden_download_path")
 

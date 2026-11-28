@@ -308,8 +308,8 @@ class CloudNotificationClient(
         path: String,
         timeoutMillis: Long = DEFAULT_FILE_TIMEOUT_MILLIS,
     ): ByteArray {
-        if (!path.startsWith("/f/") || path.contains("..")) {
-            throw CloudRpcException("云端附件下载只允许 /f/ 能力链接")
+        if ((!path.startsWith("/f/") && !path.startsWith("/api/fs/raw?")) || path.contains("..")) {
+            throw CloudRpcException("云端附件下载只允许能力链接或项目媒体预览")
         }
         val candidates = serverSessions(computer)
         val (serverUrl, session) = candidates.firstOrNull { it.second.isConnected() }

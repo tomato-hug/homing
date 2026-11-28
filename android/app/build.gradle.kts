@@ -31,8 +31,8 @@ android {
         applicationId = "dev.homing.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 33
-        versionName = "0.11.6-beta.14"
+        versionCode = 34
+        versionName = "0.11.6-beta.15"
 
         val enableDirectDonation =
             providers.environmentVariable("HOMING_ENABLE_DIRECT_DONATION")
@@ -160,6 +160,7 @@ dependencies {
     implementation("io.coil-kt.coil3:coil-compose:3.3.0")
     implementation("io.coil-kt.coil3:coil-network-okhttp:3.3.0")
     implementation("io.coil-kt.coil3:coil-gif:3.3.0")
+    implementation("io.coil-kt.coil3:coil-svg:3.3.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.google.firebase:firebase-messaging:24.1.2")
     implementation("com.mikepenz:multiplatform-markdown-renderer-m3:0.38.1")

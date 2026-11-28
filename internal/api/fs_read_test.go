@@ -85,6 +85,38 @@ func TestFSReadServesProjectTextAndRejectsUnsafePaths(t *testing.T) {
 	if code, _ := get("blob.bin", project); code != http.StatusUnsupportedMediaType {
 		t.Fatalf("binary status=%d, want 415", code)
 	}
+
+	pngBytes := []byte("\x89PNG\r\n\x1a\n")
+	if err := os.WriteFile(filepath.Join(project, "demo.png"), pngBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "vector.svg"), []byte(`<svg xmlns="http://www.w3.org/2000/svg"/>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	getRaw := func(path, cwd string) (int, string, []byte) {
+		q := url.Values{"path": {path}}
+		if cwd != "" {
+			q.Set("cwd", cwd)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/api/fs/raw?"+q.Encode(), nil)
+		req.Header.Set("Authorization", "Bearer "+s.Token())
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec.Code, rec.Header().Get("Content-Type"), rec.Body.Bytes()
+	}
+
+	if code, mime, raw := getRaw("demo.png", project); code != http.StatusOK || mime != "image/png" || string(raw) != string(pngBytes) {
+		t.Fatalf("raw png = (%d, %q, %q)", code, mime, raw)
+	}
+	if code, mime, _ := getRaw("vector.svg", project); code != http.StatusOK || mime != "image/svg+xml" {
+		t.Fatalf("raw svg = (%d, %q)", code, mime)
+	}
+	if code, _, _ := getRaw("src/demo.go", project); code != http.StatusUnsupportedMediaType {
+		t.Fatalf("raw go status=%d, want 415", code)
+	}
+	if code, _, _ := getRaw(filepath.Join(outside, "other.txt"), ""); code != http.StatusForbidden {
+		t.Fatalf("raw outside status=%d, want 403", code)
+	}
 }
 
 func TestSplitPathLineSuffix(t *testing.T) {

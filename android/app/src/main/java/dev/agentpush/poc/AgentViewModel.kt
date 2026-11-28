@@ -800,10 +800,15 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
                 optionId = optionId,
             )
             if (!result.ok) {
-                // A selected ACP option is an exact permission decision. A
-                // stale request or transport failure must not become a new
-                // ordinary message (or silently lose the option's scope).
-                if (onFallbackText != null && optionId.isNullOrBlank()) {
+                if (result.errorCode == "not_pending" || result.message == "not_pending") {
+                    showMessage(result.message ?: "该授权请求已在电脑端处理或已过期，已自动清除")
+                    val sessionId = store.state.value.events[eventId]?.sessionId
+                    runCatching { store.refreshAll() }
+                    if (!sessionId.isNullOrBlank()) {
+                        runCatching { store.refreshSessionDetails(sessionId, force = true) }
+                        runCatching { store.refreshReplies(sessionId) }
+                    }
+                } else if (onFallbackText != null && optionId.isNullOrBlank()) {
                     onFallbackText()
                 } else {
                     showMessage("授权操作失败：${result.message ?: "请稍后重试"}")

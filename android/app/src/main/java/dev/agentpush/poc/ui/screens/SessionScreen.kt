@@ -275,6 +275,8 @@ fun SessionScreen(
         loadPath = { path -> viewModel.readProjectFile(path, sessionCwd) },
         loadAttachment = { attachment -> viewModel.readAttachmentText(attachment) },
         onOpenUrl = { url -> onOpenBrowser(url, "网页") },
+        settings = state.settings,
+        imageUrlForPath = { path -> AgentApi.projectRawFileUrl(state.settings, path, sessionCwd) },
     ) {
     SessionDetailContent(
         state = state,
@@ -1237,6 +1239,10 @@ internal fun SessionDetailContent(
                                         null
                                     },
                                     onOpenUrl = ::openUrl,
+                                    onOpenBrowser = onOpenBrowser,
+                                    onOpenImage = { attachments, imageIndex ->
+                                        imageViewer = ImageViewerState(attachments, imageIndex)
+                                    },
                                     onCopyCode = {
                                         clipboard.setText(AnnotatedString(it))
                                         scope.launch { snackbarHostState.showSnackbar("代码已复制") }
@@ -1294,6 +1300,10 @@ internal fun SessionDetailContent(
                                             approvalOptions = emptyList(),
                                             reasoningDurationSeconds = null,
                                             onOpenUrl = ::openUrl,
+                                            onOpenBrowser = onOpenBrowser,
+                                            onOpenImage = { attachments, imageIndex ->
+                                                imageViewer = ImageViewerState(attachments, imageIndex)
+                                            },
                                             onCopyCode = {
                                                 clipboard.setText(AnnotatedString(it))
                                                 scope.launch {
@@ -1515,6 +1525,8 @@ private fun SessionTimelineCard(
     approvalOptions: List<ApprovalOption>,
     reasoningDurationSeconds: Long?,
     onOpenUrl: (String) -> Unit,
+    onOpenBrowser: (String, String) -> Unit,
+    onOpenImage: (List<Attachment>, Int) -> Unit,
     onCopyCode: (String) -> Unit,
     onCopyText: (String) -> Unit,
     onDecision: (Long?, String, String?) -> Unit,
@@ -1526,6 +1538,8 @@ private fun SessionTimelineCard(
         approvalOptions = approvalOptions,
         reasoningDurationSeconds = reasoningDurationSeconds,
         onOpenUrl = onOpenUrl,
+        onOpenBrowser = onOpenBrowser,
+        onOpenImage = onOpenImage,
         onCopyCode = onCopyCode,
         onCopyText = onCopyText,
         onDecision = onDecision,

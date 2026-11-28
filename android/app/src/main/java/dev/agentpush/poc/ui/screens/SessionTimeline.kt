@@ -439,10 +439,31 @@ internal fun SessionItemRow(
     approvalOptions: List<ApprovalOption> = emptyList(),
     reasoningDurationSeconds: Long? = null,
     onOpenUrl: (String) -> Unit,
+    onOpenBrowser: ((String, String) -> Unit)? = null,
+    onOpenImage: ((List<Attachment>, Int) -> Unit)? = null,
     onCopyCode: (String) -> Unit,
     onCopyText: (String) -> Unit,
     onDecision: (Long?, String, String?) -> Unit,
 ) {
+    val matchedAttachments = remember(item.id, item.eventId, item.text, session.events) {
+        val explicit = item.eventId?.let { id ->
+            session.events.firstOrNull { it.id == id }?.attachments.orEmpty()
+        }.orEmpty()
+        if (explicit.isNotEmpty()) {
+            explicit
+        } else if (item.type == SessionItemType.ASSISTANT && item.text.isNotBlank()) {
+            val itemTime = timelineMillis(item.ts)
+            val normalized = normalizeComparableText(item.text)
+            session.events.firstOrNull { ev ->
+                ev.attachments.isNotEmpty() &&
+                    ev.text.isNotBlank() &&
+                    normalizeComparableText(ev.text) == normalized &&
+                    (itemTime == null || timelineMillis(ev.ts)?.let { it >= itemTime - 5_000 } != false)
+            }?.attachments.orEmpty()
+        } else {
+            emptyList()
+        }
+    }
     when (item.type) {
         SessionItemType.USER -> UserItemBubble(
             item = item,
@@ -454,6 +475,10 @@ internal fun SessionItemRow(
             settings = settings,
             onOpenUrl = onOpenUrl,
             onCopyCode = onCopyCode,
+            attachments = matchedAttachments,
+            cwd = session.cwd,
+            onOpenBrowser = onOpenBrowser,
+            onOpenImage = onOpenImage,
         )
         SessionItemType.REASONING -> ReasoningItemCard(item, reasoningDurationSeconds)
         SessionItemType.TOOL_CALL -> ToolCallItemCard(

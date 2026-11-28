@@ -1,6 +1,10 @@
 package dev.agentpush.poc.ui.screens
 
 import android.webkit.WebResourceResponse
+import dev.agentpush.poc.AgentApi
+import dev.agentpush.poc.ui.guessWebMime
+import dev.agentpush.poc.ui.prepareHtmlForMobilePreview
+import kotlinx.coroutines.runBlocking
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.io.ByteArrayInputStream
@@ -52,6 +56,69 @@ private fun proxyFailure(code: Int, message: String) = WebResourceResponse(
     "text/plain", "UTF-8", code, "Proxy unavailable", mapOf("Cache-Control" to "no-store"),
     ByteArrayInputStream(message.toByteArray(Charsets.UTF_8)),
 )
+
+internal fun cloudAttachmentResponse(
+    target: String,
+    isMainFrame: Boolean,
+    fitToScreen: Boolean = true,
+): WebResourceResponse? {
+    if (!AgentApi.shouldRouteViaCloudTransport(target) && !target.startsWith(AgentApi.CLOUD_ATTACHMENT_ORIGIN)) {
+        return null
+    }
+    return runCatching {
+        val bytes = runBlocking { AgentApi.downloadUrlViaCloudTransport(target) }
+        val (mime, charset) = guessWebMime(target, bytes)
+        if (mime == "text/html") {
+            val prepared = prepareHtmlForMobilePreview(
+                String(bytes, Charsets.UTF_8),
+                fitToScreen = fitToScreen,
+            )
+            WebResourceResponse(
+                "text/html",
+                "UTF-8",
+                200,
+                "OK",
+                mapOf("Cache-Control" to "no-cache"),
+                ByteArrayInputStream(prepared.toByteArray(Charsets.UTF_8)),
+            )
+        } else {
+            WebResourceResponse(
+                mime,
+                charset,
+                200,
+                "OK",
+                mapOf("Cache-Control" to "private, max-age=60"),
+                ByteArrayInputStream(bytes),
+            )
+        }
+    }.getOrElse { err ->
+        if (!isMainFrame) {
+            return proxyFailure(502, err.message ?: "无法通过云端中继读取文件")
+        }
+        val escaped = (err.message ?: "无法连接电脑通道")
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        val html = """
+            <!doctype html><html><head><meta charset="utf-8">
+            <meta name="viewport" content="width=device-width,initial-scale=1">
+            <style>body{font-family:sans-serif;background:#111418;color:#e6edf3;padding:28px 20px;line-height:1.6}
+            .card{background:#1b2028;border:1px solid #30363d;border-radius:12px;padding:18px}
+            h3{margin:0 0 8px;font-size:17px}p{margin:0;color:#9da7b3;font-size:14px}</style>
+            </head><body><div class="card"><h3>电脑文件暂时无法读取</h3>
+            <p>$escaped</p><p style="margin-top:8px">请确认电脑端 Homing 处于在线状态后，点击右上角刷新重试。</p>
+            </div></body></html>
+        """.trimIndent()
+        WebResourceResponse(
+            "text/html",
+            "UTF-8",
+            200,
+            "OK",
+            mapOf("Cache-Control" to "no-store"),
+            ByteArrayInputStream(html.toByteArray(Charsets.UTF_8)),
+        )
+    }
+}
 
 internal fun authenticatedProxyResponse(
     target: String,

@@ -17,6 +17,7 @@ import java.time.Instant
 class AgentApiException(
     val statusCode: Int,
     message: String,
+    val errorCode: String? = null,
 ) : IOException(message)
 
 data class UploadResult(
@@ -55,6 +56,7 @@ data class SessionItemsResult(
 data class CommandResult(
     val ok: Boolean,
     val message: String? = null,
+    val errorCode: String? = null,
 )
 
 data class WakeAgentResult(
@@ -1124,11 +1126,15 @@ object AgentApi {
                 ?.use { it.readText() }
                 .orEmpty()
             if (code !in 200..299) {
-                val message = runCatching {
-                    JSONObject(responseBody).optString("error")
-                }.getOrNull()?.takeIf { it.isNotBlank() }
+                val json = runCatching { JSONObject(responseBody) }.getOrNull()
+                val codeField = json?.stringOrBlank("error").orEmpty()
+                    .ifBlank { json?.stringOrBlank("code").orEmpty() }
+                    .takeIf { it.isNotBlank() }
+                val message = json?.stringOrBlank("message")
+                    ?.takeIf { it.isNotBlank() }
+                    ?: codeField
                     ?: responseBody.take(240).ifBlank { "HTTP $code" }
-                throw AgentApiException(code, message)
+                throw AgentApiException(code, message, errorCode = codeField)
             }
             val json = JSONObject(responseBody)
             UploadResult(
@@ -1271,6 +1277,13 @@ object AgentApi {
             CommandResult(
                 ok = json.optBoolean("ok", true),
                 message = json.stringOrBlank("message").takeIf { it.isNotBlank() },
+                errorCode = json.stringOrBlank("error").takeIf { it.isNotBlank() },
+            )
+        } catch (error: AgentApiException) {
+            CommandResult(
+                ok = false,
+                message = error.message ?: error.javaClass.simpleName,
+                errorCode = error.errorCode,
             )
         } catch (error: Exception) {
             CommandResult(ok = false, message = error.message ?: error.javaClass.simpleName)
@@ -1300,20 +1313,73 @@ object AgentApi {
 
     const val CLOUD_ATTACHMENT_ORIGIN = "https://homing.local"
 
+    fun isCloudActive(): Boolean = transportRouter?.kind?.value == TransportKind.CLOUD
+
     fun attachmentUrl(settings: AppSettings, attachment: Attachment): String {
         if (attachment.url.startsWith("http://") || attachment.url.startsWith("https://")) {
             return attachment.url
         }
-        val base = settings.baseUrl.trimEnd('/').ifBlank { CLOUD_ATTACHMENT_ORIGIN }
+        val base = if (isCloudActive() || settings.baseUrl.isBlank()) {
+            CLOUD_ATTACHMENT_ORIGIN
+        } else {
+            settings.baseUrl.trimEnd('/')
+        }
         return "$base/${attachment.url.trimStart('/')}"
+    }
+
+    fun projectRawFileUrl(settings: AppSettings, path: String, cwd: String): String {
+        val base = if (isCloudActive() || settings.baseUrl.isBlank()) {
+            CLOUD_ATTACHMENT_ORIGIN
+        } else {
+            settings.baseUrl.trimEnd('/')
+        }
+        val cleanPath = path.removePrefix("file://").trim()
+        val encodedPath = URLEncoder.encode(cleanPath, Charsets.UTF_8.name())
+        val query = buildString {
+            append("path=").append(encodedPath)
+            if (cwd.isNotBlank()) {
+                append("&cwd=").append(URLEncoder.encode(cwd.trim(), Charsets.UTF_8.name()))
+            }
+        }
+        return "$base/api/fs/raw?$query"
+    }
+
+    fun maybeAttachLanAuth(request: okhttp3.Request): okhttp3.Request {
+        val settings = activeSettingsProvider?.invoke() ?: return request
+        val base = settings.baseUrl.trimEnd('/')
+        val token = settings.token
+        if (base.isBlank() || token.isBlank()) return request
+        val url = request.url.toString()
+        if (!url.startsWith(base)) return request
+        val path = request.url.encodedPath
+        if (!path.startsWith("/api/fs/raw")) return request
+        return request.newBuilder()
+            .header("Authorization", "Bearer $token")
+            .build()
     }
 
     fun shouldRouteViaCloudTransport(url: String): Boolean {
         val router = transportRouter ?: return false
+        val path = extractPath(url)
+        if (!isCloudRoutablePath(path)) return false
         if (url.startsWith(CLOUD_ATTACHMENT_ORIGIN)) return true
-        if (router.kind.value != TransportKind.CLOUD) return false
-        val path = runCatching { URL(url).path }.getOrDefault("")
-        return path.startsWith("/f/")
+        return router.kind.value == TransportKind.CLOUD
+    }
+
+    private fun extractPath(url: String): String {
+        val trimmed = url.trim().replace(" ", "%20")
+        return runCatching { URL(trimmed).path }.getOrElse {
+            trimmed.substringAfter("://", trimmed)
+                .let { rest ->
+                    val idx = rest.indexOf('/')
+                    if (idx >= 0) rest.substring(idx).substringBefore('?') else ""
+                }
+        }
+    }
+
+    private fun isCloudRoutablePath(path: String): Boolean {
+        if (path.contains("..")) return false
+        return path.startsWith("/f/") || path == "/api/fs/raw"
     }
 
     suspend fun downloadAttachmentBytes(
@@ -1328,12 +1394,21 @@ object AgentApi {
                 return@withContext router.download(url)
             }
         }
+        val active = activeSettingsProvider?.invoke()
+        val effectiveBase = settings.baseUrl.ifBlank { active?.baseUrl.orEmpty() }.trimEnd('/')
+        val effectiveToken = settings.token.ifBlank { active?.token.orEmpty() }
         val connection = URL(url).openConnection() as HttpURLConnection
         try {
             connection.connectTimeout = 10_000
             connection.readTimeout = 90_000
             connection.instanceFollowRedirects = true
             connection.setRequestProperty("Accept", "*/*")
+            if (effectiveBase.isNotBlank() &&
+                effectiveToken.isNotBlank() &&
+                url.startsWith("$effectiveBase/api/fs/raw")
+            ) {
+                connection.setRequestProperty("Authorization", "Bearer $effectiveToken")
+            }
             val code = connection.responseCode
             if (code !in 200..299) {
                 throw IOException("下载失败 HTTP $code")
@@ -1456,12 +1531,15 @@ object AgentApi {
             }
             val response = router.request(method, path, parsedBody)
             if (response.status !in 200..299) {
-                val message = (response.body as? JSONObject)
-                    ?.optString("error")
+                val json = response.body as? JSONObject
+                val codeField = json?.stringOrBlank("error").orEmpty()
+                    .ifBlank { json?.stringOrBlank("code").orEmpty() }
+                    .takeIf { it.isNotBlank() }
+                val message = json?.stringOrBlank("message")
                     ?.takeIf { it.isNotBlank() }
-                    ?: response.raw.take(240)
-                        .ifBlank { "HTTP ${response.status}" }
-                throw AgentApiException(response.status, message)
+                    ?: codeField
+                    ?: response.raw.take(240).ifBlank { "HTTP ${response.status}" }
+                throw AgentApiException(response.status, message, errorCode = codeField)
             }
             return response.raw
         }
@@ -1493,11 +1571,15 @@ object AgentApi {
                 ?.use { it.readText() }
                 .orEmpty()
             if (code !in 200..299) {
-                val message = runCatching {
-                    JSONObject(responseBody).optString("error")
-                }.getOrNull()?.takeIf { it.isNotBlank() }
+                val json = runCatching { JSONObject(responseBody) }.getOrNull()
+                val codeField = json?.stringOrBlank("error").orEmpty()
+                    .ifBlank { json?.stringOrBlank("code").orEmpty() }
+                    .takeIf { it.isNotBlank() }
+                val message = json?.stringOrBlank("message")
+                    ?.takeIf { it.isNotBlank() }
+                    ?: codeField
                     ?: responseBody.take(240).ifBlank { "HTTP $code" }
-                throw AgentApiException(code, message)
+                throw AgentApiException(code, message, errorCode = codeField)
             }
             return responseBody
         } finally {

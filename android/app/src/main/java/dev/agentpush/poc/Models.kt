@@ -1321,13 +1321,18 @@ data class SessionSummary(
     val collab: SessionCollab? = null,
     val computerId: String = "",
     val computerName: String = "",
+    val pendingSuperseded: Boolean = false,
 ) {
     val pendingEvent: AgentEvent?
-        get() = latestEvent?.takeIf { event ->
-            event.isPending && replies.none { reply ->
-                reply.eventId == event.id &&
-                    reply.status != ReplyStatus.FAILED &&
-                    reply.status != ReplyStatus.CANCELLED
+        get() = if (pendingSuperseded) {
+            null
+        } else {
+            latestEvent?.takeIf { event ->
+                event.isPending && replies.none { reply ->
+                    reply.eventId == event.id &&
+                        reply.status != ReplyStatus.FAILED &&
+                        reply.status != ReplyStatus.CANCELLED
+                }
             }
         }
 
@@ -1806,6 +1811,7 @@ data class AgentUiState(
     val inbox: InboxFeed? = null,
     val home: HomeFeed? = null,
     val sessionDrafts: Map<String, String> = emptyMap(),
+    val settledApprovalIds: Set<Long> = emptySet(),
 ) {
     val allUnreadCount: Int
         get() = events.values.count { !it.read }
@@ -1847,7 +1853,21 @@ data class AgentUiState(
                 source = source,
             )
             val wireStatus = SessionStatus.fromWire(meta?.status)
+            val itemsState = sessionItems[key]
+            val latestSupersededByItems = latest?.isPending == true &&
+                itemsState?.items.orEmpty().any { item ->
+                    item.type == SessionItemType.ASSISTANT &&
+                        !item.partial &&
+                        item.text.isNotBlank() &&
+                        epochMillis(item.ts) > epochMillis(latest.ts) + 500L
+                }
+            val latestApprovalSettled = latest != null && (
+                latest.id in settledApprovalIds ||
+                    (latest.isPermission && latest.read && wireStatus != SessionStatus.NEEDS_PERMISSION) ||
+                    latestSupersededByItems
+                )
             val status = when {
+                latestApprovalSettled -> SessionStatus.COMPLETED
                 wireStatus == SessionStatus.WAITING_INPUT &&
                     isIdlePromptNoiseEvent("needs_input", meta?.lastPreview.orEmpty()) ->
                     SessionStatus.fromKind(latest?.kind) ?: SessionStatus.COMPLETED
@@ -1859,7 +1879,6 @@ data class AgentUiState(
                     ?: SessionStatus.fromKind(latest?.kind)
                     ?: SessionStatus.IDLE
             }
-            val itemsState = sessionItems[key]
             val running = (
                 itemsState?.running == true ||
                     meta?.running == true ||
@@ -1938,6 +1957,7 @@ data class AgentUiState(
                 collab = meta?.collab,
                 computerId = meta?.computerId.orEmpty(),
                 computerName = meta?.computerName.orEmpty(),
+                pendingSuperseded = latestApprovalSettled,
             )
         }.sortedWith(
             compareByDescending<SessionSummary> { it.pinned }

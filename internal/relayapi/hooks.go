@@ -114,7 +114,7 @@ func handleAgentHook(ctx context.Context, d *api.Deps, source string, body map[s
 		}
 		claimLaunch(d, event)
 		trackDispatchLifecycle(d, event)
-		return holdApproval(ctx, event), nil
+		return holdApprovalWithDeps(ctx, d, event), nil
 
 	case "Notification":
 		notifType := stringField(body, "notification_type")
@@ -122,12 +122,17 @@ func handleAgentHook(ctx context.Context, d *api.Deps, source string, body map[s
 		if scanlib.IsIdlePromptNotification(notifType, text) {
 			return map[string]any{"ok": true, "ignored": "idle_prompt"}, nil
 		}
+		if notifType == "permission_prompt" && HasPendingApprovalForSession(sessionID) {
+			return map[string]any{"ok": true, "ignored": "duplicate_permission_prompt"}, nil
+		}
 		text = scanlib.NormalizeHookSourceBranding(source, text)
 		kind := "needs_input"
 		title := label + " 等待输入"
 		if notifType == "permission_prompt" {
-			kind = "permission"
-			title = label + " 请求权限"
+			// Hook Notification fires concurrently with or instead of PermissionRequest and
+			// ignores PermissionRequest decision stdout; surface as non-blocking needs_input
+			// rather than holding or registering dead allow/deny buttons.
+			title = label + " 等待确认"
 		}
 		event, err := ingestEvent(d, source, kind, sessionID, cwd, title, text)
 		if err != nil {
@@ -135,9 +140,6 @@ func handleAgentHook(ctx context.Context, d *api.Deps, source string, body map[s
 		}
 		claimLaunch(d, event)
 		trackDispatchLifecycle(d, event)
-		if kind == "permission" {
-			return holdApproval(ctx, event), nil
-		}
 	}
 	return map[string]any{}, nil
 }

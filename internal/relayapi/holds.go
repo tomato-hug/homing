@@ -35,20 +35,26 @@ type stopHold struct {
 }
 
 type approvalHold struct {
-	ch chan map[string]any
+	sessionID string
+	source    string
+	ch        chan map[string]any
 }
 
 var waits = struct {
-	mu        sync.Mutex
-	bySession map[string][]*stopHold
-	approvals map[int64]*approvalHold
+	mu               sync.Mutex
+	bySession        map[string][]*stopHold
+	approvals        map[int64]*approvalHold
+	settledApprovals map[int64]bool
+	settledOrder     []int64
 }{
-	bySession: map[string][]*stopHold{},
-	approvals: map[int64]*approvalHold{},
+	bySession:        map[string][]*stopHold{},
+	approvals:        map[int64]*approvalHold{},
+	settledApprovals: map[int64]bool{},
 }
 
 func init() {
 	api.RegisterAwayEndHook(func() { releaseStopHolds() })
+	api.RegisterApprovalSettledChecker(IsApprovalSettled)
 	api.SetReplyInterceptor(func(
 		_ *http.Request,
 		reply store.Reply,
@@ -204,8 +210,74 @@ func blockDecision(texts []string) map[string]any {
 	}
 }
 
+const maxSettledApprovals = 2048
+
+// HasPendingApprovalForSession reports whether an interactive approval hold
+// is currently active for sessionID.
+func HasPendingApprovalForSession(sessionID string) bool {
+	if strings.TrimSpace(sessionID) == "" {
+		return false
+	}
+	waits.mu.Lock()
+	defer waits.mu.Unlock()
+	for _, hold := range waits.approvals {
+		if hold != nil && hold.sessionID == sessionID {
+			return true
+		}
+	}
+	return false
+}
+
+// IsApprovalSettled reports whether eventID's interactive approval hold has
+// already finished, timed out, or failed as not_pending.
+func IsApprovalSettled(eventID int64) bool {
+	if eventID <= 0 {
+		return false
+	}
+	waits.mu.Lock()
+	defer waits.mu.Unlock()
+	return waits.settledApprovals[eventID]
+}
+
+func markApprovalSettledLocked(eventID int64) {
+	if eventID <= 0 {
+		return
+	}
+	if !waits.settledApprovals[eventID] {
+		waits.settledApprovals[eventID] = true
+		waits.settledOrder = append(waits.settledOrder, eventID)
+		for len(waits.settledOrder) > maxSettledApprovals {
+			oldest := waits.settledOrder[0]
+			waits.settledOrder = waits.settledOrder[1:]
+			delete(waits.settledApprovals, oldest)
+		}
+	}
+}
+
+func markEventSettledInStore(d *api.Deps, event store.Event) {
+	if d == nil || event.ID <= 0 {
+		return
+	}
+	s, err := d.Store()
+	if err != nil {
+		return
+	}
+	s.MarkRead([]int64{event.ID})
+	if event.Source != "" && event.SessionID != "" {
+		_ = s.AdvanceSeen(event.Source, event.SessionID, event.ID)
+	}
+}
+
 func holdApproval(ctx context.Context, event store.Event) map[string]any {
-	hold := &approvalHold{ch: make(chan map[string]any, 1)}
+	return holdApprovalWithDeps(ctx, nil, event)
+}
+
+func holdApprovalWithDeps(ctx context.Context, d *api.Deps, event store.Event) map[string]any {
+	hold := &approvalHold{
+		sessionID: event.SessionID,
+		source:    event.Source,
+		ch:        make(chan map[string]any, 1),
+	}
 	waits.mu.Lock()
 	waits.approvals[event.ID] = hold
 	waits.mu.Unlock()
@@ -214,7 +286,9 @@ func holdApproval(ctx context.Context, event store.Event) map[string]any {
 		if waits.approvals[event.ID] == hold {
 			delete(waits.approvals, event.ID)
 		}
+		markApprovalSettledLocked(event.ID)
 		waits.mu.Unlock()
+		markEventSettledInStore(d, event)
 	}()
 
 	timer := time.NewTimer(holdTimeout)
@@ -227,6 +301,39 @@ func holdApproval(ctx context.Context, event store.Event) map[string]any {
 	case <-timer.C:
 		return map[string]any{}
 	}
+}
+
+func findFallbackApprovalLocked(s *store.Store, eventID int64) (int64, *approvalHold, store.Event) {
+	if s == nil {
+		return 0, nil, store.Event{}
+	}
+	var target store.Event
+	for _, ev := range s.Events() {
+		if ev.ID == eventID {
+			target = ev
+			break
+		}
+	}
+	if target.SessionID == "" {
+		return 0, nil, target
+	}
+	var matchedID int64
+	var matchedHold *approvalHold
+	for id, candidate := range waits.approvals {
+		if candidate == nil || candidate.sessionID != target.SessionID {
+			continue
+		}
+		if target.Source != "" && candidate.source != "" && candidate.source != target.Source {
+			continue
+		}
+		if matchedHold != nil {
+			// Ambiguous multiple holds for the same session; do not guess.
+			return 0, nil, target
+		}
+		matchedID = id
+		matchedHold = candidate
+	}
+	return matchedID, matchedHold, target
 }
 
 func resolveApproval(d *api.Deps, w http.ResponseWriter, r *http.Request) {
@@ -253,15 +360,48 @@ func resolveApproval(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 		"decision": decision,
 	})
 
+	var s *store.Store
+	if st, storeErr := d.Store(); storeErr == nil {
+		s = st
+	}
+
 	waits.mu.Lock()
+	resolvedID := eventID
 	hold := waits.approvals[eventID]
+	var targetEvent store.Event
 	if hold != nil {
 		delete(waits.approvals, eventID)
+		markApprovalSettledLocked(eventID)
+	} else {
+		fallbackID, fallbackHold, ev := findFallbackApprovalLocked(s, eventID)
+		targetEvent = ev
+		if fallbackHold != nil {
+			resolvedID = fallbackID
+			hold = fallbackHold
+			delete(waits.approvals, fallbackID)
+			markApprovalSettledLocked(eventID)
+			markApprovalSettledLocked(fallbackID)
+		} else {
+			markApprovalSettledLocked(eventID)
+		}
 	}
 	waits.mu.Unlock()
 	if hold == nil {
+		if targetEvent.ID == 0 && s != nil {
+			for _, ev := range s.Events() {
+				if ev.ID == eventID {
+					targetEvent = ev
+					break
+				}
+			}
+		}
+		markEventSettledInStore(d, store.Event{
+			ID:        eventID,
+			Source:    targetEvent.Source,
+			SessionID: targetEvent.SessionID,
+		})
 		api.WriteJSON(w, http.StatusNotFound, map[string]any{
-			"ok": false, "error": "not_pending", "message": "该授权请求没有挂起或已处理",
+			"ok": false, "error": "not_pending", "message": "该授权请求已在电脑端处理或已过期",
 		})
 		return
 	}
@@ -274,17 +414,21 @@ func resolveApproval(d *api.Deps, w http.ResponseWriter, r *http.Request) {
 		answer["option_id"] = optionID
 	}
 	hold.ch <- answer
-	if s, err := d.Store(); err == nil {
-		s.MarkRead([]int64{eventID})
+	if s != nil {
+		ids := []int64{eventID}
+		if resolvedID != eventID {
+			ids = append(ids, resolvedID)
+		}
+		s.MarkRead(ids)
 		for _, event := range s.Events() {
-			if event.ID == eventID {
+			if event.ID == resolvedID {
 				_ = s.AdvanceSeen(event.Source, event.SessionID, event.ID)
 				break
 			}
 		}
 	}
 	api.WriteJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "event_id": eventID, "decision": decision,
+		"ok": true, "event_id": resolvedID, "decision": decision,
 		"option_id": strings.TrimSpace(stringField(body, "option_id")),
 	})
 }

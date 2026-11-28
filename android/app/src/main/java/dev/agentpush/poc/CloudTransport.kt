@@ -129,23 +129,10 @@ class CloudTransport(
     }
 
     override suspend fun download(url: String): ByteArray {
-        val path = runCatching {
-            val uri = java.net.URI(url)
-            if (uri.host.isNullOrBlank()) {
-                url.substringAfter("://", url)
-                    .substringAfter('/', "")
-                    .let { "/$it" }
-            } else {
-                buildString {
-                    append(uri.rawPath.ifBlank { "/" })
-                    uri.rawQuery?.let { append('?').append(it) }
-                }
-            }
-        }.getOrElse {
-            throw CloudRpcException("附件地址無效")
-        }
-        if (!path.startsWith("/f/")) {
-            throw CloudRpcException("云端附件下载只允许能力链接")
+        val path = extractDownloadPath(url)
+            ?: throw CloudRpcException("附件地址無效")
+        if (!isAllowedDownloadPath(path)) {
+            throw CloudRpcException("云端附件下载只允许能力链接或项目媒体预览")
         }
         val computer = link.preferredComputer()
             ?: throw CloudRpcException("尚未配對可用的電腦")
@@ -154,6 +141,34 @@ class CloudTransport(
             throw CloudRpcException("雲端通道尚未連上電腦")
         }
         return link.downloadFile(computer, path)
+    }
+
+    private fun extractDownloadPath(rawUrl: String): String? {
+        return runCatching {
+            val encoded = rawUrl.trim().replace(" ", "%20")
+            val uri = java.net.URI(encoded)
+            if (uri.host.isNullOrBlank()) {
+                val stripped = encoded.substringAfter("://", encoded)
+                val qIdx = stripped.indexOf('?')
+                val sIdx = stripped.indexOf('/')
+                when {
+                    stripped.startsWith("/") -> stripped
+                    sIdx >= 0 -> stripped.substring(sIdx)
+                    qIdx >= 0 -> stripped.substring(qIdx)
+                    else -> "/$stripped"
+                }
+            } else {
+                buildString {
+                    append(uri.rawPath.ifBlank { "/" })
+                    uri.rawQuery?.let { append('?').append(it) }
+                }
+            }
+        }.getOrNull()
+    }
+
+    private fun isAllowedDownloadPath(path: String): Boolean {
+        if (path.contains("..")) return false
+        return path.startsWith("/f/") || path.startsWith("/api/fs/raw?")
     }
 
     fun isAvailable(): Boolean = link.preferredComputer() != null

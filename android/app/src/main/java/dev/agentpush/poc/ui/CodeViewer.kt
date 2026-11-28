@@ -1,10 +1,18 @@
 package dev.agentpush.poc.ui
 
+import android.content.pm.ActivityInfo
+import android.webkit.WebChromeClient
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.widget.Toast
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -19,7 +27,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.WrapText
@@ -27,20 +34,25 @@ import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.FitScreen
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.Language
 import androidx.compose.material.icons.outlined.Remove
+import androidx.compose.material.icons.outlined.ScreenRotation
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -55,6 +67,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
@@ -67,8 +80,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import dev.agentpush.poc.AppSettings
 import dev.agentpush.poc.Attachment
 import dev.agentpush.poc.ui.theme.HomingMono
 import kotlinx.coroutines.launch
@@ -290,12 +305,13 @@ internal fun highlightLines(content: String, language: String): List<AnnotatedSt
     val out = ArrayList<AnnotatedString>(lines.size)
     var inBlock = false
     val plain = lang in setOf("txt", "log", "csv", "tsv", "md", "")
-    for (line in lines) {
+    for (rawLine in lines) {
+        val line = trimRenderLine(rawLine)
         if (plain) {
-            out.add(AnnotatedString(line.trimEnd('\r')))
+            out.add(AnnotatedString(line))
             continue
         }
-        val (annotated, stillBlock) = highlightLine(line.trimEnd('\r'), lang, inBlock)
+        val (annotated, stillBlock) = highlightLine(line, lang, inBlock)
         inBlock = stillBlock
         out.add(annotated)
     }
@@ -394,27 +410,52 @@ private fun withSearchMatches(text: AnnotatedString, query: String): AnnotatedSt
 // ----------------------------------------------------------------- viewer UI
 
 private const val MAX_VIEWER_LINES = 20_000
+internal const val MAX_LINE_RENDER_CHARS = 2_000
+private val IMAGE_PATH_EXTENSIONS = setOf("png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "avif")
 
+internal fun trimRenderLine(raw: String): String {
+    val clean = raw.trimEnd('\r')
+    if (clean.length <= MAX_LINE_RENDER_CHARS) return clean
+    return clean.take(MAX_LINE_RENDER_CHARS) + " … [该行共 ${clean.length} 字符，可点右上角复制全文]"
+}
+
+internal fun isRasterImagePath(path: String): Boolean {
+    val clean = path.replace(lineSuffix, "").substringBefore('?').substringBefore('#')
+    val ext = clean.substringAfterLast('.', "").lowercase()
+    return ext in IMAGE_PATH_EXTENSIONS
+}
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun CodeViewerDialog(
     doc: CodeViewerDoc,
     onDismiss: () -> Unit,
     onOpenUrl: (String) -> Unit = {},
 ) {
+    val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     val lang = remember(doc) { normalizeLanguage(doc.language.ifBlank { languageForName(doc.title) }) }
     val isMarkdown = lang == "md"
     val isHtml = lang in setOf("html", "htm", "svg")
     val allLines = remember(doc) { highlightLines(doc.content, lang) }
     val lines = remember(allLines) { allLines.take(MAX_VIEWER_LINES) }
-    var wrap by remember(doc) { mutableStateOf(lang in setOf("md", "txt", "log", "")) }
-    var preview by remember(doc) { mutableStateOf(isMarkdown) }
+    val longest = remember(lines) { lines.maxOfOrNull { it.length } ?: 0 }
+    var wrap by remember(doc) { mutableStateOf(lang in setOf("md", "txt", "log", "") || longest > 400) }
+    var preview by remember(doc) { mutableStateOf(isMarkdown || isHtml) }
+    var fitToScreen by remember(doc) { mutableStateOf(true) }
     var htmlPreview by remember(doc) { mutableStateOf(false) }
     var fontScale by remember { mutableFloatStateOf(1f) }
     var searchOpen by remember(doc) { mutableStateOf(false) }
     var query by remember(doc) { mutableStateOf("") }
     var matchCursor by remember(doc) { mutableIntStateOf(0) }
     var copied by remember(doc) { mutableStateOf(false) }
+    var webProgress by remember(doc) { mutableIntStateOf(0) }
+    var inlineWebView by remember { mutableStateOf<WebView?>(null) }
+    val activity = remember(context) { context.findHostActivity() }
+    val initialOrientation = remember(activity) {
+        activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+    }
+    var landscape by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val matches = remember(lines, query) {
@@ -429,9 +470,21 @@ fun CodeViewerDialog(
     val charWidthPx = remember(fontScale) {
         measurer.measure(AnnotatedString("M"), codeStyle).size.width.coerceAtLeast(1)
     }
-    val longest = remember(lines) { lines.maxOfOrNull { it.length } ?: 0 }
     val contentWidth = with(density) {
-        ((longest + gutterDigits + 4) * charWidthPx).toDp().coerceIn(200.dp, 12_000.dp)
+        ((longest + gutterDigits + 4) * charWidthPx).toDp().coerceIn(200.dp, 2_400.dp)
+    }
+
+    DisposableEffect(activity) {
+        onDispose {
+            activity?.requestedOrientation = initialOrientation
+            inlineWebView?.apply {
+                stopLoading()
+                webChromeClient = null
+                webViewClient = WebViewClient()
+                destroy()
+            }
+            inlineWebView = null
+        }
     }
 
     LaunchedEffect(doc, preview) {
@@ -480,7 +533,7 @@ fun CodeViewerDialog(
                             overflow = TextOverflow.MiddleEllipsis,
                         )
                     }
-                    if (isMarkdown) {
+                    if (isMarkdown || isHtml) {
                         IconButton(onClick = { preview = !preview }, modifier = Modifier.testTag("code-viewer-preview")) {
                             Icon(
                                 if (preview) Icons.Outlined.Code else Icons.Outlined.Visibility,
@@ -489,7 +542,47 @@ fun CodeViewerDialog(
                             )
                         }
                     }
-                    if (isHtml) {
+                    if (isHtml && preview) {
+                        TextButton(
+                            onClick = {
+                                val next = !fitToScreen
+                                fitToScreen = next
+                                inlineWebView?.let { applyMobileFitScript(it, next) }
+                            },
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                        ) {
+                            Icon(
+                                Icons.Outlined.FitScreen,
+                                contentDescription = null,
+                                tint = hlDefault,
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Text(
+                                text = if (fitToScreen) " 适应" else " 1:1",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = hlDefault,
+                            )
+                        }
+                        if (activity != null) {
+                            IconButton(
+                                onClick = {
+                                    val next = !landscape
+                                    landscape = next
+                                    activity.requestedOrientation = if (next) {
+                                        ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                                    } else {
+                                        ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                                    }
+                                },
+                            ) {
+                                Icon(
+                                    Icons.Outlined.ScreenRotation,
+                                    contentDescription = if (landscape) "切回竖屏" else "横屏查看",
+                                    tint = if (landscape) Color(0xFF58A6FF) else hlDefault,
+                                )
+                            }
+                        }
+                    } else if (isHtml) {
                         IconButton(onClick = { htmlPreview = true }) {
                             Icon(Icons.Outlined.Language, contentDescription = "预览网页", tint = hlDefault)
                         }
@@ -558,20 +651,68 @@ fun CodeViewerDialog(
                         ) { Icon(Icons.Outlined.KeyboardArrowDown, contentDescription = "下一个", tint = hlDefault) }
                     }
                 }
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.End,
-                ) {
-                    IconButton(onClick = { fontScale = (fontScale - 0.1f).coerceAtLeast(0.7f) }, modifier = Modifier.size(30.dp)) {
-                        Icon(Icons.Outlined.Remove, contentDescription = "缩小字号", tint = hlComment, modifier = Modifier.size(16.dp))
-                    }
-                    Text("${(fontScale * 100).toInt()}%", style = TextStyle(fontSize = 10.5.sp, color = hlComment, fontFamily = HomingMono))
-                    IconButton(onClick = { fontScale = (fontScale + 0.1f).coerceAtMost(1.8f) }, modifier = Modifier.size(30.dp)) {
-                        Icon(Icons.Outlined.Add, contentDescription = "放大字号", tint = hlComment, modifier = Modifier.size(16.dp))
+                if (!preview) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.End,
+                    ) {
+                        IconButton(onClick = { fontScale = (fontScale - 0.1f).coerceAtLeast(0.7f) }, modifier = Modifier.size(30.dp)) {
+                            Icon(Icons.Outlined.Remove, contentDescription = "缩小字号", tint = hlComment, modifier = Modifier.size(16.dp))
+                        }
+                        Text("${(fontScale * 100).toInt()}%", style = TextStyle(fontSize = 10.5.sp, color = hlComment, fontFamily = HomingMono))
+                        IconButton(onClick = { fontScale = (fontScale + 0.1f).coerceAtMost(1.8f) }, modifier = Modifier.size(30.dp)) {
+                            Icon(Icons.Outlined.Add, contentDescription = "放大字号", tint = hlComment, modifier = Modifier.size(16.dp))
+                        }
                     }
                 }
-                if (preview && isMarkdown) {
+                if (preview && isHtml) {
+                    if (webProgress in 1..99) {
+                        LinearProgressIndicator(
+                            progress = { webProgress / 100f },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                    val preparedHtml = remember(doc.content) {
+                        prepareHtmlForMobilePreview(doc.content, fitToScreen = true)
+                    }
+                    AndroidView(
+                        modifier = Modifier.fillMaxWidth().weight(1f),
+                        factory = { viewContext ->
+                            WebView(viewContext).apply {
+                                setBackgroundColor(0xFFFFFFFF.toInt())
+                                settings.javaScriptEnabled = true
+                                settings.domStorageEnabled = true
+                                settings.allowFileAccess = false
+                                settings.allowContentAccess = false
+                                settings.useWideViewPort = true
+                                settings.loadWithOverviewMode = true
+                                settings.setSupportZoom(true)
+                                settings.builtInZoomControls = true
+                                settings.displayZoomControls = false
+                                webChromeClient = object : WebChromeClient() {
+                                    override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                                        webProgress = newProgress
+                                    }
+                                }
+                                webViewClient = object : WebViewClient() {
+                                    override fun onPageFinished(view: WebView?, url: String?) {
+                                        super.onPageFinished(view, url)
+                                        view?.let { applyMobileFitScript(it, fitToScreen) }
+                                    }
+                                }
+                                inlineWebView = this
+                                loadDataWithBaseURL(
+                                    "https://agent-inbox.local/",
+                                    preparedHtml,
+                                    "text/html",
+                                    "UTF-8",
+                                    null,
+                                )
+                            }
+                        },
+                    )
+                } else if (preview && isMarkdown) {
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
@@ -591,11 +732,11 @@ fun CodeViewerDialog(
                     } else {
                         Modifier.fillMaxSize().horizontalScroll(rememberScrollState())
                     }
-                    SelectionContainer(modifier = bodyModifier) {
+                    Box(modifier = bodyModifier) {
                         LazyColumn(
                             state = listState,
                             modifier = if (wrap) Modifier.fillMaxSize() else Modifier.width(contentWidth).fillMaxSize(),
-                            contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 32.dp),
+                            contentPadding = PaddingValues(bottom = 32.dp),
                         ) {
                             itemsIndexed(lines, key = { index, _ -> index }) { index, line ->
                                 val isTarget = doc.line > 0 && index == doc.line - 1
@@ -608,6 +749,13 @@ fun CodeViewerDialog(
                                                 isMatch -> Color(0x33F2CC60)
                                                 isTarget -> Color(0x331F6FEB)
                                                 else -> Color.Transparent
+                                            },
+                                        )
+                                        .combinedClickable(
+                                            onClick = {},
+                                            onLongClick = {
+                                                clipboard.setText(AnnotatedString(line.text))
+                                                Toast.makeText(context, "已复制第 ${index + 1} 行", Toast.LENGTH_SHORT).show()
                                             },
                                         ),
                                 ) {
@@ -644,7 +792,7 @@ fun CodeViewerDialog(
         }
     }
     if (htmlPreview) {
-        HtmlPreviewDialog(html = doc.content, onDismiss = { htmlPreview = false })
+        HtmlPreviewDialog(html = doc.content, title = doc.title.ifBlank { "HTML 预览" }, onDismiss = { htmlPreview = false })
     }
     LaunchedEffect(copied) {
         if (copied) {
@@ -664,26 +812,34 @@ fun DocumentViewerScope(
     loadPath: suspend (String) -> RemoteTextFile,
     loadAttachment: suspend (Attachment) -> String,
     onOpenUrl: (String) -> Unit,
+    settings: AppSettings = AppSettings(baseUrl = "", token = ""),
+    imageUrlForPath: ((String) -> String)? = null,
     content: @Composable () -> Unit,
 ) {
     var doc by remember { mutableStateOf<CodeViewerDoc?>(null) }
+    var imagePreview by remember { mutableStateOf<Pair<String, String>?>(null) }
     var loading by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
-    val host = remember(loadPath, loadAttachment) {
+    val host = remember(loadPath, loadAttachment, imageUrlForPath) {
         object : DocumentViewerHost {
             override fun openText(title: String, content: String, language: String, subtitle: String) {
                 doc = CodeViewerDoc(title = title, content = content, language = language, subtitle = subtitle)
             }
 
             override fun openPath(path: String) {
-                loading = path.substringAfterLast('/')
+                val cleanPath = path.replace(lineSuffix, "")
+                if (isRasterImagePath(cleanPath) && imageUrlForPath != null) {
+                    imagePreview = cleanPath.substringAfterLast('/') to imageUrlForPath(cleanPath)
+                    return
+                }
+                loading = cleanPath.substringAfterLast('/')
                 error = null
                 scope.launch {
                     runCatching { loadPath(path) }
                         .onSuccess { file ->
                             doc = CodeViewerDoc(
-                                title = file.name.ifBlank { path.substringAfterLast('/') },
+                                title = file.name.ifBlank { cleanPath.substringAfterLast('/') },
                                 content = file.content,
                                 language = file.language.ifBlank { languageForName(file.name) },
                                 subtitle = file.path,
@@ -720,6 +876,14 @@ fun DocumentViewerScope(
     }
     doc?.let { current ->
         CodeViewerDialog(doc = current, onDismiss = { doc = null }, onOpenUrl = onOpenUrl)
+    }
+    imagePreview?.let { (name, url) ->
+        FullScreenUrlImageDialog(
+            url = url,
+            title = name,
+            settings = settings,
+            onDismiss = { imagePreview = null },
+        )
     }
     loading?.let { name ->
         Dialog(onDismissRequest = { loading = null }) {

@@ -159,6 +159,7 @@ type relayEntry struct {
 	cwd           string
 	eventCount    int
 	unread        int
+	lastEventID   int64
 	lastTS        string
 	lastKind      string
 	lastPreview   string
@@ -194,6 +195,7 @@ func relayIndex(events []store.Event, replies []store.Reply) map[string]*relayEn
 			entry.cwd = event.Cwd
 		}
 		if entry.lastTS == "" || event.Ts >= entry.lastTS {
+			entry.lastEventID = event.ID
 			entry.lastTS = event.Ts
 			entry.lastKind = event.Kind
 			if event.Kind == "reply" && event.Text != "" {
@@ -309,6 +311,7 @@ func (d *Deps) buildSummary(ctx context.Context, c candidate) (Summary, bool) {
 		lastPreview string
 		eventCount  int
 		unread      int
+		lastEventID int64
 		lastKind    string
 		pending     bool
 		nativeState string
@@ -318,7 +321,7 @@ func (d *Deps) buildSummary(ctx context.Context, c candidate) (Summary, bool) {
 		sessionID, source = c.relay.sessionID, c.relay.source
 		cwd, lastTS, lastPreview = c.relay.cwd, c.relay.lastTS, c.relay.lastPreview
 		eventCount, unread = c.relay.eventCount, c.relay.unread
-		lastKind, pending = c.relay.lastKind, c.relay.pendingInject
+		lastEventID, lastKind, pending = c.relay.lastEventID, c.relay.lastKind, c.relay.pendingInject
 	case c.row.SessionID != "":
 		sessionID, source = c.row.SessionID, c.row.Source
 		cwd, lastTS, lastPreview = c.row.Cwd, c.row.LastTS, c.row.LastPreview
@@ -328,6 +331,14 @@ func (d *Deps) buildSummary(ctx context.Context, c candidate) (Summary, bool) {
 	}
 
 	meta := d.metaFor(ctx, source, sessionID, cwd)
+	effectiveKind := lastKind
+	if effectiveKind == "permission" {
+		if IsApprovalSettled(lastEventID) ||
+			(c.row.LastTS != "" && c.row.LastTS > lastTS && nativeState != "permission") ||
+			(meta.LastUserTS != "" && meta.LastUserTS > lastTS) {
+			effectiveKind = "done"
+		}
+	}
 	summary := Summary{
 		SessionID:      sessionID,
 		Source:         source,
@@ -338,7 +349,7 @@ func (d *Deps) buildSummary(ctx context.Context, c candidate) (Summary, bool) {
 		Branch:         optional(meta.Branch),
 		Cwd:            optional(firstNonEmpty(cwd, meta.Cwd)),
 		Model:          optional(meta.Model),
-		Status:         scanlib.Status(lastKind, pending, lastTS, firstNonEmpty(nativeState, meta.NativeState), runningWindow),
+		Status:         scanlib.Status(effectiveKind, pending, lastTS, firstNonEmpty(nativeState, meta.NativeState), runningWindow),
 		Unread:         unread,
 		LastTS:         optional(lastTS),
 		LastUserTS:     optional(meta.LastUserTS),

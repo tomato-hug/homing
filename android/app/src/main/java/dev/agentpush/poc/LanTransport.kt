@@ -185,10 +185,12 @@ class LanTransport(
 
     override suspend fun download(url: String): ByteArray = withContext(Dispatchers.IO) {
         val settings = settingsProvider()
-        val absolute = if (url.startsWith("http://") || url.startsWith("https://")) {
-            url
-        } else {
-            settings.baseUrl.trimEnd('/') + "/" + url.trimStart('/')
+        val absolute = when {
+            url.startsWith(AgentApi.CLOUD_ATTACHMENT_ORIGIN) && settings.baseUrl.isNotBlank() ->
+                settings.baseUrl.trimEnd('/') + "/" +
+                    url.removePrefix(AgentApi.CLOUD_ATTACHMENT_ORIGIN).trimStart('/')
+            url.startsWith("http://") || url.startsWith("https://") -> url
+            else -> settings.baseUrl.trimEnd('/') + "/" + url.trimStart('/')
         }
         val request = Request.Builder()
             .url(absolute)

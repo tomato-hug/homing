@@ -20,7 +20,9 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -160,6 +162,40 @@ private fun RemoteThumbnail(
 }
 
 @Composable
+fun FullScreenUrlImageDialog(
+    url: String,
+    title: String = "",
+    settings: AppSettings,
+    onDismiss: () -> Unit,
+) {
+    val name = title.ifBlank {
+        url.substringBefore('?').substringAfterLast('/').ifBlank { "image.png" }
+    }
+    val mime = when (name.substringAfterLast('.', "").lowercase()) {
+        "svg" -> "image/svg+xml"
+        "png" -> "image/png"
+        "gif" -> "image/gif"
+        "webp" -> "image/webp"
+        else -> "image/jpeg"
+    }
+    FullScreenImageViewer(
+        attachments = listOf(
+            Attachment(
+                id = "url-${url.hashCode()}",
+                name = name,
+                mime = mime,
+                size = 0L,
+                kind = "image",
+                url = url,
+            ),
+        ),
+        initialIndex = 0,
+        settings = settings,
+        onDismiss = onDismiss,
+    )
+}
+
+@Composable
 fun FullScreenImageViewer(
     attachments: List<Attachment>,
     initialIndex: Int,
@@ -228,7 +264,8 @@ fun FullScreenImageViewer(
                 modifier = Modifier
                     .fillMaxWidth()
                     .align(Alignment.TopCenter)
-                    .padding(horizontal = 8.dp, vertical = 30.dp),
+                    .statusBarsPadding()
+                    .padding(horizontal = 8.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 IconButton(onClick = onDismiss) {
@@ -289,7 +326,8 @@ fun FullScreenImageViewer(
                 text = images.getOrNull(pagerState.currentPage)?.name.orEmpty(),
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(horizontal = 24.dp, vertical = 38.dp),
+                    .navigationBarsPadding()
+                    .padding(horizontal = 24.dp, vertical = 16.dp),
                 color = Color.White.copy(alpha = 0.85f),
                 style = MaterialTheme.typography.bodySmall,
                 maxLines = 1,
