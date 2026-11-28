@@ -48,11 +48,12 @@ func (Agent) ReadItems(_ context.Context, sessionID string, limit int) ([]agent.
 }
 
 type codexCall struct {
-	id    string
-	kind  string
-	name  string
-	files []agent.ItemFile
-	plan  []agent.ItemPlan
+	id        string
+	kind      string
+	name      string
+	files     []agent.ItemFile
+	plan      []agent.ItemPlan
+	questions []agent.ItemQuestion
 }
 
 type codexItems struct {
@@ -139,11 +140,23 @@ func (s *codexItems) row(row map[string]any) []agent.Item {
 		id := toolItemID(callID)
 		s.calls[callID] = id
 		name := firstOf(str(payload["name"]), "shell")
-		command := codexCommand(str(payload["arguments"]))
+		rawArgs := str(payload["arguments"])
 		status := "running"
 		if str(payload["status"]) == "completed" {
 			status = "done"
 		}
+		if agent.IsInteractiveQuestionTool(name) {
+			questions, summary := agent.ParseInteractiveQuestions(name, rawArgs)
+			s.byCall[callID] = &codexCall{id: id, kind: "question", name: name, questions: questions}
+			clipped := clip(summary, 300)
+			return []agent.Item{{
+				TS: at, ID: id, Seq: s.seq, Type: "question", Role: "assistant",
+				Title: firstCodexQuestionTitle(questions, name), Text: summary, Questions: questions,
+				Command: clipped, Model: model,
+				Tool: &agent.ItemTool{Name: name, InputSummary: &clipped, Status: status},
+			}}
+		}
+		command := codexCommand(rawArgs)
 		s.byCall[callID] = &codexCall{id: id, kind: "tool_call", name: name}
 		return []agent.Item{{
 			TS: at, ID: id, Seq: s.seq, Type: "tool_call", Role: "assistant",
@@ -182,6 +195,17 @@ func (s *codexItems) row(row map[string]any) []agent.Item {
 				Tool: &agent.ItemTool{Name: name, InputSummary: &summary, Status: "running"},
 			}}
 		}
+		if agent.IsInteractiveQuestionTool(name) {
+			questions, summary := agent.ParseInteractiveQuestions(name, input)
+			s.byCall[callID] = &codexCall{id: id, kind: "question", name: name, questions: questions}
+			clipped := clip(summary, 300)
+			return []agent.Item{{
+				TS: at, ID: id, Seq: s.seq, Type: "question", Role: "assistant",
+				Title: firstCodexQuestionTitle(questions, name), Text: summary, Questions: questions,
+				Model: model,
+				Tool:  &agent.ItemTool{Name: name, InputSummary: &clipped, Status: "running"},
+			}}
+		}
 		summary := clip(input, 300)
 		s.byCall[callID] = &codexCall{id: id, kind: "tool_call", name: name}
 		return []agent.Item{{
@@ -207,6 +231,7 @@ func (s *codexItems) toolResult(callID, output, at, model, fallbackName string) 
 	name := fallbackName
 	var files []agent.ItemFile
 	var plan []agent.ItemPlan
+	var questions []agent.ItemQuestion
 	if known != nil {
 		if known.id != "" {
 			id = known.id
@@ -219,6 +244,7 @@ func (s *codexItems) toolResult(callID, output, at, model, fallbackName string) 
 		}
 		files = known.files
 		plan = known.plan
+		questions = known.questions
 	} else if cached, ok := s.calls[callID]; ok {
 		id = cached
 	}
@@ -226,8 +252,12 @@ func (s *codexItems) toolResult(callID, output, at, model, fallbackName string) 
 	tail := tailRunes(output, 800)
 	item := agent.Item{
 		TS: at, ID: id, Seq: s.seq, Type: kind, Role: "tool",
-		Model: model, Files: files, Plan: plan,
+		Model: model, Files: files, Plan: plan, Questions: questions,
 		Tool: &agent.ItemTool{Name: name, OutputTail: &tail, Status: "done"},
+	}
+	if kind == "question" && len(questions) > 0 {
+		item.Title = firstCodexQuestionTitle(questions, name)
+		item.Text = agent.FormatQuestionSummary(questions, name)
 	}
 	if code, ok := exitCodeOf(output); ok {
 		item.Tool.ExitCode = &code
@@ -237,6 +267,18 @@ func (s *codexItems) toolResult(callID, output, at, model, fallbackName string) 
 		}
 	}
 	return []agent.Item{item}
+}
+
+func firstCodexQuestionTitle(questions []agent.ItemQuestion, fallback string) string {
+	for _, q := range questions {
+		if h := strings.TrimSpace(q.Header); h != "" {
+			return h
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(fallback), "ExitPlanMode") {
+		return "计划确认"
+	}
+	return "待确认决策"
 }
 
 // toolItemID is the item id of a tool call. A row without call_id gets

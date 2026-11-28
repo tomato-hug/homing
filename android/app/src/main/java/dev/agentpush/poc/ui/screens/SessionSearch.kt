@@ -81,6 +81,7 @@ private fun roleLabel(item: TimelineItem): String {
             SessionItemType.TOOL_CALL -> "工具"
             SessionItemType.FILE_CHANGE -> "文件"
             SessionItemType.PLAN -> "计划"
+            SessionItemType.QUESTION -> "提问"
             SessionItemType.APPROVAL -> "授权"
             SessionItemType.ERROR -> "错误"
             SessionItemType.SYSTEM -> "系统"

@@ -2,6 +2,7 @@ package dev.agentpush.poc.ui.screens
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -11,6 +12,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Edit
@@ -36,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.agentpush.poc.AgentEvent
 import dev.agentpush.poc.ApprovalOption
+import dev.agentpush.poc.ItemQuestion
 import dev.agentpush.poc.SessionStatus
 import dev.agentpush.poc.SessionSummary
 import dev.agentpush.poc.ui.theme.HomingMono
@@ -55,6 +58,8 @@ internal fun SessionPendingDock(
     onToggleExpanded: () -> Unit,
     onDecision: (eventId: Long, decision: String, optionId: String?) -> Unit,
     onReply: () -> Unit,
+    pendingQuestions: List<ItemQuestion> = emptyList(),
+    onSelectOption: ((String) -> Unit)? = null,
 ) {
     val permission = event.isPermission || session.status == SessionStatus.NEEDS_PERMISSION
     val options = if (permission) {
@@ -67,9 +72,27 @@ internal fun SessionPendingDock(
     } else {
         emptyList()
     }
-    val accent = if (permission) HomingPalette.Warning else HomingPalette.Brand
-    val title = if (permission) "需要授权" else "等你回复"
-    val detail = event.text.ifBlank { event.title }.ifBlank { "Agent 正在等待你继续。" }
+    val questions = if (!permission) {
+        pendingQuestions.ifEmpty { event.questions }
+    } else {
+        emptyList()
+    }
+    val firstSingleOptions = if (questions.size == 1 && !questions[0].multiSelect) {
+        questions[0].options
+    } else {
+        emptyList()
+    }
+    val accent = if (permission || questions.isNotEmpty()) HomingPalette.Warning else HomingPalette.Brand
+    val title = when {
+        permission -> "需要授权"
+        questions.isNotEmpty() -> questions[0].header.ifBlank { "待确认决策" }
+        else -> "等你回复"
+    }
+    val detail = if (questions.isNotEmpty() && questions[0].question.isNotBlank()) {
+        questions[0].question
+    } else {
+        event.text.ifBlank { event.title }.ifBlank { "Agent 正在等待你继续。" }
+    }
 
     Surface(
         modifier = Modifier
@@ -186,6 +209,40 @@ internal fun SessionPendingDock(
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = accent),
                     ) {
                         Text("查看 ${options.size} 个授权选项")
+                    }
+                }
+                firstSingleOptions.isNotEmpty() && onSelectOption != null -> {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 7.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(7.dp),
+                        ) {
+                            firstSingleOptions.forEach { opt ->
+                                Button(
+                                    onClick = { onSelectOption(opt.label) },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = accent,
+                                        contentColor = HomingPalette.Background,
+                                    ),
+                                    shape = RoundedCornerShape(10.dp),
+                                ) {
+                                    Text(opt.label, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
+                            OutlinedButton(
+                                onClick = onReply,
+                                shape = RoundedCornerShape(10.dp),
+                            ) {
+                                Text("其他回复")
+                            }
+                        }
                     }
                 }
                 else -> {

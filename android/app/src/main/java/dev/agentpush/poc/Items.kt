@@ -11,11 +11,24 @@ enum class SessionItemType {
     TOOL_CALL,
     FILE_CHANGE,
     PLAN,
+    QUESTION,
     APPROVAL,
     ERROR,
     SYSTEM,
     OTHER,
 }
+
+data class ItemQuestionOption(
+    val label: String,
+    val description: String = "",
+)
+
+data class ItemQuestion(
+    val header: String = "",
+    val question: String,
+    val multiSelect: Boolean = false,
+    val options: List<ItemQuestionOption> = emptyList(),
+)
 
 data class ItemTool(
     val name: String = "",
@@ -44,10 +57,12 @@ data class SessionItem(
     val role: String = "",
     val partial: Boolean = false,
     val truncated: Boolean = false,
+    val title: String = "",
     val text: String = "",
     val tool: ItemTool = ItemTool(),
     val files: List<ItemFileChange> = emptyList(),
     val plan: List<ItemPlanStep> = emptyList(),
+    val questions: List<ItemQuestion> = emptyList(),
     val model: String = "",
     val eventId: Long? = null,
     val rawType: String = "",
@@ -112,6 +127,7 @@ data class SessionItem(
             val plan = parsePlan(json.optJSONArray("plan"))
                 .ifEmpty { parsePlan(toolJson?.optJSONArray("plan")) }
                 .ifEmpty { planFromText(text) }
+            val questions = parseItemQuestions(json.optJSONArray("questions"))
             val id = json.stringOrBlank("id")
                 .ifBlank { fallbackId }
                 .ifBlank { "${json.stringOrBlank("ts")}-$rawType-${text.take(24)}" }
@@ -123,7 +139,8 @@ data class SessionItem(
                 type == SessionItemType.OTHER &&
                 text.isBlank() &&
                 files.isEmpty() &&
-                plan.isEmpty()
+                plan.isEmpty() &&
+                questions.isEmpty()
             ) {
                 return null
             }
@@ -137,6 +154,7 @@ data class SessionItem(
                 role = role,
                 partial = json.optBoolean("partial", false),
                 truncated = json.optBoolean("truncated", false),
+                title = json.stringOrBlank("title"),
                 text = text,
                 tool = ItemTool(
                     name = toolName,
@@ -147,6 +165,7 @@ data class SessionItem(
                 ),
                 files = files,
                 plan = plan,
+                questions = questions,
                 model = json.stringOrBlank("model"),
                 eventId = eventId,
                 rawType = rawType,
@@ -162,6 +181,12 @@ data class SessionItem(
             toolName: String,
             json: JSONObject,
         ): SessionItemType {
+            if (rawType == "question" || json.optJSONArray("questions")?.let { it.length() > 0 } == true) {
+                return SessionItemType.QUESTION
+            }
+            if (isInteractiveQuestionTool(toolName)) {
+                return SessionItemType.QUESTION
+            }
             if (
                 rawType in setOf("tool_result", "function_call_output", "tool-output") ||
                 role == "tool"
@@ -280,6 +305,7 @@ internal fun SessionItem.toJson(): JSONObject {
             SessionItemType.TOOL_CALL -> if (isToolResult) "tool_result" else "tool_call"
             SessionItemType.FILE_CHANGE -> "file_change"
             SessionItemType.PLAN -> "plan"
+            SessionItemType.QUESTION -> "question"
             SessionItemType.APPROVAL -> "permission"
             SessionItemType.ERROR -> "error"
             SessionItemType.SYSTEM -> "system"
@@ -328,6 +354,10 @@ internal fun SessionItem.toJson(): JSONObject {
         )
         .put("model", model)
         .put("event_id", eventId ?: JSONObject.NULL)
+        .apply {
+            if (title.isNotBlank()) put("title", title)
+            if (questions.isNotEmpty()) put("questions", itemQuestionsToJson(questions))
+        }
 }
 
 data class SessionTurn(
@@ -382,7 +412,7 @@ fun normalizeSessionItems(items: List<SessionItem>): List<SessionItem> {
         if (item.isNoise()) continue
         if (item.isToolResult) {
             val index = output.indexOfLast { candidate ->
-                candidate.type == SessionItemType.TOOL_CALL &&
+                (candidate.type == SessionItemType.TOOL_CALL || candidate.type == SessionItemType.QUESTION) &&
                     candidate.tool.outputTail.isBlank() &&
                     (
                         item.tool.name.isBlank() ||
@@ -400,6 +430,8 @@ fun normalizeSessionItems(items: List<SessionItem>): List<SessionItem> {
                         status = item.tool.status.ifBlank { target.tool.status },
                     ),
                 )
+            } else if (item.type == SessionItemType.QUESTION) {
+                output += item
             } else {
                 output += item.copy(
                     type = SessionItemType.TOOL_CALL,
@@ -460,13 +492,35 @@ fun appendSessionItem(
 }
 
 private fun mergeSessionItem(existing: SessionItem, incoming: SessionItem): SessionItem {
+    val resolvedType = if (existing.type == SessionItemType.QUESTION) {
+        SessionItemType.QUESTION
+    } else {
+        incoming.type
+    }
+    val resolvedTitle = incoming.title.ifBlank { existing.title }
+    val resolvedQuestions = if (incoming.questions.isNotEmpty()) incoming.questions else existing.questions
     if (!incoming.truncated) {
-        if (!incoming.partial || incoming.text.length >= existing.text.length) {
-            return incoming
+        val base = if (!incoming.partial || incoming.text.length >= existing.text.length) {
+            incoming
+        } else {
+            incoming.copy(text = existing.text)
         }
-        return incoming.copy(text = existing.text)
+        return if (
+            base.type == resolvedType &&
+            base.title == resolvedTitle &&
+            base.questions == resolvedQuestions
+        ) {
+            base
+        } else {
+            base.copy(
+                type = resolvedType,
+                title = resolvedTitle,
+                questions = resolvedQuestions,
+            )
+        }
     }
     return incoming.copy(
+        type = resolvedType,
         text = if (existing.text.length > incoming.text.length) existing.text else incoming.text,
         tool = incoming.tool.copy(
             name = incoming.tool.name.ifBlank { existing.tool.name },
@@ -485,8 +539,113 @@ private fun mergeSessionItem(existing: SessionItem, incoming: SessionItem): Sess
         ),
         files = if (existing.files.isNotEmpty()) existing.files else incoming.files,
         plan = if (incoming.plan.isNotEmpty()) incoming.plan else existing.plan,
+        title = incoming.title.ifBlank { existing.title },
+        questions = if (incoming.questions.isNotEmpty()) incoming.questions else existing.questions,
         truncated = existing.truncated,
     )
+}
+
+internal fun latestPendingQuestionItems(items: List<SessionItem>): List<ItemQuestion> {
+    for (index in items.indices.reversed()) {
+        val item = items[index]
+        when (item.type) {
+            SessionItemType.QUESTION -> {
+                val status = item.tool.status.lowercase()
+                if (status.isNotBlank() && status != "running" && status != "pending") {
+                    return emptyList()
+                }
+                return item.questions
+            }
+            SessionItemType.USER -> return emptyList()
+            SessionItemType.ASSISTANT -> if (item.text.isNotBlank()) return emptyList()
+            else -> Unit
+        }
+    }
+    return emptyList()
+}
+
+internal fun isInteractiveQuestionTool(name: String): Boolean {
+    return when (name.trim().lowercase()) {
+        "askuserquestion", "ask_user_question", "request_user_input", "exitplanmode", "exit_plan_mode" -> true
+        else -> false
+    }
+}
+
+internal fun parseItemQuestions(array: JSONArray?): List<ItemQuestion> {
+    if (array == null || array.length() == 0) return emptyList()
+    return buildList {
+        for (index in 0 until array.length()) {
+            val obj = array.optJSONObject(index) ?: continue
+            val question = obj.stringOrBlank("question")
+                .ifBlank { obj.stringOrBlank("prompt") }
+                .ifBlank { obj.stringOrBlank("title") }
+            val header = obj.stringOrBlank("header")
+                .ifBlank { obj.stringOrBlank("id") }
+            val multiSelect = obj.optBoolean("multi_select", obj.optBoolean("multiSelect", false))
+            val rawOptions = obj.optJSONArray("options")
+            val options = buildList {
+                if (rawOptions != null) {
+                    for (optIdx in 0 until rawOptions.length()) {
+                        when (val entry = rawOptions.opt(optIdx)) {
+                            is JSONObject -> {
+                                val label = entry.stringOrBlank("label")
+                                    .ifBlank { entry.stringOrBlank("title") }
+                                    .ifBlank { entry.stringOrBlank("value") }
+                                val description = entry.stringOrBlank("description")
+                                    .ifBlank { entry.stringOrBlank("subtitle") }
+                                if (label.isNotBlank() || description.isNotBlank()) {
+                                    add(
+                                        ItemQuestionOption(
+                                            label = label.ifBlank { description },
+                                            description = if (label.isNotBlank()) description else "",
+                                        ),
+                                    )
+                                }
+                            }
+                            is String -> if (entry.isNotBlank()) {
+                                add(ItemQuestionOption(label = entry.trim()))
+                            }
+                        }
+                    }
+                }
+            }
+            if (question.isNotBlank() || options.isNotEmpty() || header.isNotBlank()) {
+                add(
+                    ItemQuestion(
+                        header = header,
+                        question = question,
+                        multiSelect = multiSelect,
+                        options = options,
+                    ),
+                )
+            }
+        }
+    }
+}
+
+internal fun itemQuestionsToJson(questions: List<ItemQuestion>): JSONArray {
+    return JSONArray().apply {
+        questions.forEach { q ->
+            put(
+                JSONObject()
+                    .put("header", q.header)
+                    .put("question", q.question)
+                    .put("multi_select", q.multiSelect)
+                    .put(
+                        "options",
+                        JSONArray().apply {
+                            q.options.forEach { opt ->
+                                put(
+                                    JSONObject()
+                                        .put("label", opt.label)
+                                        .put("description", opt.description),
+                                )
+                            }
+                        },
+                    ),
+            )
+        }
+    }
 }
 
 fun applyTurnToItems(

@@ -10,6 +10,9 @@ package agent
 // what the phone shows for a tool call.
 func MergeItem(prev, next Item) Item {
 	merged := next
+	if merged.Title == "" {
+		merged.Title = prev.Title
+	}
 	if merged.Text == "" {
 		merged.Text = prev.Text
 	}
@@ -28,6 +31,9 @@ func MergeItem(prev, next Item) Item {
 	}
 	if len(next.Plan) == 0 {
 		merged.Plan = prev.Plan
+	}
+	if len(next.Questions) == 0 {
+		merged.Questions = prev.Questions
 	}
 	if prev.Tool != nil || next.Tool != nil {
 		var tool ItemTool

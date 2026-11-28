@@ -192,6 +192,7 @@ data class AgentEvent(
     val localhostLinks: List<Int> = emptyList(),
     val sessionMeta: SessionMeta? = null,
     val approvalOptions: List<ApprovalOption> = emptyList(),
+    val questions: List<ItemQuestion> = emptyList(),
 ) {
     val brand: AgentBrand
         get() = AgentBrand.fromWire(source)
@@ -235,6 +236,11 @@ data class AgentEvent(
                 "approval_options",
                 JSONArray().apply { approvalOptions.forEach { put(it.toJson()) } },
             )
+            .apply {
+                if (questions.isNotEmpty()) {
+                    put("questions", itemQuestionsToJson(questions))
+                }
+            }
             .put(
                 "attachments",
                 JSONArray().apply {
@@ -299,6 +305,7 @@ data class AgentEvent(
                     )
                 },
                 approvalOptions = approvalOptions,
+                questions = parseItemQuestions(json.optJSONArray("questions")),
                 localhostLinks = buildList {
                     if (links != null) {
                         for (index in 0 until links.length()) {

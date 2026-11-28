@@ -3,6 +3,7 @@ package claude
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -72,5 +73,41 @@ func TestFileMetaTracksLastUserTurn(t *testing.T) {
 	meta := fileMetaFor(fileEntry{path: file, sessionID: "demo-session-3", size: stat.Size(), mtime: stat.ModTime()})
 	if meta.lastUserTS != "2026-01-01T00:00:01Z" {
 		t.Fatalf("lastUserTS = %q, want the first real user turn", meta.lastUserTS)
+	}
+}
+
+func TestExtractFileItemsQuestionFunctionCall(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "demo-wb-question.jsonl")
+	pending := strings.Join([]string{
+		`{"type":"message","role":"user","sessionId":"demo-wb-q","timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":[{"type":"text","text":"请帮我选方案"}]}}`,
+		`{"type":"function_call","callId":"call-q1","name":"AskUserQuestion","sessionId":"demo-wb-q","timestamp":"2026-01-01T00:00:02Z","arguments":"{\"questions\":[{\"header\":\"风格\",\"multiSelect\":false,\"question\":\"请选择主题色？\",\"options\":[{\"label\":\"深海蓝\",\"description\":\"沉稳\"},{\"label\":\"琥珀橙\",\"description\":\"醒目\"}]}]}"}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(file, []byte(pending), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	items := ExtractFileItems(file, "workbuddy", 50)
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items, got %d: %+v", len(items), items)
+	}
+	q := items[1]
+	if q.Type != "question" || q.Tool == nil || q.Tool.Status != "running" {
+		t.Fatalf("expected running question item, got %+v", q)
+	}
+	if len(q.Questions) != 1 || q.Questions[0].Header != "风格" || len(q.Questions[0].Options) != 2 {
+		t.Fatalf("unexpected questions: %+v", q.Questions)
+	}
+
+	answered := pending + `{"type":"function_call_result","callId":"call-q1","name":"AskUserQuestion","sessionId":"demo-wb-q","timestamp":"2026-01-01T00:00:05Z","output":"深海蓝"}` + "\n"
+	if err := os.WriteFile(file, []byte(answered), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	items = ExtractFileItems(file, "workbuddy", 50)
+	if len(items) != 2 {
+		t.Fatalf("expected merged 2 items after result, got %d", len(items))
+	}
+	doneQ := items[1]
+	if doneQ.Type != "question" || doneQ.Tool == nil || doneQ.Tool.Status != "done" || len(doneQ.Questions) != 1 {
+		t.Fatalf("expected answered question item retaining Questions, got %+v", doneQ)
 	}
 }

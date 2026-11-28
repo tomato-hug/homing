@@ -57,12 +57,15 @@ import dev.agentpush.poc.ReplyStatus
 import dev.agentpush.poc.SessionItem
 import dev.agentpush.poc.SessionItemType
 import dev.agentpush.poc.SessionHistoryState
+import dev.agentpush.poc.SessionStatus
 import dev.agentpush.poc.SessionSummary
 import dev.agentpush.poc.TranscriptMessage
 import dev.agentpush.poc.formatClock
 import dev.agentpush.poc.media.PendingAttachment
 import dev.agentpush.poc.ui.AgentAvatar
 import dev.agentpush.poc.ui.ApprovalItemCard
+import dev.agentpush.poc.ui.QuestionItemCard
+import dev.agentpush.poc.ui.QuestionOptionsCard
 import dev.agentpush.poc.ui.AssistantItemCard
 import dev.agentpush.poc.ui.AttachmentCardList
 import dev.agentpush.poc.ui.ClaudeOrange
@@ -213,6 +216,12 @@ internal fun isInternalTitleJsonPayload(text: String): Boolean {
 
 private fun representedByNativeItem(event: AgentEvent, items: List<SessionItem>): Boolean {
     if (items.any { it.eventId == event.id }) return true
+    if (event.kind == "needs_input" && event.questions.isNotEmpty()) {
+        val questionItems = items.filter { it.type == SessionItemType.QUESTION && it.questions.isNotEmpty() }
+        if (questionItems.any { it.questions == event.questions || normalizeComparableText(it.text) == normalizeComparableText(event.text) }) {
+            return true
+        }
+    }
     if (event.isPending || event.text.isBlank()) return false
     val eventTime = timelineMillis(event.ts) ?: return false
     val lastUser = items.indexOfLast { it.type == SessionItemType.USER &&
@@ -444,6 +453,7 @@ internal fun SessionItemRow(
     onCopyCode: (String) -> Unit,
     onCopyText: (String) -> Unit,
     onDecision: (Long?, String, String?) -> Unit,
+    onSelectQuestionAnswer: ((String) -> Unit)? = null,
 ) {
     val matchedAttachments = remember(item.id, item.eventId, item.text, session.events) {
         val explicit = item.eventId?.let { id ->
@@ -509,6 +519,16 @@ internal fun SessionItemRow(
             },
         )
         SessionItemType.PLAN -> PlanItemCard(item)
+        SessionItemType.QUESTION -> {
+            val status = item.tool.status.lowercase()
+            val pending = (status.isBlank() || status == "running" || status == "pending") &&
+                session.status != SessionStatus.COMPLETED
+            QuestionItemCard(
+                item = item,
+                pending = pending,
+                onSelectAnswer = onSelectQuestionAnswer,
+            )
+        }
         SessionItemType.APPROVAL -> ApprovalItemCard(
             item = item.copy(
                 eventId = item.eventId
@@ -858,15 +878,27 @@ internal fun AgentEventCard(
                 tonalElevation = 1.dp,
             ) {
                 Column(modifier = Modifier.padding(14.dp)) {
-                    RichMarkdown(
-                        source = rewriteMarkdownImageUrls(
-                            event.text.ifBlank { event.title },
-                            event.attachments,
-                            settings,
-                        ),
-                        onCopyCode = onCopyCode,
-                        onOpenUrl = onOpenUrl,
-                    )
+                    if (event.kind == "needs_input" && event.questions.isNotEmpty()) {
+                        QuestionOptionsCard(
+                            questions = event.questions,
+                            title = event.title.ifBlank { "待确认决策" },
+                            fallbackText = event.text,
+                            pending = pending,
+                            statusLabel = if (pending) "待选择" else "已回复",
+                            accent = accent,
+                            onSelectAnswer = if (pending) onReply else null,
+                        )
+                    } else {
+                        RichMarkdown(
+                            source = rewriteMarkdownImageUrls(
+                                event.text.ifBlank { event.title },
+                                event.attachments,
+                                settings,
+                            ),
+                            onCopyCode = onCopyCode,
+                            onOpenUrl = onOpenUrl,
+                        )
+                    }
                     AttachmentCardList(
                         attachments = event.attachments,
                         settings = settings,

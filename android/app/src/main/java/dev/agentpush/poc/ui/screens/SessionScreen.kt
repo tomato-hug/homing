@@ -134,6 +134,7 @@ import dev.agentpush.poc.TranscriptMessage
 import dev.agentpush.poc.UploadResult
 import dev.agentpush.poc.agentMentionOptionKey
 import dev.agentpush.poc.formatClock
+import dev.agentpush.poc.latestPendingQuestionItems
 import dev.agentpush.poc.capabilityTokenIn
 import dev.agentpush.poc.changeAgentMentionPreset
 import dev.agentpush.poc.buildSessionMarkdown
@@ -1009,6 +1010,11 @@ internal fun SessionDetailContent(
             if (session != null) {
                 Column {
                     session.pendingEvent?.let { pending ->
+                        val pendingQuestions = remember(pending.questions, itemsState?.items) {
+                            pending.questions.ifEmpty {
+                                latestPendingQuestionItems(itemsState?.items.orEmpty())
+                            }
+                        }
                         SessionPendingDock(
                             session = session,
                             event = pending,
@@ -1038,10 +1044,23 @@ internal fun SessionDetailContent(
                                 composerFocusRequester.requestFocus()
                                 scope.launch {
                                     delay(80)
+                                    composerFocusRequester.requestFocus()
                                     if (timeline.isNotEmpty()) {
                                         listState.animateScrollToItem(lastTimelineListIndex)
                                     }
                                 }
+                            },
+                            pendingQuestions = pendingQuestions,
+                            onSelectOption = { answer ->
+                                actions.sendReply(
+                                    session,
+                                    answer,
+                                    pending.id,
+                                    emptyList(),
+                                    null,
+                                    null,
+                                    null,
+                                )
                             },
                         )
                     }
@@ -1280,6 +1299,17 @@ internal fun SessionDetailContent(
                                                 null,
                                             )
                                         }
+                                    },
+                                    onSelectQuestionAnswer = { answer ->
+                                        actions.sendReply(
+                                            session,
+                                            answer,
+                                            session.pendingEvent?.id ?: session.replyEventId ?: 0L,
+                                            emptyList(),
+                                            null,
+                                            null,
+                                            null,
+                                        )
                                     },
                                 )
                             }
@@ -1530,6 +1560,7 @@ private fun SessionTimelineCard(
     onCopyCode: (String) -> Unit,
     onCopyText: (String) -> Unit,
     onDecision: (Long?, String, String?) -> Unit,
+    onSelectQuestionAnswer: ((String) -> Unit)? = null,
 ) {
     SessionItemRow(
         item = item,
@@ -1543,6 +1574,7 @@ private fun SessionTimelineCard(
         onCopyCode = onCopyCode,
         onCopyText = onCopyText,
         onDecision = onDecision,
+        onSelectQuestionAnswer = onSelectQuestionAnswer,
     )
 }
 

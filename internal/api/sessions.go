@@ -339,6 +339,12 @@ func (d *Deps) buildSummary(ctx context.Context, c candidate) (Summary, bool) {
 			effectiveKind = "done"
 		}
 	}
+	if effectiveKind == "needs_input" {
+		if (c.row.LastTS != "" && c.row.LastTS > lastTS && nativeState != "permission" && nativeState != "needs_input") ||
+			(meta.LastUserTS != "" && meta.LastUserTS > lastTS) {
+			effectiveKind = "done"
+		}
+	}
 	summary := Summary{
 		SessionID:      sessionID,
 		Source:         source,

@@ -123,6 +123,14 @@ func claudeHooksSpec(url string) map[string]any {
 				map[string]any{"type": "http", "url": url, "timeout": 660},
 			}},
 		},
+		"PreToolUse": []any{
+			map[string]any{
+				"matcher": "AskUserQuestion|ExitPlanMode",
+				"hooks": []any{
+					map[string]any{"type": "http", "url": url, "timeout": 5},
+				},
+			},
+		},
 	}
 }
 

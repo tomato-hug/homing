@@ -121,7 +121,7 @@ func TestHookInstallMergesAndBacksUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	hooks := merged["hooks"].(map[string]any)
-	for _, event := range []string{"Stop", "Notification", "PermissionRequest"} {
+	for _, event := range []string{"Stop", "Notification", "PermissionRequest", "PreToolUse"} {
 		list, ok := hooks[event].([]any)
 		if !ok || !hookListHasURL(list, "http://127.0.0.1:18788/hook/claude") {
 			t.Fatalf("%s not merged: %s", event, raw)

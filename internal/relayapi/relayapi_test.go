@@ -888,3 +888,41 @@ func TestWorkBuddyIdleNotificationIgnoredAndBrandNormalized(t *testing.T) {
 		t.Fatalf("expected CodeBuddy brand rewritten to WorkBuddy, got %q", events[1].Text)
 	}
 }
+
+func TestPreToolUseAskUserQuestionCapturesStructuredOptionsAndDedupsNotification(t *testing.T) {
+	relay := newTestRelay(t, nil)
+	cwd := demoCwd(t)
+
+	// 1. PreToolUse for AskUserQuestion should produce immediate needs_input with Questions.
+	preBody := `{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_use_id":"toolu-q1","session_id":"demo-pre-q","cwd":` + jsonString(cwd) + `,"tool_input":{"questions":[{"header":"架构","multiSelect":false,"question":"选择通信方案？","options":[{"label":"SSE","description":"单向实时推送"},{"label":"WebSocket","description":"双向全双工"}]}]}}`
+	resp, raw := relay.do(t, http.MethodPost, "/hook/claude", []byte(preBody), false)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PreToolUse status=%d body=%s", resp.StatusCode, raw)
+	}
+
+	// 2. Non-question PreToolUse (e.g. Bash) is ignored.
+	bashBody := `{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_use_id":"toolu-b1","session_id":"demo-pre-q","cwd":` + jsonString(cwd) + `,"tool_input":{"command":"ls"}}`
+	bResp, bRaw := relay.do(t, http.MethodPost, "/hook/claude", []byte(bashBody), false)
+	if bResp.StatusCode != http.StatusOK || !strings.Contains(string(bRaw), `"ignored":"non_question_tool"`) {
+		t.Fatalf("expected non_question_tool ignored, got %d %s", bResp.StatusCode, bRaw)
+	}
+
+	// 3. Subsequent generic elicitation Notification within 30s is deduplicated.
+	notifBody := `{"hook_event_name":"Notification","notification_type":"elicitation_dialog","session_id":"demo-pre-q","cwd":` + jsonString(cwd) + `,"message":"Claude needs your input"}`
+	nResp, nRaw := relay.do(t, http.MethodPost, "/hook/claude", []byte(notifBody), false)
+	if nResp.StatusCode != http.StatusOK || !strings.Contains(string(nRaw), `"ignored":"duplicate_structured_question"`) {
+		t.Fatalf("expected duplicate_structured_question ignored, got %d %s", nResp.StatusCode, nRaw)
+	}
+
+	evResp, evBody := relay.do(t, http.MethodGet, "/api/events?since=0", nil, true)
+	if evResp.StatusCode != http.StatusOK {
+		t.Fatalf("events status=%d", evResp.StatusCode)
+	}
+	var events []store.Event
+	if err := json.Unmarshal(evBody, &events); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Kind != "needs_input" || events[0].Questions == nil {
+		t.Fatalf("expected 1 structured needs_input event, got %+v", events)
+	}
+}

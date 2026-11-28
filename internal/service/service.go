@@ -15,6 +15,7 @@ package service
 import (
 	"context"
 	"errors"
+	"flag"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -88,6 +89,9 @@ func Start(d *api.Deps) *Service {
 
 	adapter.SetEventSink(svc.Ingest)
 	go svc.watchAgents(context.Background())
+	if d.Version != "test" && flag.Lookup("test.v") == nil {
+		go svc.watchPendingQuestions(context.Background())
+	}
 	d.Log.Info("事件管道已接通", "data", d.DataDir)
 	return svc
 }

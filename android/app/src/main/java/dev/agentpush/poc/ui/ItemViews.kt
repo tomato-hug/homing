@@ -35,6 +35,7 @@ import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.HourglassEmpty
 import androidx.compose.material.icons.outlined.OpenInFull
 import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.QuestionAnswer
 import androidx.compose.material.icons.outlined.Remove
 import androidx.compose.material.icons.outlined.RadioButtonUnchecked
 import androidx.compose.material.icons.outlined.Security
@@ -59,6 +60,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -72,6 +74,7 @@ import dev.agentpush.poc.AppSettings
 import dev.agentpush.poc.ApprovalOption
 import dev.agentpush.poc.Attachment
 import dev.agentpush.poc.ItemFileChange
+import dev.agentpush.poc.ItemQuestion
 import dev.agentpush.poc.SessionItem
 import dev.agentpush.poc.SessionItemType
 import dev.agentpush.poc.formatClock
@@ -967,6 +970,251 @@ fun ApprovalItemCard(
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+        }
+    }
+}
+
+@Composable
+fun QuestionItemCard(
+    item: SessionItem,
+    pending: Boolean,
+    onSelectAnswer: ((String) -> Unit)? = null,
+) {
+    val answeredTail = item.tool.outputTail.trim()
+    val statusText = when {
+        pending -> "待选择"
+        answeredTail.isNotBlank() -> "已回答：$answeredTail"
+        else -> "已处理"
+    }
+    QuestionOptionsCard(
+        questions = item.questions,
+        title = item.title.ifBlank { "待确认决策" },
+        fallbackText = item.text,
+        pending = pending,
+        statusLabel = statusText,
+        accent = ClaudeOrange,
+        onSelectAnswer = onSelectAnswer,
+    )
+}
+
+@Composable
+fun QuestionOptionsCard(
+    questions: List<ItemQuestion>,
+    title: String,
+    fallbackText: String,
+    pending: Boolean,
+    statusLabel: String,
+    accent: Color,
+    onSelectAnswer: ((String) -> Unit)? = null,
+) {
+    val selections = remember(questions) {
+        mutableStateOf(emptyMap<Int, Set<String>>())
+    }
+    val singleImmediate = pending &&
+        onSelectAnswer != null &&
+        questions.size == 1 &&
+        !questions[0].multiSelect
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("question-decision-card"),
+        color = if (pending) accent.copy(alpha = 0.08f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+        shape = RoundedCornerShape(14.dp),
+        border = BorderStroke(
+            1.dp,
+            if (pending) accent.copy(alpha = 0.48f) else MaterialTheme.colorScheme.outlineVariant,
+        ),
+    ) {
+        Column(modifier = Modifier.padding(13.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.QuestionAnswer,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = if (pending) accent else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = title.ifBlank { "待确认决策" },
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(start = 7.dp),
+                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                    color = if (pending) accent else MaterialTheme.colorScheme.onSurface,
+                )
+                if (statusLabel.isNotBlank()) {
+                    Surface(
+                        color = if (pending) accent.copy(alpha = 0.16f) else MaterialTheme.colorScheme.surfaceVariant,
+                        shape = RoundedCornerShape(999.dp),
+                    ) {
+                        Text(
+                            text = statusLabel,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (pending) accent else MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+
+            if (questions.isEmpty()) {
+                if (fallbackText.isNotBlank()) {
+                    SelectionContainer {
+                        Text(
+                            text = fallbackText,
+                            modifier = Modifier.padding(top = 8.dp),
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                fontSize = 14.sp,
+                                lineHeight = 20.sp,
+                            ),
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
+                }
+            } else {
+                questions.forEachIndexed { qIndex, q ->
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = if (qIndex == 0) 9.dp else 12.dp),
+                    ) {
+                        if (q.header.isNotBlank() && (questions.size > 1 || q.header != title)) {
+                            Text(
+                                text = q.header + if (q.multiSelect) "（可多选）" else "",
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                color = if (pending) accent else MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                        if (q.question.isNotBlank()) {
+                            SelectionContainer {
+                                Text(
+                                    text = q.question,
+                                    modifier = Modifier.padding(top = if (q.header.isNotBlank()) 2.dp else 0.dp),
+                                    style = MaterialTheme.typography.bodyMedium.copy(
+                                        fontSize = 14.sp,
+                                        lineHeight = 20.sp,
+                                        fontWeight = FontWeight.Medium,
+                                    ),
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
+                            }
+                        }
+                        if (q.options.isNotEmpty()) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 8.dp),
+                                verticalArrangement = Arrangement.spacedBy(7.dp),
+                            ) {
+                                val chosen = selections.value[qIndex].orEmpty()
+                                q.options.forEach { opt ->
+                                    val isSelected = opt.label in chosen
+                                    Surface(
+                                        onClick = {
+                                            if (!pending || onSelectAnswer == null) return@Surface
+                                            if (singleImmediate) {
+                                                onSelectAnswer(opt.label)
+                                            } else {
+                                                val current = selections.value.toMutableMap()
+                                                val nextSet = if (q.multiSelect) {
+                                                    if (isSelected) chosen - opt.label else chosen + opt.label
+                                                } else {
+                                                    setOf(opt.label)
+                                                }
+                                                current[qIndex] = nextSet
+                                                selections.value = current
+                                            }
+                                        },
+                                        enabled = pending && onSelectAnswer != null,
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = if (isSelected) {
+                                            accent.copy(alpha = 0.16f)
+                                        } else {
+                                            MaterialTheme.colorScheme.surface.copy(alpha = 0.85f)
+                                        },
+                                        border = BorderStroke(
+                                            1.dp,
+                                            if (isSelected) accent else MaterialTheme.colorScheme.outlineVariant,
+                                        ),
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 11.dp, vertical = 9.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        ) {
+                                            Icon(
+                                                imageVector = if (isSelected) {
+                                                    Icons.Outlined.CheckCircle
+                                                } else {
+                                                    Icons.Outlined.RadioButtonUnchecked
+                                                },
+                                                contentDescription = null,
+                                                modifier = Modifier.size(16.dp),
+                                                tint = if (isSelected) accent else MaterialTheme.colorScheme.outline,
+                                            )
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = opt.label,
+                                                    style = MaterialTheme.typography.bodyMedium.copy(
+                                                        fontWeight = FontWeight.Medium,
+                                                    ),
+                                                    color = MaterialTheme.colorScheme.onSurface,
+                                                )
+                                                if (opt.description.isNotBlank()) {
+                                                    Text(
+                                                        text = opt.description,
+                                                        modifier = Modifier.padding(top = 2.dp),
+                                                        style = MaterialTheme.typography.bodySmall,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if (pending && onSelectAnswer != null && !singleImmediate) {
+                    val hasAnySelection = selections.value.values.any { it.isNotEmpty() }
+                    Button(
+                        onClick = {
+                            val formatted = questions.mapIndexedNotNull { idx, q ->
+                                val picked = selections.value[idx].orEmpty()
+                                if (picked.isEmpty()) {
+                                    null
+                                } else {
+                                    val prefix = q.header.ifBlank { q.question.take(18) }
+                                    if (questions.size == 1) {
+                                        picked.joinToString(", ")
+                                    } else {
+                                        "$prefix: ${picked.joinToString(", ")}"
+                                    }
+                                }
+                            }.joinToString("\n")
+                            if (formatted.isNotBlank()) {
+                                onSelectAnswer(formatted)
+                            }
+                        },
+                        enabled = hasAnySelection,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 10.dp),
+                        shape = RoundedCornerShape(10.dp),
+                    ) {
+                        Text("提交已选决策")
+                    }
+                }
             }
         }
     }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/tomato-hug/homing/internal/agent"
 	"github.com/tomato-hug/homing/internal/agent/scanlib"
@@ -95,6 +96,33 @@ func handleAgentHook(ctx context.Context, d *api.Deps, source string, body map[s
 		trackDispatchLifecycle(d, event)
 		return resumeFromPhone(ctx, d, event), nil
 
+	case "PreToolUse":
+		toolName := stringField(body, "tool_name")
+		if !agent.IsInteractiveQuestionTool(toolName) {
+			return map[string]any{"ok": true, "ignored": "non_question_tool"}, nil
+		}
+		input := body["tool_input"]
+		if input == nil {
+			input = body["input"]
+		}
+		questions, summary := agent.ParseInteractiveQuestions(toolName, input)
+		qTitle, qBody := agent.PrimaryQuestionPrompt(questions, summary)
+		if summary != "" {
+			qBody = summary
+		}
+		qTitle = scanlib.NormalizeHookSourceBranding(source, qTitle)
+		qBody = scanlib.NormalizeHookSourceBranding(source, qBody)
+		toolUseID := stringField(body, "tool_use_id")
+		service.ClaimInteractiveQuestion(source, sessionID, toolUseID, qBody, len(questions) > 0)
+		event, err := ingestEventWithQuestions(d, source, "needs_input", sessionID, cwd,
+			label+" · "+qTitle, qBody, questions)
+		if err != nil {
+			return nil, err
+		}
+		claimLaunch(d, event)
+		trackDispatchLifecycle(d, event)
+		return map[string]any{"ok": true}, nil
+
 	case "PermissionRequest":
 		text := stringField(body, "tool_name")
 		if text != "" {
@@ -128,13 +156,34 @@ func handleAgentHook(ctx context.Context, d *api.Deps, source string, body map[s
 		text = scanlib.NormalizeHookSourceBranding(source, text)
 		kind := "needs_input"
 		title := label + " 等待输入"
-		if notifType == "permission_prompt" {
+		var questions []agent.ItemQuestion
+		if notifType == "permission_prompt" || notifType == "elicitation_dialog" || notifType == "" {
+			if qID, qs, ok := service.FindPendingQuestionForSession(ctx, source, sessionID); ok {
+				questions = qs
+				qTitle, qSummary := agent.PrimaryQuestionPrompt(qs, text)
+				if full := agent.FormatQuestionSummary(qs, ""); full != "" {
+					text = full
+				} else if qSummary != "" {
+					text = qSummary
+				}
+				text = scanlib.NormalizeHookSourceBranding(source, text)
+				title = scanlib.NormalizeHookSourceBranding(source, label+" · "+qTitle)
+				service.ClaimInteractiveQuestion(source, sessionID, qID, text, true)
+			}
+		}
+		if len(questions) == 0 && service.HasRecentStructuredQuestion(source, sessionID, 30*time.Second) {
+			return map[string]any{"ok": true, "ignored": "duplicate_structured_question"}, nil
+		}
+		if len(questions) == 0 && notifType == "permission_prompt" {
 			// Hook Notification fires concurrently with or instead of PermissionRequest and
 			// ignores PermissionRequest decision stdout; surface as non-blocking needs_input
 			// rather than holding or registering dead allow/deny buttons.
 			title = label + " 等待确认"
 		}
-		event, err := ingestEvent(d, source, kind, sessionID, cwd, title, text)
+		if len(questions) == 0 {
+			service.ClaimInteractiveQuestion(source, sessionID, "", text, false)
+		}
+		event, err := ingestEventWithQuestions(d, source, kind, sessionID, cwd, title, text, questions)
 		if err != nil {
 			return nil, err
 		}
@@ -258,13 +307,30 @@ func genericKindFromEvent(body map[string]any) string {
 }
 
 func ingestEvent(d *api.Deps, source, kind, sessionID, cwd, title, text string) (store.Event, error) {
-	return ingestEventWithMeta(d, source, kind, sessionID, cwd, title, text, nil)
+	return ingestEventWithAll(d, source, kind, sessionID, cwd, title, text, nil, nil)
+}
+
+func ingestEventWithQuestions(
+	d *api.Deps,
+	source, kind, sessionID, cwd, title, text string,
+	questions []agent.ItemQuestion,
+) (store.Event, error) {
+	return ingestEventWithAll(d, source, kind, sessionID, cwd, title, text, nil, questions)
 }
 
 func ingestEventWithMeta(
 	d *api.Deps,
 	source, kind, sessionID, cwd, title, text string,
 	meta map[string]any,
+) (store.Event, error) {
+	return ingestEventWithAll(d, source, kind, sessionID, cwd, title, text, meta, nil)
+}
+
+func ingestEventWithAll(
+	d *api.Deps,
+	source, kind, sessionID, cwd, title, text string,
+	meta map[string]any,
+	questions []agent.ItemQuestion,
 ) (store.Event, error) {
 	svc := service.Start(d)
 	if svc == nil {
@@ -284,6 +350,10 @@ func ingestEventWithMeta(
 	for _, attachment := range attachments {
 		asAny = append(asAny, attachment)
 	}
+	var questionsAny any
+	if len(questions) > 0 {
+		questionsAny = questions
+	}
 	return svc.IngestStoreEvent(store.Event{
 		Source:      source,
 		Kind:        kind,
@@ -293,6 +363,7 @@ func ingestEventWithMeta(
 		Text:        text,
 		Attachments: &asAny,
 		SessionMeta: meta,
+		Questions:   questionsAny,
 	})
 }
 

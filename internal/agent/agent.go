@@ -138,10 +138,11 @@ type Item struct {
 	TS       string     `json:"ts"`
 	ID       string     `json:"id"`
 	Seq      int        `json:"seq"`
-	Type     string     `json:"type"`
-	Role     string     `json:"role"`
-	Partial  bool       `json:"partial,omitempty"`
-	Text     string     `json:"text,omitempty"`
+	Type      string         `json:"type"`
+	Role      string         `json:"role"`
+	Partial   bool           `json:"partial,omitempty"`
+	Title     string         `json:"title,omitempty"`
+	Text      string         `json:"text,omitempty"`
 	Model    string     `json:"model,omitempty"`
 	Command  string     `json:"command,omitempty"`
 	ExitCode *int       `json:"exit_code,omitempty"`
@@ -151,7 +152,8 @@ type Item struct {
 	Error    string     `json:"error,omitempty"`
 	// Truncated is set on live SSE frames when a very large diff or output had
 	// to be shortened. The full item remains available from the items endpoint.
-	Truncated bool `json:"truncated,omitempty"`
+	Truncated bool           `json:"truncated,omitempty"`
+	Questions []ItemQuestion `json:"questions,omitempty"`
 }
 
 // ItemTool is the tool block of a tool_call / file_change entry.

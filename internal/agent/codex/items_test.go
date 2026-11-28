@@ -225,3 +225,34 @@ func TestTitleIndexCacheInvalidatesOnFileChange(t *testing.T) {
 		t.Fatalf("cached title index did not invalidate: %#v", titles)
 	}
 }
+
+func TestCodexRequestUserInputBecomesQuestionItem(t *testing.T) {
+	args := `{"questions":[{"id":"scope","header":"范围","question":"只改后端还是前后端一起改？","options":[{"label":"前后端一起","description":"完整闭环"},{"label":"仅后端","description":"最小改动"}]}]}`
+	st := &codexItems{calls: map[string]string{}, byCall: map[string]*codexCall{}}
+
+	qItems := st.row(demoRow(map[string]any{
+		"type":      "function_call",
+		"call_id":   "call-req-1",
+		"name":      "request_user_input",
+		"arguments": args,
+	}))
+	if len(qItems) != 1 || qItems[0].Type != "question" || qItems[0].Tool == nil || qItems[0].Tool.Status != "running" {
+		t.Fatalf("expected running question item, got %+v", qItems)
+	}
+	if len(qItems[0].Questions) != 1 || len(qItems[0].Questions[0].Options) != 2 {
+		t.Fatalf("unexpected codex questions: %+v", qItems[0].Questions)
+	}
+
+	res := st.row(demoRow(map[string]any{
+		"type":    "function_call_output",
+		"call_id": "call-req-1",
+		"output":  "前后端一起",
+	}))
+	if len(res) != 1 {
+		t.Fatalf("expected 1 merged/output row, got %+v", res)
+	}
+	merged := agent.MergeItem(qItems[0], res[0])
+	if merged.Type != "question" || merged.Tool == nil || merged.Tool.Status != "done" || len(merged.Questions) != 1 {
+		t.Fatalf("expected answered question item retaining Questions, got %+v", merged)
+	}
+}

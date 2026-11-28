@@ -34,6 +34,11 @@ var (
 	p1Kinds = map[string]bool{
 		"needs_input": true, "question": true, "awaiting_input": true, "collab_result": true,
 	}
+	// Interactive questions block the agent immediately, so push without waiting
+	// for the 120s P1 batching window used by explicit completion reminders.
+	immediateP1Kinds = map[string]bool{
+		"needs_input": true, "question": true, "awaiting_input": true,
+	}
 	p2Kinds         = map[string]bool{"reply": true, "done": true, "stop": true, "turn_complete": true, "completed": true}
 	completionKinds = map[string]bool{"done": true, "turn_complete": true, "completed": true}
 )
@@ -180,6 +185,15 @@ func (n *Notifier) OnEvent(event Event) {
 		payload.Merged, payload.Count = false, 1
 		n.emit(payload)
 	case "P1":
+		if immediateP1Kinds[event.Kind] {
+			if pending, ok := n.p1[key]; ok {
+				pending.timer.Stop()
+				delete(n.p1, key)
+			}
+			payload.Merged, payload.Count = false, 1
+			n.emit(payload)
+			return
+		}
 		prev := n.p1[key]
 		count := 1
 		if prev != nil {

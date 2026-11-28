@@ -107,3 +107,17 @@ func TestReplyDoesNotConsumeCompletionReminder(t *testing.T) {
 		t.Fatalf("completion reminder consumed %d times, want 1", consumed)
 	}
 }
+
+func TestInteractiveQuestionPushesImmediately(t *testing.T) {
+	var pushed []Payload
+	n := New(Options{
+		Sink: func(payload Payload) { pushed = append(pushed, payload) },
+	})
+	n.OnEvent(Event{
+		Source: "workbuddy", SessionID: "demo-wb-q1",
+		Kind: "needs_input", Title: "待确认：样式", Text: "请选择配色方案",
+	})
+	if len(pushed) != 1 || pushed[0].Level != "P1" || pushed[0].Merged {
+		t.Fatalf("expected immediate unmerged P1 push for needs_input, got %+v", pushed)
+	}
+}

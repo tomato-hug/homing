@@ -39,6 +39,7 @@ type Event struct {
 	// nil means the event never had the key (older lines): it stays omitted.
 	Attachments *[]any         `json:"attachments,omitempty"`
 	SessionMeta map[string]any `json:"session_meta,omitempty"`
+	Questions   any            `json:"questions,omitempty"`
 	// LocalhostLinks is derived when the event is served, never stored: the
 	// phone offers a "open on this Mac" button for those ports.
 	LocalhostLinks []int `json:"localhost_links,omitempty"`

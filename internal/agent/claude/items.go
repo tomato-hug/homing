@@ -58,11 +58,12 @@ func ExtractFileItems(file, source string, limit int) []agent.Item {
 }
 
 type callInfo struct {
-	id    string
-	kind  string
-	name  string
-	files []agent.ItemFile
-	plan  []agent.ItemPlan
+	id        string
+	kind      string
+	name      string
+	files     []agent.ItemFile
+	plan      []agent.ItemPlan
+	questions []agent.ItemQuestion
 }
 
 type itemState struct {
@@ -106,8 +107,26 @@ func extractRow(st *itemState, row map[string]any) []agent.Item {
 		callID := firstOf(str(row["callId"]), str(row["id"]))
 		toolID := fmt.Sprintf("%s-tool-%s", st.source, callID)
 		st.calls[callID] = toolID
+		rawInput := row["arguments"]
+		if rawInput == nil {
+			rawInput = row["input"]
+		}
 		input := clip(firstOf(str(row["arguments"]), str(row["input"])), 300)
 		name := firstOf(str(row["name"]), "tool")
+		if agent.IsInteractiveQuestionTool(name) {
+			questions, summary := agent.ParseInteractiveQuestions(name, rawInput)
+			st.byCall[callID] = &callInfo{id: toolID, kind: "question", name: name, questions: questions}
+			clipped := clip(summary, 300)
+			if clipped == "" {
+				clipped = input
+			}
+			return []agent.Item{{
+				TS: at, ID: toolID, Seq: st.seq, Type: "question", Role: "assistant",
+				Title: firstQuestionTitle(questions, name), Text: summary, Questions: questions,
+				Command: clipped, Model: model,
+				Tool: &agent.ItemTool{Name: name, InputSummary: &clipped, Status: "running"},
+			}}
+		}
 		st.byCall[callID] = &callInfo{id: toolID, kind: "tool_call", name: name}
 		return []agent.Item{{
 			TS: at, ID: toolID, Seq: st.seq, Type: "tool_call", Role: "assistant",
@@ -182,6 +201,18 @@ func extractRow(st *itemState, row map[string]any) []agent.Item {
 					})
 					continue
 				}
+				if agent.IsInteractiveQuestionTool(name) {
+					questions, summary := agent.ParseInteractiveQuestions(name, b["input"])
+					st.byCall[callID] = &callInfo{id: toolID, kind: "question", name: name, questions: questions}
+					clipped := clip(summary, 300)
+					out = append(out, agent.Item{
+						TS: at, ID: toolID, Seq: st.seq, Type: "question", Role: "assistant",
+						Title: firstQuestionTitle(questions, name), Text: summary, Questions: questions,
+						Model: model,
+						Tool:  &agent.ItemTool{Name: name, InputSummary: &clipped, Status: "running"},
+					})
+					continue
+				}
 				summary := shortJson(input, 300)
 				if name == "Bash" {
 					summary = str(input["command"])
@@ -222,6 +253,7 @@ func toolResult(st *itemState, callID, content, status, at, model string) []agen
 	name := "tool"
 	var files []agent.ItemFile
 	var plan []agent.ItemPlan
+	var questions []agent.ItemQuestion
 	if known != nil {
 		if known.kind != "" {
 			kind = known.kind
@@ -231,22 +263,39 @@ func toolResult(st *itemState, callID, content, status, at, model string) []agen
 		}
 		files = known.files
 		plan = known.plan
+		questions = known.questions
 	}
 	tailText := tailRunes(content, 800)
 	code, hasCode := extractExitCode(content)
 	item := agent.Item{
 		TS: at, ID: id, Seq: st.seq, Type: kind, Role: "tool",
-		Model: model, Files: files, Plan: plan,
+		Model: model, Files: files, Plan: plan, Questions: questions,
 		Tool: &agent.ItemTool{
 			Name:       name,
 			OutputTail: &tailText,
 			Status:     status,
 		},
 	}
+	if kind == "question" && len(questions) > 0 {
+		item.Title = firstQuestionTitle(questions, name)
+		item.Text = agent.FormatQuestionSummary(questions, name)
+	}
 	if hasCode {
 		item.Tool.ExitCode = &code
 	}
 	return []agent.Item{item}
+}
+
+func firstQuestionTitle(questions []agent.ItemQuestion, fallback string) string {
+	for _, q := range questions {
+		if h := strings.TrimSpace(q.Header); h != "" {
+			return h
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(fallback), "ExitPlanMode") {
+		return "计划确认"
+	}
+	return "待确认决策"
 }
 
 func toolIDFor(st *itemState, callID string) string {

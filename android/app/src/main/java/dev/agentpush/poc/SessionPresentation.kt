@@ -214,6 +214,7 @@ private fun StringBuilder.appendSessionItemMarkdown(item: SessionItem) {
             .append(item.tool.name.ifBlank { "调用" }).append('\n')
         SessionItemType.FILE_CHANGE -> append("### 文件改动\n")
         SessionItemType.PLAN -> append("### 计划\n")
+        SessionItemType.QUESTION -> append("### 待确认决策\n")
         SessionItemType.APPROVAL -> append("### 授权请求\n")
         SessionItemType.ERROR -> append("### 错误\n")
         SessionItemType.SYSTEM -> append("### 系统\n")
