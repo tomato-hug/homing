@@ -455,11 +455,11 @@ internal fun SessionItemRow(
     onDecision: (Long?, String, String?) -> Unit,
     onSelectQuestionAnswer: ((String) -> Unit)? = null,
 ) {
-    val matchedAttachments = remember(item.id, item.eventId, item.text, session.events) {
+    val matchedAttachments = remember(item.id, item.eventId, item.text, session.events, session.cwd, settings) {
         val explicit = item.eventId?.let { id ->
             session.events.firstOrNull { it.id == id }?.attachments.orEmpty()
         }.orEmpty()
-        if (explicit.isNotEmpty()) {
+        val fromEvents = if (explicit.isNotEmpty()) {
             explicit
         } else if (item.type == SessionItemType.ASSISTANT && item.text.isNotBlank()) {
             val itemTime = timelineMillis(item.ts)
@@ -469,9 +469,19 @@ internal fun SessionItemRow(
                     ev.text.isNotBlank() &&
                     normalizeComparableText(ev.text) == normalized &&
                     (itemTime == null || timelineMillis(ev.ts)?.let { it >= itemTime - 5_000 } != false)
+            }?.attachments ?: session.events.firstOrNull { ev ->
+                ev.attachments.isNotEmpty() &&
+                    itemTime != null &&
+                    timelineMillis(ev.ts)?.let { kotlin.math.abs(it - itemTime) <= 20_000L } == true &&
+                    ev.attachments.any { att -> att.name.isNotBlank() && item.text.contains(att.name, ignoreCase = true) }
             }?.attachments.orEmpty()
         } else {
             emptyList()
+        }
+        if (item.type == SessionItemType.ASSISTANT && fromEvents.none { it.isImage } && session.cwd.isNotBlank()) {
+            fromEvents + extractFallbackImageAttachments(item.text, session.cwd, fromEvents, settings)
+        } else {
+            fromEvents
         }
     }
     when (item.type) {
@@ -1168,4 +1178,58 @@ internal fun reasoningDuration(timeline: List<TimelineItem>, index: Int): Long? 
         ?: return null
     val seconds = ((end - start) / 1_000L).coerceAtLeast(0L)
     return seconds.takeIf { it in 1..3_600 }
+}
+
+private val INLINE_IMAGE_CODE_REGEX = Regex(
+    "`([^`\\n]{1,512}\\.(?:png|jpe?g|gif|webp|bmp|avif|svg))`",
+    RegexOption.IGNORE_CASE,
+)
+private val INLINE_IMAGE_PATH_REGEX = Regex(
+    "(?<![\\w/\\[(.\\-~])((?:~|\\.{1,2})?/(?:[\\p{L}\\p{N}._\\-@]+/)+[\\p{L}\\p{N}._\\-@]+\\.(?:png|jpe?g|gif|webp|bmp|avif|svg))",
+    RegexOption.IGNORE_CASE,
+)
+
+internal fun extractFallbackImageAttachments(
+    text: String,
+    cwd: String,
+    existing: List<Attachment>,
+    settings: AppSettings,
+): List<Attachment> {
+    if (cwd.isBlank() || text.isBlank()) return emptyList()
+    val existingNames = existing.mapTo(mutableSetOf()) { it.name.lowercase() }
+    val candidates = linkedSetOf<String>()
+    INLINE_IMAGE_CODE_REGEX.findAll(text).forEach { match ->
+        val path = match.groupValues[1].trim()
+        if (!path.startsWith("http://", ignoreCase = true) && !path.startsWith("https://", ignoreCase = true)) {
+            candidates += path
+        }
+    }
+    INLINE_IMAGE_PATH_REGEX.findAll(text).forEach { match ->
+        candidates += match.groupValues[1].trim()
+    }
+    if (candidates.isEmpty()) return emptyList()
+    return candidates.mapNotNull { rawPath ->
+        val clean = rawPath.removePrefix("file://").trim()
+        val fileName = clean.substringAfterLast('/')
+        if (fileName.isBlank() || fileName.lowercase() in existingNames) return@mapNotNull null
+        existingNames += fileName.lowercase()
+        val ext = fileName.substringAfterLast('.', "").lowercase()
+        val mime = when (ext) {
+            "png" -> "image/png"
+            "gif" -> "image/gif"
+            "webp" -> "image/webp"
+            "svg" -> "image/svg+xml"
+            "bmp" -> "image/bmp"
+            "avif" -> "image/avif"
+            else -> "image/jpeg"
+        }
+        Attachment(
+            id = "raw-${clean.hashCode()}",
+            name = fileName,
+            mime = mime,
+            size = 0L,
+            kind = "image",
+            url = AgentApi.projectRawFileUrl(settings, clean, cwd),
+        )
+    }
 }

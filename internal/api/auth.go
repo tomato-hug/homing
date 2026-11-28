@@ -25,6 +25,16 @@ func WithTrustedLocalRPC(r *http.Request) *http.Request {
 	return r.WithContext(context.WithValue(r.Context(), trustedLocalRPCKey{}, true))
 }
 
+// IsTrustedLocalRPC reports whether r arrived through Homing's encrypted cloud
+// RPC / file-transfer bridge after passing device pairing and envelope auth.
+func IsTrustedLocalRPC(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	trusted, _ := r.Context().Value(trustedLocalRPCKey{}).(bool)
+	return trusted
+}
+
 // store returns the process-wide store for this Deps, opening it on first use.
 // Opening is lazy so tests (and packages that only need one route group) can
 // hand NewMux a Deps with nothing but a DataDir.

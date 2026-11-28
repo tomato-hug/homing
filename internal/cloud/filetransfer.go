@@ -269,6 +269,7 @@ func serveLocalRequest(
 		}, nil
 	}
 	request := httptest.NewRequestWithContext(ctx, method, path, bytes.NewReader(body))
+	request.RemoteAddr = "127.0.0.1:0"
 	if contentType != "" {
 		request.Header.Set("Content-Type", contentType)
 	}

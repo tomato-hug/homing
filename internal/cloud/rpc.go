@@ -108,6 +108,7 @@ func dispatchRPC(ctx context.Context, handler http.Handler, payload []byte) []by
 		})
 	}
 	httpRequest := httptest.NewRequestWithContext(ctx, method, request.Path, body)
+	httpRequest.RemoteAddr = "127.0.0.1:0"
 	if contentType != "" {
 		httpRequest.Header.Set("Content-Type", contentType)
 	} else if body.Len() > 0 {

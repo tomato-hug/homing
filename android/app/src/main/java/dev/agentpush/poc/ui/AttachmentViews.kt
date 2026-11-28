@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.size
@@ -61,14 +62,18 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import coil3.compose.SubcomposeAsyncImage
 import coil3.compose.SubcomposeAsyncImageContent
+import coil3.request.CachePolicy
+import coil3.request.ImageRequest
 import dev.agentpush.poc.AgentApi
 import dev.agentpush.poc.AppSettings
 import dev.agentpush.poc.Attachment
@@ -85,17 +90,28 @@ fun InlineImageGrid(
 ) {
     val images = attachments.filter { it.isImage }
     if (images.isEmpty()) return
+    if (images.size == 1) {
+        val single = images.first()
+        SingleInlineImagePreview(
+            url = AgentApi.attachmentUrl(settings, single),
+            attachment = single,
+            onClick = { onOpen(0) },
+            modifier = modifier,
+        )
+        return
+    }
+    val columns = if (images.size == 2) 2 else 3
     Column(
         modifier = modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        images.chunked(3).forEachIndexed { rowIndex, row ->
+        images.chunked(columns).forEachIndexed { rowIndex, row ->
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 row.forEachIndexed { columnIndex, attachment ->
-                    val index = rowIndex * 3 + columnIndex
+                    val index = rowIndex * columns + columnIndex
                     RemoteThumbnail(
                         url = AgentApi.attachmentUrl(settings, attachment),
                         description = attachment.name,
@@ -103,8 +119,131 @@ fun InlineImageGrid(
                         modifier = Modifier.weight(1f),
                     )
                 }
-                repeat(3 - row.size) {
+                repeat(columns - row.size) {
                     Box(modifier = Modifier.weight(1f))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SingleInlineImagePreview(
+    url: String,
+    attachment: Attachment,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var retry by remember(url) { mutableIntStateOf(0) }
+    val context = LocalContext.current
+    val request = remember(url, retry) {
+        ImageRequest.Builder(context)
+            .data(url)
+            .memoryCacheKey("${AgentApi.mediaCacheKey(url)}#$retry")
+            .apply {
+                if (retry > 0) {
+                    memoryCachePolicy(CachePolicy.WRITE_ONLY)
+                    diskCachePolicy(CachePolicy.WRITE_ONLY)
+                }
+            }
+            .build()
+    }
+    Surface(
+        onClick = onClick,
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            SubcomposeAsyncImage(
+                model = request,
+                contentDescription = attachment.name,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 160.dp, max = 300.dp),
+                loading = {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 160.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
+                    }
+                },
+                error = { errState ->
+                    val reason = errState.result.throwable.message?.take(90).orEmpty()
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 140.dp)
+                            .padding(14.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Icon(
+                                Icons.Outlined.Image,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Text(
+                                text = if (reason.isNotBlank()) "图片加载失败：$reason" else "图片加载失败",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Surface(
+                                onClick = { retry += 1 },
+                                color = MaterialTheme.colorScheme.surface,
+                                shape = CircleShape,
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Text("重试", style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                        }
+                    }
+                },
+                success = { SubcomposeAsyncImageContent() },
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Icon(
+                    Icons.Outlined.Image,
+                    contentDescription = null,
+                    modifier = Modifier.size(15.dp),
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+                Text(
+                    text = attachment.name,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.MiddleEllipsis,
+                )
+                val sizeLabel = attachment.sizeLabel()
+                if (sizeLabel.isNotBlank()) {
+                    Text(
+                        text = sizeLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         }
@@ -119,10 +258,19 @@ private fun RemoteThumbnail(
     modifier: Modifier = Modifier,
 ) {
     var retry by remember(url) { mutableIntStateOf(0) }
-    val request = coil3.request.ImageRequest.Builder(LocalContext.current)
-        .data(url)
-        .memoryCacheKey("$url#$retry")
-        .build()
+    val context = LocalContext.current
+    val request = remember(url, retry) {
+        ImageRequest.Builder(context)
+            .data(url)
+            .memoryCacheKey("${AgentApi.mediaCacheKey(url)}#$retry")
+            .apply {
+                if (retry > 0) {
+                    memoryCachePolicy(CachePolicy.WRITE_ONLY)
+                    diskCachePolicy(CachePolicy.WRITE_ONLY)
+                }
+            }
+            .build()
+    }
     Surface(
         onClick = onClick,
         modifier = modifier.aspectRatio(1f),
@@ -139,13 +287,26 @@ private fun RemoteThumbnail(
                     CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
                 }
             },
-            error = {
-                Box(contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(Icons.Outlined.Refresh, contentDescription = "重试")
+            error = { errState ->
+                val hint = errState.result.throwable.message?.take(28).orEmpty()
+                Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(6.dp)) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(3.dp),
+                    ) {
+                        Icon(Icons.Outlined.Refresh, contentDescription = "重试", modifier = Modifier.size(18.dp))
+                        if (hint.isNotBlank()) {
+                            Text(
+                                text = hint,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                         Surface(
                             onClick = { retry += 1 },
-                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            color = MaterialTheme.colorScheme.surface,
                             shape = CircleShape,
                         ) {
                             Text(
@@ -157,6 +318,7 @@ private fun RemoteThumbnail(
                     }
                 }
             },
+            success = { SubcomposeAsyncImageContent() },
         )
     }
 }
@@ -243,6 +405,9 @@ fun FullScreenImageViewer(
         if (granted) saveCurrent()
     }
 
+    var isCurrentPageZoomed by remember { mutableStateOf(false) }
+    var chromeVisible by remember { mutableStateOf(true) }
+
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(
@@ -253,21 +418,30 @@ fun FullScreenImageViewer(
         Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
             HorizontalPager(
                 state = pagerState,
+                userScrollEnabled = !isCurrentPageZoomed,
                 modifier = Modifier.fillMaxSize(),
             ) { page ->
                 ZoomableRemoteImage(
                     url = AgentApi.attachmentUrl(settings, images[page]),
                     description = images[page].name,
+                    onZoomChanged = { zoomed ->
+                        if (pagerState.currentPage == page) {
+                            isCurrentPageZoomed = zoomed
+                        }
+                    },
+                    onToggleChrome = { chromeVisible = !chromeVisible },
                 )
             }
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .align(Alignment.TopCenter)
-                    .statusBarsPadding()
-                    .padding(horizontal = 8.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+            if (chromeVisible) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .align(Alignment.TopCenter)
+                        .background(Color.Black.copy(alpha = 0.45f))
+                        .statusBarsPadding()
+                        .padding(horizontal = 8.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                 IconButton(onClick = onDismiss) {
                     Icon(Icons.Outlined.Close, contentDescription = "关闭", tint = Color.White)
                 }
@@ -321,18 +495,22 @@ fun FullScreenImageViewer(
                         Icon(Icons.Outlined.Share, "分享", tint = Color.White)
                     }
                 }
+                }
             }
-            Text(
-                text = images.getOrNull(pagerState.currentPage)?.name.orEmpty(),
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .navigationBarsPadding()
-                    .padding(horizontal = 24.dp, vertical = 16.dp),
-                color = Color.White.copy(alpha = 0.85f),
-                style = MaterialTheme.typography.bodySmall,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            if (chromeVisible) {
+                Text(
+                    text = images.getOrNull(pagerState.currentPage)?.name.orEmpty(),
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(999.dp))
+                        .navigationBarsPadding()
+                        .padding(horizontal = 24.dp, vertical = 16.dp),
+                    color = Color.White.copy(alpha = 0.9f),
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
 }
@@ -487,29 +665,45 @@ fun AttachmentCardList(
 }
 
 @Composable
-private fun ZoomableRemoteImage(url: String, description: String) {
+private fun ZoomableRemoteImage(
+    url: String,
+    description: String,
+    onZoomChanged: (Boolean) -> Unit = {},
+    onToggleChrome: () -> Unit = {},
+) {
     var scale by remember(url) { mutableFloatStateOf(1f) }
     var offsetX by remember(url) { mutableFloatStateOf(0f) }
     var offsetY by remember(url) { mutableFloatStateOf(0f) }
     var retry by remember(url) { mutableIntStateOf(0) }
+    var containerSize by remember(url) { mutableStateOf(IntSize.Zero) }
 
-    fun clampOffset() {
-        val maxX = 420f * (scale - 1f)
-        val maxY = 760f * (scale - 1f)
+    fun clampOffset(nextScale: Float = scale) {
+        val maxX = ((containerSize.width.takeIf { it > 0 } ?: 1080) * (nextScale - 1f)) / 2f
+        val maxY = ((containerSize.height.takeIf { it > 0 } ?: 1920) * (nextScale - 1f)) / 2f
         offsetX = offsetX.coerceIn(-maxX.coerceAtLeast(0f), maxX.coerceAtLeast(0f))
         offsetY = offsetY.coerceIn(-maxY.coerceAtLeast(0f), maxY.coerceAtLeast(0f))
     }
 
-    val request = coil3.request.ImageRequest.Builder(LocalContext.current)
-        .data(url)
-        .memoryCacheKey("$url#$retry")
-        .build()
+    val context = LocalContext.current
+    val request = remember(url, retry) {
+        ImageRequest.Builder(context)
+            .data(url)
+            .memoryCacheKey("${AgentApi.mediaCacheKey(url)}#$retry")
+            .apply {
+                if (retry > 0) {
+                    memoryCachePolicy(CachePolicy.WRITE_ONLY)
+                    diskCachePolicy(CachePolicy.WRITE_ONLY)
+                }
+            }
+            .build()
+    }
     SubcomposeAsyncImage(
         model = request,
         contentDescription = description,
         contentScale = ContentScale.Fit,
         modifier = Modifier
             .fillMaxSize()
+            .onSizeChanged { containerSize = it }
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale
@@ -521,13 +715,21 @@ private fun ZoomableRemoteImage(url: String, description: String) {
                     awaitFirstDown(requireUnconsumed = false)
                     do {
                         val event = awaitPointerEvent()
-                        if (event.changes.size > 1 || scale > 1.01f) {
+                        if (event.changes.size > 1 || scale > 1.02f) {
                             val zoom = event.calculateZoom()
                             val pan = event.calculatePan()
-                            scale = (scale * zoom).coerceIn(1f, 6f)
-                            offsetX += pan.x
-                            offsetY += pan.y
-                            clampOffset()
+                            val nextScale = (scale * zoom).coerceIn(1f, 6f)
+                            scale = nextScale
+                            if (nextScale <= 1.02f) {
+                                scale = 1f
+                                offsetX = 0f
+                                offsetY = 0f
+                            } else {
+                                offsetX += pan.x
+                                offsetY += pan.y
+                                clampOffset(nextScale)
+                            }
+                            onZoomChanged(scale > 1.02f)
                             event.changes.forEach { change ->
                                 if (change.positionChanged()) change.consume()
                             }
@@ -537,15 +739,19 @@ private fun ZoomableRemoteImage(url: String, description: String) {
             }
             .pointerInput(url) {
                 detectTapGestures(
+                    onTap = { onToggleChrome() },
                     onDoubleTap = { position ->
                         if (scale > 1.2f) {
                             scale = 1f
                             offsetX = 0f
                             offsetY = 0f
+                            onZoomChanged(false)
                         } else {
                             scale = 2.6f
                             offsetX = (size.width / 2f - position.x) * 1.6f
                             offsetY = (size.height / 2f - position.y) * 1.6f
+                            clampOffset(2.6f)
+                            onZoomChanged(true)
                         }
                     },
                 )
@@ -555,19 +761,34 @@ private fun ZoomableRemoteImage(url: String, description: String) {
                 CircularProgressIndicator(color = Color.White)
             }
         },
-        error = {
+        error = { errState ->
+            val reason = errState.result.throwable.message?.take(120).orEmpty()
             Box(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(24.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
                     Icon(Icons.Outlined.Image, contentDescription = null, tint = Color.White)
-                    Text("图片加载失败", color = Color.White)
+                    Text("图片加载失败", color = Color.White, style = MaterialTheme.typography.titleSmall)
+                    if (reason.isNotBlank()) {
+                        Text(
+                            text = reason,
+                            color = Color.White.copy(alpha = 0.72f),
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 3,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                     Surface(
                         onClick = { retry += 1 },
                         shape = CircleShape,
                         color = Color.White.copy(alpha = 0.18f),
-                        modifier = Modifier.padding(top = 8.dp),
+                        modifier = Modifier.padding(top = 4.dp),
                     ) {
                         Text(
                             text = "重试",

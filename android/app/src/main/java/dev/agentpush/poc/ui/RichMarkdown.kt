@@ -41,8 +41,8 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -85,6 +85,7 @@ fun RichMarkdown(
     onCopyCode: (String) -> Unit,
     onOpenUrl: (String) -> Unit,
 ) {
+    val activeSettings = LocalAppSettings.current
     val currentUriHandler = LocalUriHandler.current
     val viewer = LocalDocumentViewer.current
     val linkHandler = remember(currentUriHandler, viewer) {
@@ -207,7 +208,7 @@ fun RichMarkdown(
     previewImageUrl?.let { imgUrl ->
         FullScreenUrlImageDialog(
             url = imgUrl,
-            settings = AppSettings(baseUrl = "", token = ""),
+            settings = activeSettings,
             onDismiss = { previewImageUrl = null },
         )
     }

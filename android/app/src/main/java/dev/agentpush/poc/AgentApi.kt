@@ -1366,6 +1366,69 @@ object AgentApi {
         return router.kind.value == TransportKind.CLOUD
     }
 
+    fun isHomingMediaUrl(url: String): Boolean {
+        val path = extractPath(url)
+        if (!isCloudRoutablePath(path)) return false
+        val trimmed = url.trim()
+        if (trimmed.startsWith(CLOUD_ATTACHMENT_ORIGIN)) return true
+        if (trimmed.startsWith("/f/") || trimmed.startsWith("/api/fs/raw")) return true
+        val base = activeSettingsProvider?.invoke()?.baseUrl?.trimEnd('/').orEmpty()
+        return base.isNotBlank() && trimmed.startsWith(base)
+    }
+
+    fun mediaCacheKey(url: String): String {
+        val trimmed = url.trim().replace(" ", "%20")
+        return runCatching {
+            val parsed = URL(trimmed)
+            buildString {
+                append(parsed.path.ifBlank { "/" })
+                parsed.query?.takeIf { it.isNotBlank() }?.let { append('?').append(it) }
+            }
+        }.getOrElse {
+            if (trimmed.startsWith("/")) {
+                trimmed
+            } else {
+                val withoutScheme = trimmed.substringAfter("://", trimmed)
+                val slash = withoutScheme.indexOf('/')
+                if (slash >= 0) withoutScheme.substring(slash) else trimmed
+            }
+        }
+    }
+
+    suspend fun downloadMediaBytes(url: String): ByteArray = withContext(Dispatchers.IO) {
+        val router = transportRouter
+        if (router != null) {
+            return@withContext router.download(url)
+        }
+        val active = activeSettingsProvider?.invoke()
+        val effectiveBase = active?.baseUrl.orEmpty().trimEnd('/')
+        val effectiveToken = active?.token.orEmpty()
+        val absolute = when {
+            url.startsWith(CLOUD_ATTACHMENT_ORIGIN) && effectiveBase.isNotBlank() ->
+                "$effectiveBase/${url.removePrefix(CLOUD_ATTACHMENT_ORIGIN).trimStart('/')}"
+            url.startsWith("http://") || url.startsWith("https://") -> url
+            effectiveBase.isNotBlank() -> "$effectiveBase/${url.trimStart('/')}"
+            else -> throw IOException("未配置电脑地址，无法加载媒体文件")
+        }
+        val connection = URL(absolute).openConnection() as HttpURLConnection
+        try {
+            connection.connectTimeout = 10_000
+            connection.readTimeout = 90_000
+            connection.instanceFollowRedirects = true
+            connection.setRequestProperty("Accept", "*/*")
+            if (effectiveToken.isNotBlank() && extractPath(absolute) == "/api/fs/raw") {
+                connection.setRequestProperty("Authorization", "Bearer $effectiveToken")
+            }
+            val code = connection.responseCode
+            if (code !in 200..299) {
+                throw IOException("下载失败 HTTP $code")
+            }
+            connection.inputStream.use { it.readBytes() }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
     private fun extractPath(url: String): String {
         val trimmed = url.trim().replace(" ", "%20")
         return runCatching { URL(trimmed).path }.getOrElse {

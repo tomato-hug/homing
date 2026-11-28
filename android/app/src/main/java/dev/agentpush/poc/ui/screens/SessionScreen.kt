@@ -168,6 +168,7 @@ import dev.agentpush.poc.ui.SystemItemRow
 import dev.agentpush.poc.ui.ToolCallItemCard
 import dev.agentpush.poc.ui.UserItemBubble
 import dev.agentpush.poc.ui.DocumentViewerScope
+import dev.agentpush.poc.ui.LocalRegisterSnackbarHost
 import dev.agentpush.poc.ui.accentColor
 import dev.agentpush.poc.ui.rewriteMarkdownImageUrls
 import dev.agentpush.poc.ui.theme.HomingMono
@@ -391,6 +392,11 @@ internal fun SessionDetailContent(
     projectSiblings: List<SessionSummary> = emptyList(),
     projectHistoryIds: Set<String> = emptySet(),
 ) {
+    val registerSnackbarHost = LocalRegisterSnackbarHost.current
+    DisposableEffect(registerSnackbarHost) {
+        val unregister = registerSnackbarHost?.invoke()
+        onDispose { unregister?.invoke() }
+    }
     val session = remember(
         state.events,
         state.replies,

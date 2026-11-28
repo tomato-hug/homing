@@ -139,9 +139,19 @@ class TransportRouter(
 
     suspend fun download(url: String): ByteArray {
         ensureRoute()
-        return when (_kind.value) {
-            TransportKind.LAN -> lan.download(url)
-            TransportKind.CLOUD -> cloud.download(url)
+        if (_kind.value == TransportKind.CLOUD) {
+            return cloud.download(url)
+        }
+        return try {
+            lan.download(url)
+        } catch (error: Exception) {
+            if (error !is IOException || error is AgentApiException) throw error
+            if (cloudAvailable()) {
+                invalidate()
+                cloud.download(url)
+            } else {
+                throw error
+            }
         }
     }
 

@@ -12,10 +12,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -25,6 +27,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import dev.agentpush.poc.AgentViewModel
+import dev.agentpush.poc.AppSettings
 import dev.agentpush.poc.capabilityTokenIn
 import dev.agentpush.poc.protocol.PairedComputerStore
 import dev.agentpush.poc.ui.screens.AddComputerScreen
@@ -51,6 +54,9 @@ private const val ROUTE_NEW_SESSION = "new-session?cwd={cwd}"
 private const val ROUTE_SESSION = "session/{sessionToken}"
 private const val ROUTE_BROWSER = "browser/{urlToken}/{titleToken}"
 
+internal val LocalRegisterSnackbarHost = staticCompositionLocalOf<(() -> () -> Unit)?> { null }
+internal val LocalAppSettings = staticCompositionLocalOf { AppSettings(baseUrl = "", token = "") }
+
 @Composable
 fun AgentApp(
     viewModel: AgentViewModel,
@@ -76,6 +82,7 @@ fun AgentApp(
     var splashDone by rememberSaveable {
         mutableStateOf(pendingSessionId != null || pendingPairLink != null || !hasConfiguredTarget)
     }
+    var nestedSnackbarHosts by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(snackbarMessage) {
         val message = snackbarMessage ?: return@LaunchedEffect
@@ -106,12 +113,33 @@ fun AgentApp(
         viewModel.consumePendingNavigation()
     }
 
-    CompositionLocalProvider(LocalHomingStrings provides strings) {
+    val registerSnackbarHost: () -> () -> Unit = remember {
+        {
+            nestedSnackbarHosts += 1
+            var disposed = false
+            {
+                if (!disposed) {
+                    disposed = true
+                    nestedSnackbarHosts = (nestedSnackbarHosts - 1).coerceAtLeast(0)
+                }
+            }
+        }
+    }
+
+    CompositionLocalProvider(
+        LocalHomingStrings provides strings,
+        LocalRegisterSnackbarHost provides registerSnackbarHost,
+        LocalAppSettings provides appState.settings,
+    ) {
         Box(modifier = Modifier.fillMaxSize()) {
             Scaffold(
                 containerColor = HomingPalette.Background,
                 contentWindowInsets = WindowInsets(0, 0, 0, 0),
-                snackbarHost = { SnackbarHost(snackbarHostState) },
+                snackbarHost = {
+                    if (nestedSnackbarHosts == 0) {
+                        SnackbarHost(snackbarHostState)
+                    }
+                },
             ) { padding ->
                 NavHost(
                     navController = navController,

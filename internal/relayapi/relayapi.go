@@ -158,6 +158,9 @@ func isLoopback(r *http.Request) bool {
 }
 
 func isLocalOrLAN(r *http.Request) bool {
+	if api.IsTrustedLocalRPC(r) {
+		return true
+	}
 	ip := net.ParseIP(remoteHost(r))
 	if ip == nil {
 		return false

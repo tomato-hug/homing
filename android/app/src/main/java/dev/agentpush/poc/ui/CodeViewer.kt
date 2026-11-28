@@ -162,7 +162,7 @@ private val lineSuffix = Regex(":\\d+(:\\d+)?$")
 /** True when [raw] reads like a path to a source / text file rather than prose or code. */
 internal fun looksLikeFilePath(raw: String): Boolean {
     val text = raw.trim()
-    if (text.length < 3 || text.length > 260) return false
+    if (text.length < 3 || text.length > 512) return false
     if (text.any { it.isWhitespace() }) return false
     if (text.contains("://") || text.startsWith("@") || text.startsWith("-")) return false
     if (text.any { it in "()=,;{}<>|\"'*?$" }) return false
@@ -171,7 +171,7 @@ internal fun looksLikeFilePath(raw: String): Boolean {
     if (Regex("^[0-9.]+$").matches(path)) return false
     val base = path.substringAfterLast('/').lowercase()
     val ext = base.substringAfterLast('.', "")
-    val knownExt = ext.isNotBlank() && ext in TEXT_EXTENSIONS
+    val knownExt = ext.isNotBlank() && (ext in TEXT_EXTENSIONS || ext in IMAGE_PATH_EXTENSIONS)
     if (!path.contains('/')) {
         return knownExt || base in TEXT_BARE_NAMES
     }
@@ -189,8 +189,8 @@ internal fun decodeFileLink(uri: String): String? {
     }.getOrNull()
 }
 
-private val inlineCode = Regex("(?<![`\\[])`([^`\\n]{2,260})`(?!`)")
-private val barePath = Regex("(?<![\\w/\\[(.\\-~])((?:~|\\.{1,2})?/(?:[\\w.\\-@]+/)+[\\w.\\-@]+\\.[A-Za-z0-9]{1,10}(?::\\d+(?::\\d+)?)?)")
+private val inlineCode = Regex("(?<![`\\[])`([^`\\n]{2,512})`(?!`)")
+private val barePath = Regex("(?<![\\w/\\[(.\\-~])((?:~|\\.{1,2})?/(?:[\\p{L}\\p{N}._\\-@]+/)+[\\p{L}\\p{N}._\\-@]+\\.[A-Za-z0-9]{1,10}(?::\\d+(?::\\d+)?)?)")
 
 /**
  * Turns file paths mentioned in an agent reply into tappable links handled by

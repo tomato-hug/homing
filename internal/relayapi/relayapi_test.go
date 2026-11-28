@@ -926,3 +926,39 @@ func TestPreToolUseAskUserQuestionCapturesStructuredOptionsAndDedupsNotification
 		t.Fatalf("expected 1 structured needs_input event, got %+v", events)
 	}
 }
+
+func TestCapabilityFileServesTrustedCloudRPCWithNonPrivateRemoteAddr(t *testing.T) {
+	relay := newTestRelay(t, nil)
+	cwd := demoCwd(t)
+	pngBytes := []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4")
+	imgPath := filepath.Join(cwd, "pelican-test.png")
+	if err := os.WriteFile(imgPath, pngBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	atts := filepaths.ManagerFor(relay.deps.DataDir).Build("![pelican]("+imgPath+")", cwd)
+	if len(atts) != 1 || atts[0].URL == "" {
+		t.Fatalf("expected 1 attachment, got %+v", atts)
+	}
+
+	// Untrusted request with non-private RFC5737 RemoteAddr must still be rejected with 403.
+	untrustedReq := httptest.NewRequest(http.MethodGet, atts[0].URL, nil)
+	untrustedRec := httptest.NewRecorder()
+	relay.mux.ServeHTTP(untrustedRec, untrustedReq)
+	if untrustedRec.Code != http.StatusForbidden {
+		t.Fatalf("untrusted non-LAN status=%d, want 403", untrustedRec.Code)
+	}
+
+	// Trusted encrypted cloud RPC request must succeed even with RemoteAddr=192.0.2.1:1234.
+	trustedReq := api.WithTrustedLocalRPC(httptest.NewRequest(http.MethodGet, atts[0].URL, nil))
+	trustedRec := httptest.NewRecorder()
+	relay.mux.ServeHTTP(trustedRec, trustedReq)
+	if trustedRec.Code != http.StatusOK {
+		t.Fatalf("trusted cloud RPC status=%d body=%s, want 200", trustedRec.Code, trustedRec.Body.String())
+	}
+	if ct := trustedRec.Header().Get("Content-Type"); !strings.Contains(ct, "image/png") {
+		t.Fatalf("content-type=%q, want image/png", ct)
+	}
+	if !bytes.Equal(trustedRec.Body.Bytes(), pngBytes) {
+		t.Fatalf("body mismatch: got %d bytes, want %d bytes", trustedRec.Body.Len(), len(pngBytes))
+	}
+}
